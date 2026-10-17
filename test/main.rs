@@ -3120,6 +3120,7 @@ custom doc
     let stdout = install(&[]);
     let stage = project.dir.join("stage");
     assert_contains(&stdout, &format!("INSTALL {}\n", stage.join("bin/app").display()));
+    assert!(stdout.ends_with(&format!("\ninstalled 3 files in {}\n", stage.display())), "{stdout}");
     assert_eq!(mode(&stage.join("bin/app")), 0o755);
     assert_eq!(std::fs::read_to_string(stage.join("share/doc/app/b.txt")).unwrap(), "b\n");
     assert_eq!(mode(&stage.join("share/doc/app/a.txt")), 0o600);
@@ -3129,4 +3130,203 @@ custom doc
     install(&["other"]);
     install(&["other"]);
     assert_eq!(mode(&project.dir.join("other/bin/app")), 0o755);
+}
+
+#[test]
+fn install_proxy() {
+    let project = Project::new("install-proxy", &[
+        ("Jig", "\
+crate app 'app.rs'
+    crate-type 'bin'
+    install
+custom doc
+    output 'doc.txt'
+    command 'sh' '-c' 'echo doc > \"$1\"' 'sh' output
+    install
+"),
+        ("app.rs", "fn main() { println!(\"one {:?}\", std::env::args().skip(1).collect::<Vec<_>>()); }\n"),
+    ]);
+    project.configure().ok();
+    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8(output.stdout).unwrap().ends_with("\ninstalled 1 wrapper and 1 link in stage\n"));
+    let stage = project.dir.join("stage");
+    // a program is a wrapper, which runs it with its arguments, from any directory, with only its output on stdout
+    let run_with_stderr = || {
+        let output = Command::new(stage.join("bin/app")).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        (String::from_utf8(output.stdout).unwrap(), stderr)
+    };
+    let run = || run_with_stderr().0;
+    // it is up to date, so it is run without a diagnostic
+    assert_eq!(run_with_stderr(), ("one [\"a b\"]\n".into(), String::new()));
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(stage.join("bin/app")).unwrap().permissions().mode() & 0o7777, 0o755);
+    // which builds it again when it changes, with a warning
+    std::fs::write(project.dir.join("app.rs"), "fn main() { println!(\"two\"); }\n").unwrap();
+    let (stdout, stderr) = run_with_stderr();
+    assert_eq!(stdout, "two\n");
+    let host = project.host();
+    assert_eq!(stderr, format!(
+        "warning[proxy-build]: building \"{host}/app\"\n",
+    ));
+    // as is a change to the configuration alone, before what configuring reports
+    let jig = std::fs::read_to_string(project.dir.join("Jig")).unwrap();
+    std::fs::write(project.dir.join("Jig"), format!("{jig}log note 'configured'\n    quiet\n")).unwrap();
+    let (stdout, stderr) = run_with_stderr();
+    assert_eq!(stdout, "two\n");
+    assert!(stderr.starts_with(&format!(
+        "warning[proxy-build]: regenerating the configuration and building \"{host}/app\"\nnote: configured\n",
+    )), "{stderr}");
+    assert_eq!(run_with_stderr(), ("two\n".into(), String::new()));
+    // any other file is a link to the output
+    let doc = stage.join("share/doc.txt");
+    assert_eq!(std::fs::read_link(&doc).unwrap(), project.dir.join("build/doc.txt"));
+    // installing without `--proxy` replaces the wrapper and the link with copies
+    let output = Command::new(configure_path()).args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    assert!(!std::fs::symlink_metadata(&doc).unwrap().is_symlink());
+    assert_eq!(run(), "two\n");
+}
+
+#[test]
+fn install_nothing() {
+    let project = Project::new("install-nothing", &[("Jig", "crate util 'util.rs'\n"), ("util.rs", "")]);
+    project.configure().ok();
+    let output = Command::new(configure_path()).arg("install").current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.ends_with("\nnothing to install\n"), "{stdout}");
+}
+
+#[test]
+fn proxy_build_severity() {
+    let project = Project::new("proxy-build-severity", &[
+        ("Jig", "\
+set diagnostic/proxy-build 'error'
+crate app 'app.rs'
+    crate-type 'bin'
+    install
+"),
+        ("app.rs", "fn main() { println!(\"one\"); }\n"),
+    ]);
+    project.configure().ok();
+    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let run = || Command::new(project.dir.join("stage/bin/app")).output().unwrap();
+    // as an error, an out of date program is neither built nor run
+    std::fs::write(project.dir.join("app.rs"), "fn main() { println!(\"two\"); }\n").unwrap();
+    let output = run();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "");
+    assert_contains(&stderr, "error[proxy-build]: ");
+    assert_contains(&stderr, "not building or running the program");
+    // as `allow`, it is built without one
+    let jig = std::fs::read_to_string(project.dir.join("Jig")).unwrap();
+    std::fs::write(project.dir.join("Jig"), jig.replace("'error'", "'allow'")).unwrap();
+    project.configure().ok();
+    let output = run();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "two\n");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+#[test]
+fn proxy_reinstalls_itself() {
+    let tool = |output: &str, mode: &str| format!("\
+custom tool
+    output '{output}'
+    command 'sh' '-c' 'printf \"#!/bin/sh\\necho tool \\\"\\$*\\\"\\n\" > \"$1\"; chmod +x \"$1\"' 'sh' output
+    install
+    install-dir 'bin'
+    install-mode {mode}
+");
+    let project = Project::new("proxy-reinstall", &[("Jig", &tool("tool", "0o755"))]);
+    project.configure().ok();
+    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let wrapper = project.dir.join("stage/bin/tool");
+    let run = || {
+        let output = Command::new(&wrapper).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), String::from_utf8(output.stdout).unwrap(), stderr)
+    };
+    let script = || std::fs::read_to_string(&wrapper).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mode = || std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o7777;
+    let installed = script();
+    let (success, stdout, stderr) = run();
+    assert!(success, "{stderr}");
+    assert_eq!(stdout, "tool a b\n");
+    // an up to date wrapper is left as it is
+    assert_eq!(script(), installed);
+
+    // when the program moves, the wrapper is reinstalled, then run again, which runs the program once
+    std::fs::write(project.dir.join("Jig"), tool("v2/tool", "0o700")).unwrap();
+    let (success, stdout, stderr) = run();
+    assert!(success, "{stderr}");
+    assert_eq!(stdout, "tool a b\n");
+    assert_contains(&stderr, "warning[proxy-build]: ");
+    assert_contains(&script(), "/build/v2/tool");
+    assert_eq!(mode(), 0o700);
+    // and is then up to date
+    let reinstalled = script();
+    let (success, _, stderr) = run();
+    assert!(success);
+    assert_eq!(stderr, "");
+    assert_eq!(script(), reinstalled);
+
+    // as it is when the build directory changes
+    std::fs::write(project.dir.join("Jig"), format!("set build-dir 'out'\n{}", tool("v2/tool", "0o700"))).unwrap();
+    let (success, stdout, stderr) = run();
+    assert!(success, "{stderr}");
+    assert_eq!(stdout, "tool a b\n");
+    assert_contains(&script(), "/out/v2/tool");
+
+    // a wrapper which the project no longer installs fails
+    std::fs::write(project.dir.join("Jig"), tool("v2/tool", "0o700").replace("    install\n", "")).unwrap();
+    let (success, stdout, stderr) = run();
+    assert!(!success);
+    assert_eq!(stdout, "");
+    assert_contains(&stderr, &format!("no program is installed at {wrapper:?}"));
+}
+
+#[test]
+fn build_dir_change() {
+    let project = Project::new("build-dir-change", &[
+        ("Jig", "\
+custom data
+    command 'sh' '-c' 'echo data > \"$1\"' 'sh' output
+    default
+test passes
+    input data
+    command 'true'
+"),
+    ]);
+    project.configure().ok();
+    let jig = |args: &[&str]| {
+        let output = Command::new(configure_path()).args(args).current_dir(&project.dir).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{args:?} failed:\n{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+    };
+    jig(&["build"]);
+    assert!(project.dir.join("build/data").is_file());
+    // changing `build-dir` regenerates `build.ninja` in the new build directory, where the build then runs
+    let config = std::fs::read_to_string(project.dir.join("Jig")).unwrap();
+    std::fs::write(project.dir.join("Jig"), format!("set build-dir 'out'\n{config}")).unwrap();
+    jig(&["build", "custom/data"]);
+    assert!(project.dir.join("out/data").is_file());
+    assert_contains(&std::fs::read_to_string(project.dir.join("out/build.ninja")).unwrap(), "\nbuild custom/data: phony data\n");
+    // the previous build directory has a stub, which is up to date for ninja
+    let stub = std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap();
+    assert_contains(&stub, "`build-dir` is now \"out\"");
+    let ninja = Command::new("ninja").current_dir(project.dir.join("build")).output().unwrap();
+    assert!(ninja.status.success());
+    // and changing it back regenerates it there again
+    std::fs::write(project.dir.join("Jig"), config).unwrap();
+    jig(&["test"]);
+    assert_contains(&std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap(), "\nbuild test/passes: phony data\n");
+    assert_contains(&std::fs::read_to_string(project.dir.join("out/build.ninja")).unwrap(), "`build-dir` is now \"build\"");
 }

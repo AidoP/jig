@@ -155,6 +155,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "invalid-crate-name",
     "invalid-install-mode",
     "install-conflict",
+    "proxy-build",
     "unknown-target",
     "mismatched-type",
 ];
@@ -340,6 +341,13 @@ pub enum Message {
     },
     /// The value of an `install-mode` attribute, which is not a permission.
     InvalidInstallMode(String),
+    /// A program which a wrapper installed by `jig install --proxy` builds, as it or the configuration is out of date,
+    /// before running it. It is reported by `jig build --proxy`, with the severity recorded when configuring.
+    ProxyBuild {
+        program: String,
+        /// Whether the configuration is out of date, which is regenerated first.
+        configuration: bool,
+    },
     /// A file which is installed at the same destination, relative to the prefix, as another.
     InstallConflict {
         path: String,
@@ -471,6 +479,10 @@ impl core::fmt::Display for Message {
             Self::InvalidInstallMode(mode) => {
                 write!(f, "invalid install mode {mode}, which must be permissions from 0 to 0o7777")
             },
+            Self::ProxyBuild { program, configuration: false } => write!(f, "building {program}"),
+            Self::ProxyBuild { program, configuration: true } => {
+                write!(f, "regenerating the configuration and building {program}")
+            },
             Self::InstallConflict { path, item, name, other_item, other_name, .. } => write!(
                 f,
                 "the {item} {name:?} installs {path:?}, which the {other_item} {other_name:?} also installs",
@@ -595,6 +607,7 @@ impl Message {
             Self::InvalidCrateName { .. } => "invalid-crate-name",
             Self::InvalidInstallMode(_) => "invalid-install-mode",
             Self::InstallConflict { .. } => "install-conflict",
+            Self::ProxyBuild { .. } => "proxy-build",
             Self::UnknownTarget { .. } => "unknown-target",
             Self::AvailableTargets { .. } => "available-targets",
             Self::MismatchedType { .. } => "mismatched-type",
@@ -608,7 +621,7 @@ impl Message {
 }
 
 /// Returns the severity a diagnostic can be overridden to, as the value of its `diagnostic/<id>` property.
-pub(super) fn severity_override(name: &str) -> Option<Severity> {
+pub fn severity_override(name: &str) -> Option<Severity> {
     match name {
         "error" => Some(Severity::Error),
         "warning" => Some(Severity::Warning),
@@ -643,6 +656,11 @@ impl Project {
             }
         }
         self.overridden = self.diagnostics.len();
+    }
+    /// Returns the severity of a diagnostic which is reported after configuring, such as while building, which is
+    /// set by its property where the configuration ends, or `default`.
+    pub fn deferred_severity(&self, id: &str, default: Severity) -> Severity {
+        self.overridden_severity(id).unwrap_or(default)
     }
     /// Returns the severity which the property of a diagnostic sets, if it is set.
     fn overridden_severity(&self, id: &str) -> Option<Severity> {

@@ -22,12 +22,26 @@ targets to build, which are relative to the build directory, or the names `custo
 
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
 builds as `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
-`install-mode` as its permissions. The prefix is relative to the working directory, and is the `install-prefix`
-property, relative to the project root, without one.
+`install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
+directory, and is the `install-prefix` property, relative to the project root, without one.
+
+With `--proxy`, a program, which is a binary crate or the output of a custom command with an executable `install-mode`,
+is installed as a wrapper which runs `jig build --proxy <prefix> <wrapper>`, then runs the program with the wrapper's
+arguments, so that it is rebuilt when it is out of date. Any other file is installed as a symbolic link to its output.
+The wrapper runs the `jig` which installed it, writing the build's output to stderr.
+
+`jig build --proxy` brings the configuration up to date, finds the program installed at the wrapper in the prefix, and
+builds it with ninja's `--quiet`, which needs ninja 1.11 or later. If the configuration or the program is out of date,
+it first reports the `proxy-build` warning, before any diagnostics from configuring. Its severity is that of
+`diagnostic/proxy-build` at the end of the configuration when it was last generated, where `'error'` fails without
+configuring, building or running the program, and `'allow'` hides it. Then, if the wrapper would be
+installed differently, such as when the program's output, its `install-mode` or `jig` has changed, the wrapper is
+reinstalled and run again in place of the program. A wrapper whose program the project no longer installs fails.
 
 ```
 ./build/bootstrap/jig install
 ./build/bootstrap/jig install stage
+./build/bootstrap/jig install --proxy ~/.local
 ```
 
 Ninja runs in the build directory, so paths in `build.ninja` within the build directory are relative to it, and others
@@ -415,7 +429,10 @@ target bluemetal-riscv64
 
 - `sysroot`: the sysroot of the Rust toolchain, as printed by `rustc --print=sysroot`
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
-  once it is used, such as by a crate or the outputs of a custom command, so it is set before them
+  once it is used, such as by a crate or the outputs of a custom command, so it is set before them. When it changes,
+  `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to date, and
+  `jig build`, `jig check`, `jig test` and `jig install` regenerate `build.ninja` before running ninja, so that they run
+  it in the new build directory. The rest of the previous build directory is kept
 - `target`: the target triple for crates without a `target` attribute, initially the host
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default

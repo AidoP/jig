@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::Project;
+use super::{Project, rust};
 use super::customs::CustomKind;
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::syntax::{Parser, Span};
@@ -41,6 +41,8 @@ pub struct Installed {
     /// The directory it is installed in, relative to the prefix unless it is absolute.
     pub dir: String,
     pub mode: u32,
+    /// Whether the file is a program, which `jig install --proxy` installs a wrapper for, rather than a link.
+    pub program: bool,
     item: Item,
     /// The name of the crate, with its target, or the custom command.
     name: String,
@@ -99,6 +101,7 @@ impl Project {
                     path: c.output(),
                     dir: c.install.dir.clone(),
                     mode: c.install.mode,
+                    program: c.kind == rust::Kind::Bin,
                     item: Item::Crate,
                     name: format!("{}/{}", c.target, c.name),
                     span: c.name_span,
@@ -117,6 +120,8 @@ impl Project {
                     path: path.clone(),
                     dir: install.dir.clone(),
                     mode: install.mode,
+                    // the output of a custom command is taken to be a program if it is installed as one
+                    program: install.mode & 0o111 != 0,
                     item: Item::CustomCommand,
                     name: custom.name.clone(),
                     span: custom.name_span,

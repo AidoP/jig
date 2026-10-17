@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::configured::Configured;
+use crate::configured::{Configured, Output};
 use crate::generate::Unit;
 
 /// Returns the diagnostics to replay for a flycheck of a unit: its own, then those of the units it depends on, directly
@@ -30,7 +30,7 @@ pub fn replayed(unit: &Unit, units: &[Unit]) -> Vec<PathBuf> {
 /// are shown even when nothing needed checking. Problems are reported on stderr, which rust-analyzer ignores, as is the
 /// exit status.
 pub fn check(label: &str) {
-    let project = match Configured::find() {
+    let project = match Configured::find(Output::Stderr) {
         Ok(project) => project,
         Err(error) => {
             eprintln!("{error}");

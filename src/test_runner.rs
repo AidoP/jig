@@ -1,14 +1,14 @@
 //! `jig test`, which runs the tests recorded in the database.
 
 use crate::Error;
-use crate::configured::Configured;
+use crate::configured::{Configured, Output};
 
 /// Run tests, or all of them if no names are given, without evaluating the configuration.
 ///
 /// What the tests need is built by ninja first, then each is run in turn from the project root with its output captured,
 /// which is shown if it fails.
 pub fn test(names: &[String]) -> Result<(), Error> {
-    let project = Configured::find()?;
+    let project = Configured::find(Output::Stdout)?;
     let targets: Vec<_> = if names.is_empty() {
         vec!["test".to_string()]
     } else {

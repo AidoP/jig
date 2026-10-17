@@ -5,10 +5,11 @@
 //! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
 //! When read, its contents borrow from its bytes.
 //!
-//! The format is the magic bytes and a format version, then the build directory, the missing paths and the install
-//! prefix, followed by each section: the flychecks, the tests, then the installed files. A section is the number of its
-//! records followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8
-//! bytes, and a list of strings is their number followed by each string.
+//! The format is the magic bytes and a format version, then the build directory, the missing paths, the install prefix
+//! and the severity of `proxy-build`, followed by each section: the flychecks, the tests, then the installed files. A
+//! section is the number of its records followed by each record. Numbers are little-endian `u32`, strings are their
+//! length followed by their UTF-8 bytes, a list of strings is their number followed by each string, and a `bool` is a
+//! number which is `0` or `1`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 4;
+const VERSION: u32 = 6;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -27,6 +28,8 @@ pub struct Database<'a> {
     pub missing: Vec<&'a str>,
     /// The directory `jig install` installs in by default, relative to the project root unless it is absolute.
     pub install_prefix: &'a str,
+    /// The severity of the `proxy-build` diagnostic, as the value of its property, which `jig build --proxy` reports.
+    pub proxy_build: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub installs: Vec<Install<'a>>,
@@ -53,10 +56,14 @@ pub struct Test<'a> {
 pub struct Install<'a> {
     /// The file, relative to the project root.
     pub path: &'a str,
+    /// The ninja target which builds the file, relative to the build directory.
+    pub target: &'a str,
     /// The directory it is installed in, relative to the prefix unless it is absolute.
     pub dir: &'a str,
     /// The permissions of the installed file.
     pub mode: u32,
+    /// Whether the file is a program, which `jig install --proxy` installs a wrapper for.
+    pub program: bool,
 }
 
 pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
@@ -65,6 +72,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.build_dir)?;
     write_strs(w, &database.missing)?;
     write_str(w, database.install_prefix)?;
+    write_str(w, database.proxy_build)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -78,8 +86,10 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_u32(w, database.installs.len())?;
     for install in &database.installs {
         write_str(w, install.path)?;
+        write_str(w, install.target)?;
         write_str(w, install.dir)?;
         write_u32(w, install.mode)?;
+        write_u32(w, install.program as u32)?;
     }
     Ok(())
 }
@@ -90,8 +100,13 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
     if r.take(MAGIC.len())? != MAGIC || r.u32()? != VERSION {
         return Err(invalid());
     }
-    let mut database =
-        Database { build_dir: r.str()?, missing: r.strs()?, install_prefix: r.str()?, ..Default::default() };
+    let mut database = Database {
+        build_dir: r.str()?,
+        missing: r.strs()?,
+        install_prefix: r.str()?,
+        proxy_build: r.str()?,
+        ..Default::default()
+    };
     for _ in 0..r.u32()? {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.strs()? });
     }
@@ -99,7 +114,13 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         database.tests.push(Test { name: r.str()?, command: r.strs()? });
     }
     for _ in 0..r.u32()? {
-        database.installs.push(Install { path: r.str()?, dir: r.str()?, mode: r.u32()? });
+        database.installs.push(Install {
+            path: r.str()?,
+            target: r.str()?,
+            dir: r.str()?,
+            mode: r.u32()?,
+            program: r.bool()?,
+        });
     }
     Ok(database)
 }
@@ -150,6 +171,13 @@ impl<'a> Reader<'a> {
         let len = self.u32()? as usize;
         std::str::from_utf8(self.take(len)?).map_err(|_| invalid())
     }
+    fn bool(&mut self) -> std::io::Result<bool> {
+        match self.u32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(invalid()),
+        }
+    }
     fn strs(&mut self) -> std::io::Result<Vec<&'a str>> {
         let len = self.u32()?;
         (0..len).map(|_| self.str()).collect()
@@ -166,12 +194,16 @@ mod tests {
             build_dir: "build",
             missing: vec!["Debug"],
             install_prefix: "/usr/local",
+            proxy_build: "warning",
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: vec!["a.json", "b é.json"] },
                 Flycheck { label: "empty", diagnostics: vec![] },
             ],
             tests: vec![Test { name: "unit", command: vec!["./run", "a b"] }],
-            installs: vec![Install { path: "build/app", dir: "bin", mode: 0o755 }],
+            installs: vec![
+                Install { path: "build/app", target: "app", dir: "bin", mode: 0o755, program: true },
+                Install { path: "build/data", target: "custom/data", dir: "share", mode: 0o644, program: false },
+            ],
         };
         let mut bytes = Vec::new();
         write(&mut bytes, &database).unwrap();

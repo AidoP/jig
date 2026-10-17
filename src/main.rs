@@ -15,7 +15,7 @@ fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os();
     let program = args.next().unwrap_or("jig".into());
     match run(args) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             eprintln!("{}: {error}", program.display());
             std::process::ExitCode::FAILURE
@@ -31,13 +31,19 @@ commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
                          directory
     build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
+    build --proxy <prefix> <wrapper>
+                         build the program of a wrapper installed by `install --proxy`, reporting `proxy-build` if
+                         it is out of date, and reinstall the wrapper if it has changed
     check <label>        run the flycheck of rust-analyzer for a crate, printing its saved diagnostics
     test [<name> ...]    build and run the tests, or only those named
-    install [<prefix>]   build and install the files with `install` in a prefix, the `install-prefix` property by
-                         default
+    install [--proxy] [<prefix>]
+                         build and install the files with `install` in a prefix, the `install-prefix` property by
+                         default, or with `--proxy`, install wrappers which build and run programs, and links to
+                         other files
     help                 show this message";
 
-fn run(mut args: std::env::ArgsOs) -> Result<(), Error> {
+fn run(mut args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
+    use std::process::ExitCode;
     let Some(command) = args.next() else {
         return Err(Error::MissingArg("command"));
     };
@@ -47,14 +53,25 @@ fn run(mut args: std::env::ArgsOs) -> Result<(), Error> {
             if let Some(extra) = args.next() {
                 return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
             }
-            generate(input)
+            generate(input).map(|()| ExitCode::SUCCESS)
         },
         "build" => {
-            let project = configured::Configured::find()?;
+            let mut args = args.peekable();
+            if args.next_if(|arg| arg == "--proxy").is_some() {
+                let (Some(prefix), Some(wrapper)) = (args.next(), args.next()) else {
+                    return Err(Error::MissingArg("wrapper"));
+                };
+                if let Some(extra) = args.next() {
+                    return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
+                }
+                let reinstalled = install::build_proxy(prefix.as_ref(), wrapper.as_ref())?;
+                return Ok(if reinstalled { ExitCode::from(install::REINSTALLED) } else { ExitCode::SUCCESS });
+            }
+            let project = configured::Configured::find(configured::Output::Stdout)?;
             let mut ninja = project.ninja();
             ninja.args(args);
             match ninja.status() {
-                Ok(status) if status.success() => Ok(()),
+                Ok(status) if status.success() => Ok(ExitCode::SUCCESS),
                 Ok(_) => Err(Error::BuildFailed),
                 Err(error) => Err(Error::Exec(ninja, error)),
             }
@@ -67,22 +84,29 @@ fn run(mut args: std::env::ArgsOs) -> Result<(), Error> {
                 return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
             }
             check::check(&label.to_string_lossy());
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         },
         "test" => {
             let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
-            test_runner::test(&names)
+            test_runner::test(&names).map(|()| ExitCode::SUCCESS)
         },
         "install" => {
-            let prefix = args.next().map(PathBuf::from);
-            if let Some(extra) = args.next() {
-                return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
+            let mut proxy = false;
+            let mut prefix = None;
+            for arg in args {
+                if arg == "--proxy" {
+                    proxy = true;
+                } else if prefix.is_none() {
+                    prefix = Some(PathBuf::from(arg));
+                } else {
+                    return Err(Error::ExtraArg(arg.to_string_lossy().into_owned()));
+                }
             }
-            install::install(prefix)
+            install::install(prefix, proxy).map(|()| ExitCode::SUCCESS)
         },
         "help" => {
             println!("{USAGE}");
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         },
         command => Err(Error::UnknownCommand(command.into())),
     }
@@ -201,6 +225,8 @@ enum Error {
     Install(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     NotConfigured,
     BuildFailed,
+    ProxyOutOfDate,
+    ProxyNotInstalled(PathBuf),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -237,6 +263,11 @@ impl core::fmt::Display for Error {
                 database::PATH,
             ),
             Self::BuildFailed => write!(f, "the build failed"),
+            Self::ProxyNotInstalled(wrapper) => write!(
+                f,
+                "no program is installed at {wrapper:?}",
+            ),
+            Self::ProxyOutOfDate => write!(f, "not building or running the program"),
         }
     }
 }

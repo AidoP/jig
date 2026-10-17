@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
-use crate::project::{CustomKind, Installed, Project, Target, TargetKind};
+use crate::project::{CustomKind, Installed, Project, Severity, Target, TargetKind};
 use crate::{Error, check, database, rust_analyzer, target_spec};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -31,7 +31,8 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     let units = units(&project, &crates, sysroot, &build_dir);
     write_build_ninja(&project, &crates, &units, &installed, input, &at, &build_dir)?;
     write_rust_project(sysroot, &units)?;
-    write_database(&project, &units, &installed, &build_dir)
+    retire_build_dir(&build_dir)?;
+    write_database(&project, &units, &installed, &at, &build_dir)
 }
 
 /// Rebases the paths of a project, relative to its root, for ninja, which runs in the build directory.
@@ -449,15 +450,53 @@ fn write_rust_project(sysroot: &str, units: &[Unit]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Replace `build.ninja` in the previous build directory, from the database, if `build-dir` has changed, with a stub
+/// which ninja finds is up to date, so that ninja running there, which is regenerating it, stops.
+///
+/// `jig` then finds the new build directory from the database. The rest of the previous build directory is kept.
+fn retire_build_dir(build_dir: &Path) -> Result<(), Error> {
+    let Ok(bytes) = std::fs::read(database::PATH) else {
+        return Ok(());
+    };
+    let Ok(previous) = database::read(&bytes) else {
+        return Ok(());
+    };
+    let previous = Path::new(previous.build_dir);
+    // the paths are relative to the project root, which is the working directory, unless they are absolute
+    let absolute = |path: &Path| normalize(&std::path::absolute(path).unwrap_or_else(|_| path.into()));
+    if absolute(previous) == absolute(build_dir) {
+        return Ok(());
+    }
+    let path = previous.join("build.ninja");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let stub = format!(
+        "# `build-dir` is now {:?}, where `jig generate` writes `build.ninja`\nbuild build.ninja: phony\n",
+        build_dir.display().to_string(),
+    );
+    if let Err(error) = std::fs::write(&path, stub) {
+        return Err(Error::Write(path, error));
+    }
+    Ok(())
+}
+
 /// The command of a test, which the database borrows.
 struct TestCommand<'a> {
     name: &'a str,
     command: Vec<String>,
 }
 
-fn write_database(project: &Project, units: &[Unit], installed: &[Installed], build_dir: &Path) -> Result<(), Error> {
+fn write_database(
+    project: &Project,
+    units: &[Unit],
+    installed: &[Installed],
+    at: &Rebase,
+    build_dir: &Path,
+) -> Result<(), Error> {
     let build_dir = build_dir.display().to_string();
     let install_prefix = project.install_prefix();
+    let proxy_build = project.deferred_severity("proxy-build", Severity::Warning).to_string();
     let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
     let mut replayed = Vec::new();
@@ -477,8 +516,14 @@ fn write_database(project: &Project, units: &[Unit], installed: &[Installed], bu
 
     let missing = missing.iter().map(String::as_str).collect();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
-    let mut database =
-        database::Database { build_dir: &build_dir, missing, install_prefix: &install_prefix, ..Default::default() };
+    let install_targets: Vec<_> = installed.iter().map(|file| at.path(&file.path).display().to_string()).collect();
+    let mut database = database::Database {
+        build_dir: &build_dir,
+        missing,
+        install_prefix: &install_prefix,
+        proxy_build: &proxy_build,
+        ..Default::default()
+    };
     for (unit, paths) in units.iter().zip(&replayed) {
         let diagnostics = paths.iter().map(String::as_str).collect();
         database.flychecks.push(database::Flycheck { label: &unit.label, diagnostics });
@@ -487,8 +532,9 @@ fn write_database(project: &Project, units: &[Unit], installed: &[Installed], bu
         let command = test.command.iter().map(String::as_str).collect();
         database.tests.push(database::Test { name: test.name, command });
     }
-    for (file, path) in installed.iter().zip(&install_paths) {
-        database.installs.push(database::Install { path, dir: &file.dir, mode: file.mode });
+    for ((file, path), target) in installed.iter().zip(&install_paths).zip(&install_targets) {
+        let (dir, mode, program) = (&file.dir, file.mode, file.program);
+        database.installs.push(database::Install { path, target, dir, mode, program });
     }
     let mut bytes = Vec::new();
     let _ = database::write(&mut bytes, &database);
@@ -535,7 +581,7 @@ fn ninja_quote(s: &str) -> String {
 }
 
 /// Quote a string as a single argument for `sh`.
-fn shell_quote(s: &str) -> String {
+pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

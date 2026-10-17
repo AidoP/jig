@@ -17,7 +17,7 @@ mod targets;
 mod value;
 
 pub use customs::CustomKind;
-pub use diagnostic::{Diagnostic, Message, Severity};
+pub use diagnostic::{Diagnostic, Message, Severity, severity_override};
 pub use install::Installed;
 pub use syntax::Span;
 pub use targets::{Field, Target, TargetKind};
