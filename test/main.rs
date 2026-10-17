@@ -32,9 +32,18 @@ impl Project {
         self.configure_with(&[])
     }
     /// Run `configure` with environment variables.
+    ///
+    /// rustup finds its toolchains in `HOME` unless `RUSTUP_HOME` is set, so it is kept where `HOME` is replaced.
     fn configure_with(&self, env: &[(&str, &str)]) -> Output {
         let configure = configure_path();
-        let output = Command::new(&configure)
+        let mut command = Command::new(&configure);
+        if env.iter().any(|&(name, _)| name == "HOME")
+            && std::env::var_os("RUSTUP_HOME").is_none()
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            command.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
+        }
+        let output = command
             .args(["generate", "Jig"])
             .envs(env.iter().copied())
             .current_dir(&self.dir)
