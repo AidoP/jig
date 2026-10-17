@@ -2,8 +2,8 @@
 set codegen/opt-level 3
 
 # optional development configuration
-@if exists('Dev')
-use 'Dev'
+@if exists('Jig.local')
+use 'Jig.local'
     file
 
 log note 'opt-level: {codegen/opt-level}'
