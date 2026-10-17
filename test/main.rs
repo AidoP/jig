@@ -226,10 +226,10 @@ crate core 'core.rs'
     let output = project.configure().ok();
     let mut outputs = output.outputs();
     outputs.sort();
-    assert_eq!(outputs, [
-        "riscv64gc-unknown-none-elf/libcore.rlib".to_string(),
-        format!("{host}/libcore.rlib"),
-    ]);
+    // in the order of their names, as the host target may come before the other
+    let mut expected = ["riscv64gc-unknown-none-elf/libcore.rlib".to_string(), format!("{host}/libcore.rlib")];
+    expected.sort();
+    assert_eq!(outputs, expected);
 }
 
 #[test]
