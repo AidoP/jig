@@ -1,11 +1,13 @@
 # defaults
 set codegen/opt-level 3
 
-@if exists('Debug')
-use 'Debug'
+# optional development configuration
+@if exists('Dev')
+use 'Dev'
     file
 
 log note 'opt-level: {codegen/opt-level}'
+    quiet
 
 crate jig 'src/main.rs'
     crate-type 'bin'
