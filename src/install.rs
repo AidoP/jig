@@ -113,11 +113,20 @@ fn proxy_script(root: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> st
          \x20   *) exit 1 ;;\n\
          esac\n",
         root = quote(root),
-        jig = quote(&std::env::current_exe()?),
+        jig = quote(&jig()?),
         prefix = quote(prefix),
         wrapper = quote(wrapper),
         source = quote(source),
     ))
+}
+
+/// Returns the path of `jig` for a wrapper to run, which is the path it was run by if that is absolute, as a wrapper runs
+/// it, rather than the path of the running executable, which `jig build --proxy` may have replaced by building it.
+fn jig() -> std::io::Result<PathBuf> {
+    match std::env::args_os().next() {
+        Some(path) if Path::new(&path).is_absolute() => Ok(path.into()),
+        _ => std::env::current_exe(),
+    }
 }
 
 /// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written.

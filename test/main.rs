@@ -3341,3 +3341,37 @@ test passes
     assert_contains(&std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap(), "\nbuild test/passes: phony data\n");
     assert_contains(&std::fs::read_to_string(project.dir.join("out/build.ninja")).unwrap(), "`build-dir` is now \"build\"");
 }
+
+#[test]
+fn proxy_rebuilds_its_jig() {
+    // the program is the `jig` the wrapper runs, which is replaced while it builds it, as when `jig` is built by itself
+    let configure = configure_path();
+    let quoted = format!("'{}'", configure.display());
+    let project = Project::new("proxy-jig", &[
+        ("Jig", &format!("\
+custom jig
+    input 'stamp' {quoted}
+    command 'sh' '-c' 'cp \"$1\" \"$2.tmp\" && mv \"$2.tmp\" \"$2\"' 'sh' {quoted} output
+    install
+    install-dir 'bin'
+    install-mode 0o755
+")),
+        ("stamp", ""),
+    ]);
+    project.configure().ok();
+    let built = project.dir.join("build/jig");
+    let output = Command::new(&configure).args(["build", "custom/jig"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    let output = Command::new(&built).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
+    let wrapper = project.dir.join("stage/bin/jig");
+    let installed = std::fs::read_to_string(&wrapper).unwrap();
+    std::fs::write(project.dir.join("stamp"), "changed").unwrap();
+    let output = Command::new(&wrapper).arg("help").output().unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{stderr}");
+    assert_contains(&String::from_utf8(output.stdout).unwrap(), "usage: jig");
+    assert_contains(&stderr, "warning[proxy-build]: building \"jig\"");
+    // the wrapper still runs the `jig` at its path, which has been replaced
+    assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), installed);
+}
