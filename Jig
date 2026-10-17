@@ -9,6 +9,7 @@ log note 'opt-level: {codegen/opt-level}'
 
 crate jig 'src/main.rs'
     crate-type 'bin'
+    install
     test
 
 crate integration 'test/main.rs'
