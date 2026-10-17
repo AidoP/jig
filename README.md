@@ -20,6 +20,16 @@ parents, so they can be run from anywhere in the project. `jig build` passes its
 targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test` and
 `test/<name>`. `build.ninja` regenerates itself when the configuration, or `jig`, changes.
 
+`jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
+builds as `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
+`install-mode` as its permissions. The prefix is relative to the working directory, and is the `install-prefix`
+property, relative to the project root, without one.
+
+```
+./build/bootstrap/jig install
+./build/bootstrap/jig install stage
+```
+
 Ninja runs in the build directory, so paths in `build.ninja` within the build directory are relative to it, and others
 are absolute. Custom commands, tests and `run` run from the project root, so their paths are relative to it as usual.
 
@@ -176,10 +186,10 @@ An attribute is taken with `.` after the name of a property, a custom command, a
 `data.default`, `image.input`, `{host-target}/macros.crate-type`, `macros.crate-type` or `my-kernel.runner`. The
 attributes of a property whose value is a reference are those of the crate or custom command it refers to. Those of a
 property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output` and `command`,
-as lists, and `default`, those of a test, which is looked for after the others, are `input` and `command`, those of a
-crate are `target`, `crate-type`, `path`, `output`, `builtin`, `default`, `test` and `use`, and
-those of a target are `inherit`, `test`, `runner`, `override` and its options, such as `code-model`. An attribute
-which is not set is an error.
+as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for after the
+others, are `input` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`, `builtin`, `default`,
+`test`, `use`, `install`, `install-dir` and `install-mode`, and those of a target are `inherit`, `test`, `runner`,
+`override` and its options, such as `code-model`. An attribute which is not set is an error.
 
 A list is written as expressions in `[]`, separated by `, `, such as `['-O', 'dtb']`, and its items can have any type.
 Lists can be joined with `+` and compared with `==` and `!=`. As a string, such as in a string template, the items of
@@ -304,6 +314,12 @@ A `crate` statement may be followed by indented attributes:
 - `test`: build the crate's tests with `--test` as `<build-dir>/<target>/test/<name>`, and register a test which runs
   them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for the host
   target, or a custom target with `test`, can be tested
+- `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
+  `true`
+- `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is
+  `'bin'` for a binary and `'lib'` otherwise
+- `install-mode <unsigned>`: the permissions of the installed output, such as `0o644`, which are `0o755` for a binary or
+  a procedural macro and `0o644` for a library
 
 ```
 crate core '{rust-src}/library/core/src/lib.rs'
@@ -346,6 +362,8 @@ A `custom` statement is followed by indented attributes:
   relative to the file, and the outputs are rebuilt when it changes, while any other program is found in `PATH`. A
   program which is a reference is the path of the crate or custom command's output. It is required
 - `default`: run the command when `jig build` is run without targets
+- `install <bool>`, `install-dir <str>`, `install-mode <unsigned>`: install the outputs with `jig install`, as for a
+  crate, in `'share'` with the permissions `0o644` by default
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output
@@ -399,6 +417,8 @@ target bluemetal-riscv64
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
   once it is used, such as by a crate or the outputs of a custom command, so it is set before them
 - `target`: the target triple for crates without a `target` attribute, initially the host
+- `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
+  `/usr/local` by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set

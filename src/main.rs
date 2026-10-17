@@ -4,6 +4,7 @@ mod check;
 mod configured;
 mod database;
 mod generate;
+mod install;
 mod ninja;
 mod project;
 mod rust_analyzer;
@@ -32,6 +33,8 @@ commands:
     build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
     check <label>        run the flycheck of rust-analyzer for a crate, printing its saved diagnostics
     test [<name> ...]    build and run the tests, or only those named
+    install [<prefix>]   build and install the files with `install` in a prefix, the `install-prefix` property by
+                         default
     help                 show this message";
 
 fn run(mut args: std::env::ArgsOs) -> Result<(), Error> {
@@ -70,6 +73,13 @@ fn run(mut args: std::env::ArgsOs) -> Result<(), Error> {
             let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
             test_runner::test(&names)
         },
+        "install" => {
+            let prefix = args.next().map(PathBuf::from);
+            if let Some(extra) = args.next() {
+                return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
+            }
+            install::install(prefix)
+        },
         "help" => {
             println!("{USAGE}");
             Ok(())
@@ -105,6 +115,11 @@ fn generate(input: PathBuf) -> Result<(), Error> {
             project::Property::new("build-dir".into(), project::Type::String)
                 .info("the directory of what is built, relative to the project root, which is read-only once it is used"),
             "build".into(),
+        ),
+        (
+            project::Property::new("install-prefix".into(), project::Type::String)
+                .info("the directory `jig install` installs in, unless it is given another"),
+            "/usr/local".into(),
         ),
         (
             project::Property::new("host-target".into(), project::Type::String)
@@ -183,6 +198,7 @@ enum Error {
     UnknownTest(String),
     TestsFailed(usize),
     Exec(std::process::Command, std::io::Error),
+    Install(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     NotConfigured,
     BuildFailed,
 }
@@ -212,6 +228,9 @@ impl core::fmt::Display for Error {
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
             Self::Exec(cmd, error) => write!(f, "failed to execute {cmd:?}: {error}"),
+            Self::Install(source, destination, error) => {
+                write!(f, "failed to install {source:?} as {destination:?}: {error}")
+            },
             Self::NotConfigured => write!(
                 f,
                 "no `{}` in the working directory or its parents, which `generate` writes to the project root",

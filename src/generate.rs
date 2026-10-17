@@ -1,6 +1,6 @@
 //! Generation of the files which build a project: the specifications of its custom targets, `build.ninja` and its
-//! depfile in the build directory, and `.rust-project.json` and the database, read by `jig build`, `jig check` and
-//! `jig test`, at the project root.
+//! depfile in the build directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`,
+//! `jig test` and `jig install`, at the project root.
 //!
 //! Ninja runs in the build directory, so the paths in `build.ninja` are relative to it, while the project's paths are
 //! relative to the project root.
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
-use crate::project::{CustomKind, Project, Target, TargetKind};
+use crate::project::{CustomKind, Installed, Project, Target, TargetKind};
 use crate::{Error, check, database, rust_analyzer, target_spec};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -25,12 +25,13 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     write_target_specs(&project.targets, &build_dir)?;
     write_depfile(&project, &at, &build_dir)?;
 
+    let installed = project.installed();
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     let units = units(&project, &crates, sysroot, &build_dir);
-    write_build_ninja(&project, &crates, &units, input, &at, &build_dir)?;
+    write_build_ninja(&project, &crates, &units, &installed, input, &at, &build_dir)?;
     write_rust_project(sysroot, &units)?;
-    write_database(&project, &units, &build_dir)
+    write_database(&project, &units, &installed, &build_dir)
 }
 
 /// Rebases the paths of a project, relative to its root, for ninja, which runs in the build directory.
@@ -243,6 +244,7 @@ fn write_build_ninja(
     project: &Project,
     crates: &[Crate],
     units: &[Unit],
+    installed: &[Installed],
     input: &Path,
     at: &Rebase,
     build_dir: &Path,
@@ -302,7 +304,7 @@ fn write_build_ninja(
     let mut tests = Vec::new();
     for custom in &project.customs {
         // a test is run by `jig test`, which builds its inputs and program with this target first
-        let CustomKind::Command { outputs, default } = &custom.kind else {
+        let CustomKind::Command { outputs, default, .. } = &custom.kind else {
             let phony = Path::new("test").join(&custom.name);
             let inputs = at.paths(custom.inputs(&project.runners).iter().chain(&custom.program));
             build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &as_paths(&inputs), ..Default::default() })?;
@@ -419,6 +421,9 @@ fn write_build_ninja(
 
     // builds what all of the tests need
     build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("test")], inputs: &as_paths(&tests), ..Default::default() })?;
+    // builds what `jig install` installs
+    let installed = at.paths(installed.iter().map(|file| &file.path));
+    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("install")], inputs: &as_paths(&installed), ..Default::default() })?;
 
     if !defaults.is_empty() {
         build_ninja.default(&as_paths(&defaults))?;
@@ -450,8 +455,9 @@ struct TestCommand<'a> {
     command: Vec<String>,
 }
 
-fn write_database(project: &Project, units: &[Unit], build_dir: &Path) -> Result<(), Error> {
+fn write_database(project: &Project, units: &[Unit], installed: &[Installed], build_dir: &Path) -> Result<(), Error> {
     let build_dir = build_dir.display().to_string();
+    let install_prefix = project.install_prefix();
     let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
     let mut replayed = Vec::new();
@@ -470,7 +476,9 @@ fn write_database(project: &Project, units: &[Unit], build_dir: &Path) -> Result
     }
 
     let missing = missing.iter().map(String::as_str).collect();
-    let mut database = database::Database { build_dir: &build_dir, missing, ..Default::default() };
+    let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
+    let mut database =
+        database::Database { build_dir: &build_dir, missing, install_prefix: &install_prefix, ..Default::default() };
     for (unit, paths) in units.iter().zip(&replayed) {
         let diagnostics = paths.iter().map(String::as_str).collect();
         database.flychecks.push(database::Flycheck { label: &unit.label, diagnostics });
@@ -478,6 +486,9 @@ fn write_database(project: &Project, units: &[Unit], build_dir: &Path) -> Result
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
         database.tests.push(database::Test { name: test.name, command });
+    }
+    for (file, path) in installed.iter().zip(&install_paths) {
+        database.installs.push(database::Install { path, dir: &file.dir, mode: file.mode });
     }
     let mut bytes = Vec::new();
     let _ = database::write(&mut bytes, &database);

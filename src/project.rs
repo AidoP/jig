@@ -6,6 +6,7 @@ mod customs;
 mod diagnostic;
 mod expressions;
 mod functions;
+mod install;
 mod meta;
 mod properties;
 mod references;
@@ -17,6 +18,7 @@ mod value;
 
 pub use customs::CustomKind;
 pub use diagnostic::{Diagnostic, Message, Severity};
+pub use install::Installed;
 pub use syntax::Span;
 pub use targets::{Field, Target, TargetKind};
 pub use value::{Data, Property, Type, Value};
@@ -180,6 +182,13 @@ impl Project {
         };
         self.values[value].data.coerce_string()
     }
+    /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.
+    pub fn install_prefix(&self) -> String {
+        let Some(&value) = self.values_idx.get("install-prefix") else {
+            return String::new();
+        };
+        self.values[value].data.coerce_string()
+    }
     /// Returns the keys of the crates in the order they were declared, as the crates are not kept in order.
     ///
     /// The crates declared by one statement, for several targets or with `@for`, are ordered by name and target.
@@ -199,6 +208,7 @@ impl Project {
     /// - Missing declarations for `set` statements.
     /// - Missing crates for `use` attributes.
     /// - Outputs of custom commands which overlap other outputs.
+    /// - Files which are installed at the same destination.
     pub fn check(&mut self) {
         let keys = self.crate_keys();
         for key in &keys {
@@ -259,6 +269,7 @@ impl Project {
             }
         }
         self.check_outputs();
+        self.check_installs();
         self.override_severities();
     }
 }

@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
+use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Data, Ref, Referent};
@@ -34,6 +35,8 @@ pub enum CustomKind {
         outputs: Vec<PathBuf>,
         /// Whether the outputs are built by `ninja` without targets.
         default: bool,
+        /// Where `jig install` installs the outputs, if it does.
+        install: Install,
     },
     /// A test, which has no outputs and is run by `jig test` rather than ninja.
     Test {
@@ -73,8 +76,8 @@ impl Custom {
 }
 
 impl Project {
-    /// Take a custom build command, with `input`, `output`, `command` and `default` attributes, or a test, which has
-    /// `input` and `command` attributes.
+    /// Take a custom build command, with `input`, `output`, `command`, `default` and install attributes, or a test,
+    /// which has `input` and `command` attributes.
     ///
     /// The output of a command is named after it in the build directory, unless an `output` attribute replaces it.
     /// While its attributes are evaluated, the paths of the inputs and outputs are the values of the `input` and
@@ -100,6 +103,7 @@ impl Project {
         }
         let mut command: Option<Runner> = None;
         let mut default = false;
+        let mut install = Install::data();
         // an attribute which failed has been reported, so it is not also reported as missing
         let mut failed = false;
         while parser.indent().is_some() {
@@ -124,6 +128,14 @@ impl Project {
                     self.set_local(attribute, path_refs(paths), parser.file);
                 },
                 "default" if !test => default = true,
+                "install" | "install-dir" | "install-mode" if !test => {
+                    let Some(operand) = self.parse_install_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    self.install_attribute(&mut install, attribute, operand);
+                },
                 "command" => {
                     let Some(arguments) = self.parse_command(parser) else {
                         parser.skip_line();
@@ -176,7 +188,7 @@ impl Project {
         let runner = command.unwrap_or_default();
         // the outputs are declared as a property named after the command, once it is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
-        let kind = if test { CustomKind::Test { runner: None } } else { CustomKind::Command { outputs, default } };
+        let kind = if test { CustomKind::Test { runner: None } } else { CustomKind::Command { outputs, default, install } };
         let custom = Custom { name, name_span: span, inputs, command: runner.command, program: runner.program, kind };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {

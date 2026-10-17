@@ -1,13 +1,14 @@
 //! The build database, which records what the build needs after configuring, such as the build directory, the
-//! diagnostics to replay for each flycheck label and the tests to run. It is at the project root, which the commands
+//! diagnostics to replay for each flycheck label, the tests to run and the files to install. It is at the project root, which the commands
 //! that read it find it from.
 //!
 //! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
 //! When read, its contents borrow from its bytes.
 //!
-//! The format is the magic bytes and a format version, then the build directory and the missing paths, followed by each
-//! section: the flychecks, then the tests. A section is the number of its records followed by each record. Numbers are little-endian `u32`, strings are their
-//! length followed by their UTF-8 bytes, and a list of strings is their number followed by each string.
+//! The format is the magic bytes and a format version, then the build directory, the missing paths and the install
+//! prefix, followed by each section: the flychecks, the tests, then the installed files. A section is the number of its
+//! records followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8
+//! bytes, and a list of strings is their number followed by each string.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -24,8 +25,11 @@ pub struct Database<'a> {
     /// The paths which the configuration found were missing, relative to the project root, which it is generated again
     /// once one of them exists.
     pub missing: Vec<&'a str>,
+    /// The directory `jig install` installs in by default, relative to the project root unless it is absolute.
+    pub install_prefix: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
+    pub installs: Vec<Install<'a>>,
 }
 
 /// The diagnostics to replay for a flycheck label.
@@ -44,11 +48,23 @@ pub struct Test<'a> {
     pub command: Vec<&'a str>,
 }
 
+/// A file which `jig install` installs.
+#[derive(Debug, PartialEq)]
+pub struct Install<'a> {
+    /// The file, relative to the project root.
+    pub path: &'a str,
+    /// The directory it is installed in, relative to the prefix unless it is absolute.
+    pub dir: &'a str,
+    /// The permissions of the installed file.
+    pub mode: u32,
+}
+
 pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.write_all(MAGIC)?;
     write_u32(w, VERSION)?;
     write_str(w, database.build_dir)?;
     write_strs(w, &database.missing)?;
+    write_str(w, database.install_prefix)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -59,6 +75,12 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         write_str(w, test.name)?;
         write_strs(w, &test.command)?;
     }
+    write_u32(w, database.installs.len())?;
+    for install in &database.installs {
+        write_str(w, install.path)?;
+        write_str(w, install.dir)?;
+        write_u32(w, install.mode)?;
+    }
     Ok(())
 }
 
@@ -68,12 +90,16 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
     if r.take(MAGIC.len())? != MAGIC || r.u32()? != VERSION {
         return Err(invalid());
     }
-    let mut database = Database { build_dir: r.str()?, missing: r.strs()?, ..Default::default() };
+    let mut database =
+        Database { build_dir: r.str()?, missing: r.strs()?, install_prefix: r.str()?, ..Default::default() };
     for _ in 0..r.u32()? {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.strs()? });
     }
     for _ in 0..r.u32()? {
         database.tests.push(Test { name: r.str()?, command: r.strs()? });
+    }
+    for _ in 0..r.u32()? {
+        database.installs.push(Install { path: r.str()?, dir: r.str()?, mode: r.u32()? });
     }
     Ok(database)
 }
@@ -139,11 +165,13 @@ mod tests {
         let database = Database {
             build_dir: "build",
             missing: vec!["Debug"],
+            install_prefix: "/usr/local",
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: vec!["a.json", "b é.json"] },
                 Flycheck { label: "empty", diagnostics: vec![] },
             ],
             tests: vec![Test { name: "unit", command: vec!["./run", "a b"] }],
+            installs: vec![Install { path: "build/app", dir: "bin", mode: 0o755 }],
         };
         let mut bytes = Vec::new();
         write(&mut bytes, &database).unwrap();
@@ -160,7 +188,7 @@ mod tests {
         // truncated
         let mut bytes = Vec::new();
         let tests = vec![Test { name: "x", command: vec![] }];
-        write(&mut bytes, &Database { build_dir: "", missing: vec![], flychecks: vec![], tests }).unwrap();
+        write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

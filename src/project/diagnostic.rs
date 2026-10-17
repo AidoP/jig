@@ -153,6 +153,8 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "invalid-target",
     "overlapping-output",
     "invalid-crate-name",
+    "invalid-install-mode",
+    "install-conflict",
     "unknown-target",
     "mismatched-type",
 ];
@@ -336,6 +338,17 @@ pub enum Message {
         name: String,
         character: char,
     },
+    /// The value of an `install-mode` attribute, which is not a permission.
+    InvalidInstallMode(String),
+    /// A file which is installed at the same destination, relative to the prefix, as another.
+    InstallConflict {
+        path: String,
+        item: Item,
+        name: String,
+        other_item: Item,
+        other_name: String,
+        declared: Span,
+    },
     UnknownTarget {
         target: String,
         suggestion: Option<String>,
@@ -455,6 +468,13 @@ impl core::fmt::Display for Message {
                 write!(f, "output {path:?} of the custom command overlaps {other:?}, the output of the {item} {name:?}")
             },
             Self::InvalidCrateName { name, character } => write!(f, "invalid character {character:?} in crate name {name:?}"),
+            Self::InvalidInstallMode(mode) => {
+                write!(f, "invalid install mode {mode}, which must be permissions from 0 to 0o7777")
+            },
+            Self::InstallConflict { path, item, name, other_item, other_name, .. } => write!(
+                f,
+                "the {item} {name:?} installs {path:?}, which the {other_item} {other_name:?} also installs",
+            ),
             Self::RedeclareCrate { name, target } => write!(f, "redeclaration of crate {name:?} for target {target:?}"),
             Self::UnknownTarget { target, suggestion: None } => write!(f, "unknown target {target:?}"),
             Self::UnknownTarget { target, suggestion: Some(suggestion) } => {
@@ -573,6 +593,8 @@ impl Message {
             Self::InvalidTarget { .. } => "invalid-target",
             Self::OverlappingOutput { .. } => "overlapping-output",
             Self::InvalidCrateName { .. } => "invalid-crate-name",
+            Self::InvalidInstallMode(_) => "invalid-install-mode",
+            Self::InstallConflict { .. } => "install-conflict",
             Self::UnknownTarget { .. } => "unknown-target",
             Self::AvailableTargets { .. } => "available-targets",
             Self::MismatchedType { .. } => "mismatched-type",
@@ -690,7 +712,8 @@ impl Project {
             },
             Message::UseBinary { declared, .. }
             | Message::UseWithTarget { declared: Some(declared) }
-            | Message::OverlappingOutput { declared, .. } => {
+            | Message::OverlappingOutput { declared, .. }
+            | Message::InstallConflict { declared, .. } => {
                 writeln!(w, "{style_note}note{style_white}: declared here{style_reset}")?;
                 write_location(w, &self.files[declared.file], declared, style_note, style_reset)?;
             },

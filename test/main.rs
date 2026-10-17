@@ -3010,3 +3010,123 @@ set flags [1]
         .stderr("error[mismatched-type]: invalid data type for property \"flags\"\n --> Jig:9:11")
         .stderr("configuration failed with 6 errors");
 }
+
+#[test]
+fn install_attributes() {
+    let project = Project::new("install-attributes", &[("Jig", "\
+crate app 'app.rs'
+    crate-type 'bin'
+crate util 'util.rs'
+crate macros 'macros.rs'
+    crate-type 'proc-macro'
+custom data
+    command 'true'
+crate tool 'tool.rs'
+    install-mode 0o700
+    crate-type 'bin'
+    install
+custom page
+    output 'page.1'
+    command 'true'
+    install true
+    install-dir 'share/man/man1'
+    install-mode 0o444
+log note '{app.install} {app.install-dir} {app.install-mode}'
+log note '{util.install} {util.install-dir} {util.install-mode}'
+log note '{macros.install} {macros.install-dir} {macros.install-mode}'
+log note '{data.install} {data.install-dir} {data.install-mode}'
+log note '{tool.install} {tool.install-dir} {tool.install-mode}'
+log note '{page.install} {page.install-dir} {page.install-mode}'
+log note install-prefix
+")]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // the defaults depend on the item, and the modes are permissions, shown in decimal
+    output
+        .stderr("note: false bin 493\n")
+        .stderr("note: false lib 420\n")
+        .stderr("note: false lib 493\n")
+        .stderr("note: false share 420\n")
+        .stderr("note: true bin 448\n")
+        .stderr("note: true share/man/man1 292\n")
+        .stderr("note: /usr/local\n");
+    // `install` builds what is installed
+    assert_contains(&output.ninja, &format!("\nbuild install: phony {host}/tool page.1\n"));
+}
+
+#[test]
+fn install_errors() {
+    let project = Project::new("install-errors", &[("Jig", "\
+crate a 'a.rs'
+    install-mode 0o10000
+crate b 'b.rs'
+    install 'yes'
+    install-dir
+custom c
+    command 'true'
+    install-mode -1
+test d
+    command 'true'
+    install
+@for target in 'x86_64-unknown-linux-gnu' 'aarch64-unknown-linux-gnu'
+crate e 'e.rs'
+    crate-type 'bin'
+    install
+custom f
+    output 'sub/e'
+    command 'true'
+    install-dir 'bin'
+    install
+")]);
+    project.configure().failed()
+        .stderr("error[invalid-install-mode]: invalid install mode 0o10000, which must be permissions from 0 to 0o7777\n --> Jig:2:18")
+        .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:4:13")
+        .stderr("error[invalid-operand]: none value used where str is required\n --> Jig:5:5")
+        .stderr("error[invalid-install-mode]: invalid install mode -1, which must be permissions from 0 to 0o7777\n --> Jig:8:18")
+        .stderr("error[unknown-attribute]: unknown test attribute \"install\"\n  --> Jig:11:5")
+        .stderr("error[install-conflict]: the crate \"x86_64-unknown-linux-gnu/e\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs")
+        .stderr("error[install-conflict]: the custom command \"f\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs");
+}
+
+#[test]
+fn install_command() {
+    let project = Project::new("install-command", &[
+        ("Jig", "\
+set install-prefix 'stage'
+crate app 'app.rs'
+    crate-type 'bin'
+    install
+crate util 'util.rs'
+custom doc
+    output 'doc/a.txt' 'doc/b.txt'
+    command 'sh' '-c' 'echo a > \"$1\"; echo b > \"$2\"' 'sh' output
+    install
+    install-dir 'share/doc/app'
+    install-mode 0o600
+"),
+        ("app.rs", "fn main() {}\n"),
+        ("util.rs", ""),
+    ]);
+    project.configure().ok();
+    let install = |args: &[&str]| {
+        let output = Command::new(configure_path()).arg("install").args(args).current_dir(&project.dir).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "install failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        stdout
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+    // the `install-prefix` property is relative to the project root
+    let stdout = install(&[]);
+    let stage = project.dir.join("stage");
+    assert_contains(&stdout, &format!("INSTALL {}\n", stage.join("bin/app").display()));
+    assert_eq!(mode(&stage.join("bin/app")), 0o755);
+    assert_eq!(std::fs::read_to_string(stage.join("share/doc/app/b.txt")).unwrap(), "b\n");
+    assert_eq!(mode(&stage.join("share/doc/app/a.txt")), 0o600);
+    // a library without `install` is not installed
+    assert!(!stage.join("lib").exists());
+    // a prefix which is given replaces it, and installing again replaces the files
+    install(&["other"]);
+    install(&["other"]);
+    assert_eq!(mode(&project.dir.join("other/bin/app")), 0o755);
+}

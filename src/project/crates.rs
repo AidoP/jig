@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use super::codegen::{CodegenAttribute, is_codegen_option};
 use super::customs::{Custom, CustomKind};
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
+use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Data, Ref, Referent};
@@ -65,6 +66,8 @@ impl Project {
         let mut uses = Vec::new();
         let mut kind = rust::Kind::Lib;
         let mut codegen = Vec::new();
+        // the defaults of the install attributes depend on the crate type, so they are applied once it is known
+        let mut install_attributes = Vec::new();
         while let Some(attribute) = self.next_attribute(parser, &["use"]) {
             match attribute.name {
                 "builtin" => builtin = true,
@@ -105,6 +108,7 @@ impl Project {
                     let option = option.to_string();
                     codegen.push(CodegenAttribute { option, operand: attribute.operand() });
                 },
+                name @ ("install" | "install-dir" | "install-mode") => install_attributes.push((name, attribute.operand())),
                 name => self.diagnostics.push(Diagnostic {
                     span: Some(attribute.name_span),
                     message: Message::UnknownCrateAttribute {
@@ -113,6 +117,15 @@ impl Project {
                     severity: Severity::Error,
                 }),
             }
+        }
+        let mut install = match kind {
+            rust::Kind::Bin => Install::executable(),
+            rust::Kind::Lib => Install::library(0o644),
+            // a dynamic library, which is executable
+            rust::Kind::ProcMacro => Install::library(0o755),
+        };
+        for (name, operand) in install_attributes {
+            self.install_attribute(&mut install, name, operand);
         }
         // a procedural macro is loaded by rustc, so it is compiled for the host target, which is otherwise the `target`
         // property in effect at its declaration
@@ -175,6 +188,7 @@ impl Project {
                         test,
                         uses: uses.clone(),
                         codegen: codegen.clone(),
+                        install: install.clone(),
                     });
                     declared.push(c.target.clone());
                     // the test is forward declared, so that it can be referred to, and completed once the target is known

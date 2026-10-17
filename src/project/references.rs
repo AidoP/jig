@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use super::customs::CustomKind;
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
+use super::install::Install;
 use super::syntax::{Parser, Span};
 use super::targets::{TargetKind, target_option};
 use super::value::{Coercion, Data, Operand, Referent, Value};
@@ -121,13 +122,13 @@ impl Project {
             Some(Referent::Custom(name)) => self.customs.iter().find(|custom| !custom.is_test() && custom.name == *name),
             _ => None,
         };
-        if let Some(custom) = custom && let CustomKind::Command { outputs, default } = &custom.kind {
+        if let Some(custom) = custom && let CustomKind::Command { outputs, default, install } = &custom.kind {
             let value = match attribute {
                 "input" => AttributeValue::Set(paths(&custom.inputs)),
                 "output" => AttributeValue::Set(paths(outputs)),
                 "command" => AttributeValue::Set(strings(&custom.command)),
                 "default" => AttributeValue::Set(Data::Bool(*default)),
-                _ => AttributeValue::Unknown,
+                attribute => install_attribute(install, attribute),
             };
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, start, parser);
@@ -201,6 +202,16 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
             }
             AttributeValue::Set(Data::List(names))
         },
+        attribute => install_attribute(&c.install, attribute),
+    }
+}
+
+/// Returns the value of an install attribute of a crate or custom command.
+fn install_attribute(install: &Install, attribute: &str) -> AttributeValue {
+    match attribute {
+        "install" => AttributeValue::Set(Data::Bool(install.enabled)),
+        "install-dir" => AttributeValue::Set(Data::Str(install.dir.clone())),
+        "install-mode" => AttributeValue::Set(Data::Unsigned(install.mode.into())),
         _ => AttributeValue::Unknown,
     }
 }

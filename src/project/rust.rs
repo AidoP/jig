@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use super::install::Install;
 use super::syntax::Span;
 
 pub struct Crate {
@@ -20,6 +21,8 @@ pub struct Crate {
     pub uses: Vec<Use>,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
+    /// Where `jig install` installs the output, if it does.
+    pub install: Install,
 }
 
 /// A crate used by another, from a `use` attribute.
