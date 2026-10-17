@@ -307,7 +307,8 @@ fn write_build_ninja(
         // a test is run by `jig test`, which builds its inputs and program with this target first
         let CustomKind::Command { outputs, default, .. } = &custom.kind else {
             let phony = Path::new("test").join(&custom.name);
-            let inputs = at.paths(custom.inputs(&project.runners).iter().chain(&custom.program));
+            let inputs = custom.inputs(&project.runners);
+            let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
             build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &as_paths(&inputs), ..Default::default() })?;
             tests.push(phony);
             continue;
@@ -321,6 +322,7 @@ fn write_build_ninja(
             outputs: &as_paths(&outputs),
             inputs: &as_paths(&at.paths(&custom.inputs)),
             implicit: &as_paths(&at.paths(&custom.program)),
+            order_only: &as_paths(&at.paths(&custom.depends)),
             variables: &[("command-line", &command), ("name", &custom.name)],
             ..Default::default()
         })?;
@@ -348,6 +350,7 @@ fn write_build_ninja(
         let spec = at.paths(&target.spec);
         let flags = rustc_flags(&target.flag(at), &at.path(&c.dir), c.kind, &deps, &c.codegen, at);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
+        let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
         let input = at.path(&c.path);
@@ -356,6 +359,7 @@ fn write_build_ninja(
             outputs: &[&output],
             inputs: &[&input],
             implicit: &deps,
+            order_only: &as_paths(&depends),
             variables: &[("crate-name", &c.name), ("crate-type", crate_type), ("flags", &flags)],
             ..Default::default()
         })?;
@@ -365,6 +369,7 @@ fn write_build_ninja(
                 outputs: &[&at.path(&c.test_harness())],
                 inputs: &[&input],
                 implicit: &deps,
+                order_only: &as_paths(&depends),
                 variables: &[("crate-name", &c.name), ("crate-type", crate_type), ("flags", &format!("{flags} --test"))],
                 ..Default::default()
             })?;

@@ -6,7 +6,7 @@ use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
-use super::value::{Data, Ref, Referent};
+use super::value::{Data, Operand, Ref, Referent};
 use super::{Project, normalize};
 
 /// A command, with its program if that is a path, which it depends on.
@@ -21,6 +21,8 @@ pub struct Custom {
     pub name: String,
     pub name_span: Span,
     pub inputs: Vec<PathBuf>,
+    /// What is built before the command or test, but is not an input, so it is not rebuilt when they change.
+    pub depends: Vec<PathBuf>,
     /// The program and its arguments, where a program with a `/` is relative to the project root.
     pub command: Vec<String>,
     /// The program, if it is a path, which the outputs depend on.
@@ -76,8 +78,8 @@ impl Custom {
 }
 
 impl Project {
-    /// Take a custom build command, with `input`, `output`, `command`, `default` and install attributes, or a test,
-    /// which has `input` and `command` attributes.
+    /// Take a custom build command, with `input`, `output`, `depends`, `command`, `default` and install attributes, or
+    /// a test, which has `input`, `depends` and `command` attributes.
     ///
     /// The output of a command is named after it in the build directory, unless an `output` attribute replaces it.
     /// While its attributes are evaluated, the paths of the inputs and outputs are the values of the `input` and
@@ -96,6 +98,7 @@ impl Project {
             parser.skip_statement();
         }
         let mut inputs = Vec::new();
+        let mut depends = Vec::new();
         let mut outputs = Vec::new();
         if !test {
             outputs.push(normalize(&self.build_dir().join(&name)));
@@ -126,6 +129,14 @@ impl Project {
                     }
                     paths.extend(new);
                     self.set_local(attribute, path_refs(paths), parser.file);
+                },
+                "depends" => {
+                    let Some(new) = self.parse_custom_paths(parser, false) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    depends.extend(new);
                 },
                 "default" if !test => default = true,
                 "install" | "install-dir" | "install-mode" if !test => {
@@ -189,7 +200,15 @@ impl Project {
         // the outputs are declared as a property named after the command, once it is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test { CustomKind::Test { runner: None } } else { CustomKind::Command { outputs, default, install } };
-        let custom = Custom { name, name_span: span, inputs, command: runner.command, program: runner.program, kind };
+        let custom = Custom {
+            name,
+            name_span: span,
+            inputs,
+            depends,
+            command: runner.command,
+            program: runner.program,
+            kind,
+        };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {
             self.declare_reference(declared, span, Item::CustomCommand, reference);
@@ -241,26 +260,29 @@ impl Project {
                 return None;
             }
             let operand = self.parse_expression(parser)?;
-            let items = match operand.data {
-                Data::List(items) => items,
-                Data::Ref(_) => vec![operand.data],
-                _ => vec![Data::Str(self.str_operand(operand)?)],
-            };
-            for item in items {
-                let path = match item {
-                    Data::Ref(reference) => {
-                        paths.extend(reference.paths);
-                        continue;
-                    },
-                    item => item.coerce_string(),
-                };
-                let path = if output { build_dir.join(path) } else { self.file(parser.file).relative_path(path) };
-                paths.push(normalize(&path));
-            }
+            let base = if output { build_dir.clone() } else { self.file(parser.file).path.parent().unwrap().into() };
+            paths.extend(self.operand_paths(operand, &base)?);
             if parser.peek() != Some(' ') {
                 return Some(paths);
             }
         }
+    }
+    /// Returns the paths of a value, which is a path relative to `base`, a reference, whose paths are already
+    /// resolved, or a list of them.
+    pub(super) fn operand_paths(&mut self, operand: Operand, base: &Path) -> Option<Vec<PathBuf>> {
+        let items = match operand.data {
+            Data::List(items) => items,
+            Data::Ref(_) => vec![operand.data],
+            _ => vec![Data::Str(self.str_operand(operand)?)],
+        };
+        let mut paths = Vec::new();
+        for item in items {
+            match item {
+                Data::Ref(reference) => paths.extend(reference.paths),
+                item => paths.push(normalize(&base.join(item.coerce_string()))),
+            }
+        }
+        Some(paths)
     }
     /// Take the arguments of a `command` attribute, which are expressions separated by spaces, returning the command
     /// with its program resolved as by [`Self::resolve_command`], unless it is a reference, whose path is resolved.

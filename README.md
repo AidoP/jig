@@ -86,9 +86,9 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `target <name>`: a custom target, which crates can be compiled for. See below
-- `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input` and `command` attributes,
-  but no `output` or `default`. Its inputs are built with `jig build test/<name>`, or those of every test with
-  `jig build test`
+- `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input`, `depends` and `command`
+  attributes, but no `output` or `default`. Its inputs and dependencies are built with `jig build test/<name>`, or those
+  of every test with `jig build test`
 
 ```
 use 'local.jig'
@@ -223,11 +223,12 @@ An expression is a string, `true`, `false`, an integer, a list, a dict, or the n
 An attribute is taken with `.` after the name of a property, a custom command, a crate, or a declared target, as in
 `data.default`, `image.input`, `{host-target}/macros.crate-type`, `macros.crate-type` or `my-kernel.runner`. The
 attributes of a property whose value is a reference are those of the crate or custom command it refers to. Those of a
-property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output` and `command`,
-as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for after the
-others, are `input` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`, `builtin`, `default`,
-`test`, `use`, `install`, `install-dir` and `install-mode`, and those of a target are `inherit`, `test`, `runner`,
-`override` and its options, such as `code-model`. An attribute which is not set is an error.
+property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`, `depends` and
+`command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
+after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
+`builtin`, `default`, `test`, `use`, `depends`, `install`, `install-dir` and `install-mode`, and those of a target are
+`inherit`, `test`, `runner`, `override` and its options, such as `code-model`. An attribute which is not set is an
+error.
 
 A list is written as expressions in `[]`, separated by `, `, such as `['-O', 'dtb']`, and its items can have any type.
 Lists can be joined with `+` and compared with `==` and `!=`. As a string, such as in a string template, the items of
@@ -354,6 +355,9 @@ A `crate` statement may be followed by indented attributes:
   declaration is used. A crate can be declared once for each target
 - `use <name>`: a crate for the same target which the crate depends on, passed to rustc with `--extern`. It can be
   repeated, and the crate can be declared later or in another file
+- `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
+  so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
+  reference, or a list of them, and can be repeated
 - `builtin`: pass the crate with `--extern` to every crate for the same target which is not builtin, like the standard
   library. Builtin crates are not passed to each other, so a builtin crate must `use` the ones it depends on
 - `crate-type <type>`: `'lib'`, which is the default, `'bin'` for an executable, `<build-dir>/<target>/<name>`, which
@@ -408,6 +412,8 @@ A `custom` statement is followed by indented attributes:
 - `output <path> ...`: files the command writes, like `input`, but relative to the build directory, `build-dir`.
   Without it, the output is `<build-dir>/<name>`, and each `output` replaces the outputs, which are kept with the
   `output` property, as in `output output 'data'`
+- `depends <path> ...`: files which are built before the command runs, like `input`, but which are not inputs, so the
+  outputs are not rebuilt when they change. It can be repeated, adding to them
 - `command <program> <argument> ...`: the command, as expressions separated by spaces, each of which is a single
   argument, except for a list, each item of which is an argument. As with `run`, a program containing a `/` is a path
   relative to the file, and the outputs are rebuilt when it changes, while any other program is found in `PATH`. A

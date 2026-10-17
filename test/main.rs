@@ -3464,3 +3464,43 @@ custom jig
     // the wrapper still runs the `jig` at its path, which has been replaced
     assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), installed);
 }
+
+#[test]
+fn depends_attribute() {
+    let project = Project::new("depends", &[
+        ("Jig", "\
+custom data
+    command 'sh' '-c' 'echo data > \"$1\"' 'sh' output
+crate app 'app.rs'
+    crate-type 'bin'
+    test
+    depends data
+custom copy
+    input 'in.txt'
+    depends data 'extra.txt'
+    output 'copy.txt'
+    command 'cp' input output
+test runs
+    depends app
+    command 'true'
+log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
+"),
+        ("app.rs", "fn main() {}\n#[test]\nfn data() { assert!(std::path::Path::new(\"build/data\").exists()); }\n"),
+        ("in.txt", ""),
+        ("extra.txt", ""),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // the paths are resolved as inputs are, but are not inputs
+    output.stderr(&format!("note: build/data | build/data extra.txt | build/{host}/app | in.txt\n"));
+    // which ninja builds first, without rebuilding when they change
+    assert_contains(&output.ninja, &format!("\nbuild {host}/app: rustc app.rs || data\n"));
+    assert_contains(&output.ninja, &format!("\nbuild {host}/test/app: rustc app.rs || data\n"));
+    assert_contains(&output.ninja, "\nbuild copy.txt: custom in.txt || data extra.txt\n");
+    // and which are built for a test
+    assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app data\n"));
+    assert_contains(&output.ninja, &format!("\nbuild test/runs: phony {host}/app\n"));
+    // so that the test of the crate finds what it depends on
+    let run = Command::new(configure_path()).args(["test", "app"]).current_dir(&project.dir).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+}

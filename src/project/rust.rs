@@ -19,6 +19,8 @@ pub struct Crate {
     pub test: bool,
     /// The crates for the same target which are passed to this crate with `--extern`.
     pub uses: Vec<Use>,
+    /// What is built before the crate and its test harness, and before its test runs, but is not an input.
+    pub depends: Vec<PathBuf>,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
     /// Where `jig install` installs the output, if it does.

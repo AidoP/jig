@@ -64,6 +64,7 @@ impl Project {
         let mut test = false;
         let mut targets = None;
         let mut uses = Vec::new();
+        let mut depends = Vec::new();
         let mut kind = rust::Kind::Lib;
         let mut codegen = Vec::new();
         // the defaults of the install attributes depend on the crate type, so they are applied once it is known
@@ -97,6 +98,12 @@ impl Project {
                         targets = Some(CrateTargets { names, span: attribute.data_span });
                     },
                     _ => self.invalid_operand(&attribute.operand(), "str", false),
+                },
+                "depends" => {
+                    let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
+                    if let Some(paths) = self.operand_paths(attribute.operand(), &base) {
+                        depends.extend(paths);
+                    }
                 },
                 "use" => {
                     let span = attribute.data_span;
@@ -188,6 +195,7 @@ impl Project {
                         default,
                         test,
                         uses: uses.clone(),
+                        depends: depends.clone(),
                         codegen: codegen.clone(),
                         install: install.clone(),
                     });
@@ -196,7 +204,8 @@ impl Project {
                     if test {
                         let name = crate_test_name(c, &host);
                         let harness = c.test_harness();
-                        self.add_crate_test(name, span, harness);
+                        let depends = c.depends.clone();
+                        self.add_crate_test(name, span, harness, depends);
                     }
                 },
             }
@@ -213,12 +222,13 @@ impl Project {
     /// Register the test harness of a crate, like a `test` statement which runs it.
     ///
     /// The harness is run directly, until the runner of its target is known.
-    fn add_crate_test(&mut self, name: String, span: Span, harness: PathBuf) {
+    fn add_crate_test(&mut self, name: String, span: Span, harness: PathBuf, depends: Vec<PathBuf>) {
         let command = vec![Path::new(".").join(&harness).display().to_string()];
         self.add_custom(Custom {
             name,
             name_span: span,
             inputs: vec![harness],
+            depends,
             command,
             program: None,
             kind: CustomKind::Test { runner: None },

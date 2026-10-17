@@ -126,6 +126,7 @@ impl Project {
             let value = match attribute {
                 "input" => AttributeValue::Set(paths(&custom.inputs)),
                 "output" => AttributeValue::Set(paths(outputs)),
+                "depends" => AttributeValue::Set(paths(&custom.depends)),
                 "command" => AttributeValue::Set(strings(&custom.command)),
                 "default" => AttributeValue::Set(Data::Bool(*default)),
                 attribute => install_attribute(install, attribute),
@@ -166,6 +167,7 @@ impl Project {
         if let Some(test) = self.customs.iter().find(|test| test.is_test() && test.name == name) {
             let value = match attribute {
                 "input" => AttributeValue::Set(paths(&test.inputs(&self.runners))),
+                "depends" => AttributeValue::Set(paths(&test.depends)),
                 "command" => AttributeValue::Set(strings(&test.command(&self.runners))),
                 _ => AttributeValue::Unknown,
             };
@@ -202,6 +204,7 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
             }
             AttributeValue::Set(Data::List(names))
         },
+        "depends" => AttributeValue::Set(paths(&c.depends)),
         attribute => install_attribute(&c.install, attribute),
     }
 }

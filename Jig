@@ -14,5 +14,7 @@ crate jig 'src/main.rs'
     install
     test
 
+# the integration tests run jig
 crate integration 'test/main.rs'
     test
+    depends jig
