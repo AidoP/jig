@@ -98,6 +98,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "run-failed",
     "run-output",
     "environment-variable",
+    "impure",
     "else-without-if",
     "then-without-statement",
     "else-not-first",
@@ -196,6 +197,8 @@ pub enum Message {
         /// Whether the variable is set, but is not valid unicode.
         present: bool,
     },
+    /// A function whose value can change without the build being reconfigured, such as `env` or `run`.
+    Impure(&'static str),
     ElseWithoutIf(String),
     ThenWithoutStatement,
     ElseNotFirst(String),
@@ -315,6 +318,11 @@ pub enum Message {
         description: &'static str,
         replacement: String,
     },
+    /// A suggestion to insert a line before the line of the diagnostic.
+    Insertion {
+        description: &'static str,
+        line: String,
+    },
     OverrideAttribute(String),
     RepeatedTarget(String),
     RedeclareCrate {
@@ -395,6 +403,10 @@ impl core::fmt::Display for Message {
             Self::EnvironmentVariable { name, present: true } => {
                 write!(f, "environment variable {name:?} is not valid unicode")
             },
+            Self::Impure(function) => write!(
+                f,
+                "function {function:?} is impure, as the build is not reconfigured when its value changes",
+            ),
             Self::ExpectedStatementAfterMeta => write!(f, "expected statement on the line after a meta-statement"),
             Self::ThenWithoutStatement => write!(f, "\"@then\" must be directly after a statement"),
             Self::ElseWithoutIf(name) => write!(f, "\"@{name}\" must follow a conditional statement"),
@@ -447,7 +459,7 @@ impl core::fmt::Display for Message {
                 "procedural macros cannot be compiled for target {target:?}, only the host target {host:?}",
             ),
             Self::UseWithTarget { .. } => write!(f, "cannot use a crate of a different target"),
-            Self::Replacement { description, .. } => f.write_str(description),
+            Self::Replacement { description, .. } | Self::Insertion { description, .. } => f.write_str(description),
             Self::UnknownReference(name) => write!(f, "no property, custom command, target or test named {name:?}"),
             Self::UnknownNamespace(prefix) => write!(f, "no property or target has the namespace `{prefix}`"),
             Self::UnknownAttributeOf { item, name, attribute } => {
@@ -549,6 +561,7 @@ impl Message {
             Self::RunFailed { .. } => "run-failed",
             Self::RunOutput { .. } => "run-output",
             Self::EnvironmentVariable { .. } => "environment-variable",
+            Self::Impure(_) => "impure",
             Self::ElseWithoutIf { .. } => "else-without-if",
             Self::ThenWithoutStatement { .. } => "then-without-statement",
             Self::ElseNotFirst { .. } => "else-not-first",
@@ -598,6 +611,7 @@ impl Message {
             Self::UseBinary { .. } => "use-binary",
             Self::UseWithTarget { .. } => "use-with-target",
             Self::Replacement { .. } => "replacement",
+            Self::Insertion { .. } => "insertion",
             Self::OverrideAttribute { .. } => "override-attribute",
             Self::RepeatedTarget { .. } => "repeated-target",
             Self::RedeclareCrate { .. } => "redeclare-crate",
@@ -616,7 +630,7 @@ impl Message {
     /// Whether the message is part of the diagnostic before it, as a suggestion or note about it, so that it has the
     /// severity of that diagnostic overridden with it.
     fn is_attachment(&self) -> bool {
-        matches!(self, Self::Replacement { .. } | Self::AvailableTargets(_))
+        matches!(self, Self::Replacement { .. } | Self::Insertion { .. } | Self::AvailableTargets(_))
     }
 }
 
@@ -707,6 +721,10 @@ impl Project {
                 // the line is shown with the replacement
                 Message::Replacement { replacement, .. } => {
                     write_replacement(w, &self.files[span.file], span, replacement, style_accent, style_reset)?;
+                },
+                // the line is shown after the inserted one
+                Message::Insertion { line, .. } => {
+                    write_insertion(w, &self.files[span.file], span, line, style_accent, style_reset)?;
                 },
                 _ => write_location(w, &self.files[span.file], span, style_accent, style_reset)?,
             }
@@ -842,6 +860,28 @@ fn write_replacement(
     writeln!(w, "{gutter} |")?;
     writeln!(w, "{line} | {before}{replacement}{after}")?;
     writeln!(w, "{gutter} | {indent}{style_accent}{}{style_reset}", "~".repeat(width))
+}
+
+/// Write the location of a span followed by a line inserted before its line, and its line.
+fn write_insertion(
+    w: &mut dyn std::io::Write,
+    file: &File,
+    span: &Span,
+    inserted: &str,
+    style_accent: &str,
+    style_reset: &str,
+) -> std::io::Result<()> {
+    let (line, col) = file.position(span.offset);
+    let line = line.to_string();
+    let gutter = " ".repeat(line.len());
+    writeln!(w, "{gutter}--> {}:{line}:{col}", file.path.display())?;
+
+    let start = span.offset - (col - 1);
+    let rest = &file.data[start..];
+    let text = rest[..rest.find('\n').unwrap_or(rest.len())].trim_end_matches('\r');
+    writeln!(w, "{gutter} |")?;
+    writeln!(w, "{line} {style_accent}+ {inserted}{style_reset}")?;
+    writeln!(w, "{line} | {text}")
 }
 
 /// Write the location of a span followed by its first line with the span underlined.

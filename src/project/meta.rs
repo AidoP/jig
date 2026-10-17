@@ -76,6 +76,7 @@ impl Project {
                 continue;
             };
             let meta_span = Span { file: span.file, offset: start, len: span.offset + span.len - start };
+            self.meta_insertion = (!matches!(name, "else" | "else-if")).then_some(Span { len: 0, ..meta_span });
             match name {
                 "if" => {
                     state.conditional = true;

@@ -101,6 +101,7 @@ impl Project {
         if name == "run" {
             let arguments = self.parse_arguments(parser, ')', Self::parse_run_argument)?;
             let span = parser.span_from(name_span.offset);
+            self.impure("run", span);
             return self.run(arguments, span);
         }
         if name == "select" {
@@ -274,6 +275,7 @@ impl Project {
                 Data::Bool(if name == "starts-with" { string.starts_with(&affix) } else { string.ends_with(&affix) })
             },
             _ => {
+                self.impure("env", span);
                 let variable = arguments.next()?;
                 let variable_span = variable.span;
                 let variable = self.str_operand(variable)?;
@@ -319,10 +321,10 @@ impl Project {
         }
         parser.offset = end;
         let mut operand = operand;
-        // a diagnostic overridden to be an error is lowered as well
+        // a diagnostic overridden to be an error is lowered as well, except for an impure call, which did not fail
         self.override_severities();
         for diagnostic in &mut self.diagnostics[first..] {
-            if matches!(diagnostic.severity, Severity::Error) {
+            if matches!(diagnostic.severity, Severity::Error) && !matches!(diagnostic.message, Message::Impure(_)) {
                 diagnostic.severity = Severity::Warning;
                 operand = None;
             }
@@ -500,6 +502,27 @@ impl Project {
             severity: Severity::Error,
         });
         None
+    }
+    /// Report a call to a function whose value can change without the build being reconfigured, with a suggestion to
+    /// allow it for the statement with `@with`.
+    ///
+    /// The function is still applied, in case the diagnostic is allowed by the `diagnostic/impure` property.
+    fn impure(&mut self, function: &'static str, span: Span) {
+        self.diagnostics.push(Diagnostic {
+            span: Some(span),
+            message: Message::Impure(function),
+            severity: Severity::Error,
+        });
+        if let Some(insertion) = self.meta_insertion {
+            self.diagnostics.push(Diagnostic {
+                span: Some(insertion),
+                message: Message::Insertion {
+                    description: "allow it for the statement with `@with`",
+                    line: "@with diagnostic/impure as 'allow'".into(),
+                },
+                severity: Severity::Suggestion,
+            });
+        }
     }
     /// Search the directories in `PATH` for an executable file.
     ///

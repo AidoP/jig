@@ -256,7 +256,8 @@ Functions are called with their arguments in `()`, separated by `, `:
 - `starts-with(str, prefix)` and `ends-with(str, suffix)`: whether a `str` starts or ends with another, as a `bool`
 - `select(name, ...)`: the value of the first of the named properties which has a value. Each property must be
   declared, or set before it is declared, so that a misspelt name is an error rather than ignored
-- `env(name)`: the value of an environment variable, which must be set. The build is not reconfigured when it changes
+- `env(name)`: the value of an environment variable, which must be set. The build is not reconfigured when it changes,
+  so it is impure, as described below
 - `len(value)`: the number of items in a list or entries in a dict, or of bytes in a `str`, which is UTF-8, as an
   `unsigned`
 - `contains(list, value)`: whether a list has an item equal to a value, or a dict has an entry for a key, as a `bool`
@@ -274,9 +275,10 @@ Functions are called with their arguments in `()`, separated by `, `:
   the expression. The build is reconfigured when an existing path changes, or when a missing one is created, which
   `jig build`, `jig check` and `jig test` check before running ninja
 - `try(expression, default)`: the value of the expression, or the default if evaluating it fails. Its errors are reported
-  as warnings instead
+  as warnings instead, except that an impure call is still an error, as evaluating it did not fail
 
 ```
+@with diagnostic/impure as 'allow'
 set prefix try(env('CROSS_COMPILE'), '')
 ```
 
@@ -288,12 +290,22 @@ set prefix try(env('CROSS_COMPILE'), '')
   is not resolved again. It inherits the environment, with any variables given as `NAME: value` after the
   arguments, where `NAME` is a name like those of properties, so it can be computed with `{}`. The configuration fails
   if the program exits unsuccessfully. The build is reconfigured when a program given as a path changes, but not when
-  its output would change otherwise
+  its output would change otherwise, so it is impure, as described below
 
 ```
 set board select(board, default-board)
 @if starts-with(target, 'riscv')
 use 'arch/riscv'
+```
+
+A call to `env` or `run` is impure, as the build is not reconfigured when its value changes, which is the `impure`
+error, so that the build does not silently depend on what it does not track. It is allowed by setting
+`diagnostic/impure`, as with `@with` for a single statement, which is suggested before the statement, or before the
+meta-statement containing the call. A call in an `@else-if` has no suggestion, as `@with` cannot come before it.
+
+```
+@with diagnostic/impure as 'allow'
+set prefix env('CROSS_COMPILE')
 ```
 
 Within a string, an expression in `{}` is replaced with its value, and `{{` and `}}` with a single brace.
@@ -302,6 +314,7 @@ The expression cannot start with `{`, which would be `{{`, so a name computed fr
 
 ```
 log note 'size is {size} with {size / 0x1000} pages'
+@with diagnostic/impure as 'allow'
 log note 'home is {env('HOME')}'
 ```
 
@@ -462,7 +475,7 @@ Each diagnostic has an identifier, shown after its severity, as in `error[unknow
 statements, whose identifier is `user`. Its severity is replaced by the value of its property, `diagnostic/<id>`, where
 it is reported: `'error'`, `'warning'`, `'note'`, or `'allow'` to hide it. A note or suggestion attached to a
 diagnostic, such as the list of targets after an unknown target, is hidden with it. Errors within the first argument
-of `try` are still reported as warnings. Diagnostics found once the files are read, such as unknown targets of crates,
+of `try` are still reported as warnings, except for `impure`. Diagnostics found once the files are read, such as unknown targets of crates,
 have the severities set at the end.
 
 ```

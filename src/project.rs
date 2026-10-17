@@ -45,6 +45,9 @@ pub struct Project {
     /// The values given by `@with` which it has restored, which are no longer the values of their properties, but are
     /// checked by a later declaration, as other values set before it are.
     reverted: Vec<usize>,
+    /// The start of the statement or meta-statement being processed, where a meta-statement can be inserted to apply to
+    /// it, unless it is an `@else`, which must be first.
+    meta_insertion: Option<Span>,
     /// The targets supported by the compiler, followed by those declared by `target` statements, in the order they were
     /// declared.
     pub targets: Vec<Target>,
@@ -73,6 +76,7 @@ impl Project {
             diagnostics: Vec::new(),
             overridden: 0,
             reverted: Vec::new(),
+            meta_insertion: None,
             build_dir: None,
             targets: targets.into_iter().map(Target::builtin).collect(),
             targets_listed: false,

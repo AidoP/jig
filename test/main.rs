@@ -844,6 +844,7 @@ declare pages
 #[test]
 fn functions() {
     let project = Project::new("functions", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare arch
     default 'RiscV'
 declare board
@@ -872,6 +873,7 @@ log note 'path is {path}'
 #[test]
 fn function_errors() {
     let project = Project::new("function-errors", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare a
 set a select(a, typo)
 set a select(a)
@@ -886,21 +888,22 @@ log note 'x'
 ")]);
     project.configure().failed()
         // a misspelt property is not ignored
-        .stderr("error[undeclared-property]: property \"typo\" is undeclared\n --> Jig:2:17")
-        .stderr("error[none-selected]: no value for any of the properties \"a\"\n --> Jig:3:7")
-        .stderr("error[argument-count]: function \"select\" takes at least 1 argument, but 0 were given\n --> Jig:4:7")
-        .stderr("error[argument-count]: function \"upper\" takes 1 argument, but 2 were given\n --> Jig:5:7")
-        .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:6:13")
-        .stderr("error[unknown-function]: unknown function \"nope\"\n --> Jig:7:7")
-        .stderr("error[expected-separator]: expected \", \" or \")\"\n --> Jig:8:16")
-        .stderr("error[environment-variable]: environment variable \"BLUEMETAL_CONFIGURE_TEST_UNSET\" is not set\n --> Jig:9:11")
-        .stderr("error[invalid-operand]: str value used where bool is required\n  --> Jig:10:5")
+        .stderr("error[undeclared-property]: property \"typo\" is undeclared\n --> Jig:3:17")
+        .stderr("error[none-selected]: no value for any of the properties \"a\"\n --> Jig:4:7")
+        .stderr("error[argument-count]: function \"select\" takes at least 1 argument, but 0 were given\n --> Jig:5:7")
+        .stderr("error[argument-count]: function \"upper\" takes 1 argument, but 2 were given\n --> Jig:6:7")
+        .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:7:13")
+        .stderr("error[unknown-function]: unknown function \"nope\"\n --> Jig:8:7")
+        .stderr("error[expected-separator]: expected \", \" or \")\"\n --> Jig:9:16")
+        .stderr("error[environment-variable]: environment variable \"BLUEMETAL_CONFIGURE_TEST_UNSET\" is not set\n  --> Jig:10:11")
+        .stderr("error[invalid-operand]: str value used where bool is required\n  --> Jig:11:5")
         .stderr("configuration failed with 9 errors");
 }
 
 #[test]
 fn strings_in_templates() {
     let project = Project::new("template-strings", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare arch
     default 'riscv'
 log note 'path is {env('PATH')}'
@@ -936,6 +939,7 @@ log note 'unclosed {'a'
 #[test]
 fn run_function() {
     let project = Project::new("run", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare name
     default 'world'
 log note '{run('sh', '-c', 'echo \"hello $WHO\"; echo', WHO: name)}|'
@@ -951,6 +955,7 @@ log note 'condition'
 #[test]
 fn run_errors() {
     let project = Project::new("run-errors", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare a
 set a run('sh', '-c', 'echo oops >&2; echo second >&2; exit 3')
 set a run('bluemetal-no-such-program')
@@ -960,14 +965,14 @@ set a run(X: 'a')
 set a run('sh', '-c', 'printf \"\\377\"')
 ")]);
     project.configure().failed()
-        .stderr("error[run-failed]: \"sh\" failed with exit status: 3\n --> Jig:2:7")
+        .stderr("error[run-failed]: \"sh\" failed with exit status: 3\n --> Jig:3:7")
         // shown like a location
         .stderr("^\n --> stderr\n  |\n  | oops\n  | second\n  |\nerror")
         .stderr("error[run-spawn]: failed to run \"bluemetal-no-such-program\": ")
-        .stderr("error[positional-after-env]: program arguments must come before environment variables\n --> Jig:4:27")
-        .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:5:19")
-        .stderr("error[argument-count]: function \"run\" takes at least 1 argument, but 0 were given\n --> Jig:6:7")
-        .stderr("error[run-output]: output of \"sh\" is not valid unicode\n --> Jig:7:7")
+        .stderr("error[positional-after-env]: program arguments must come before environment variables\n --> Jig:5:27")
+        .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:6:19")
+        .stderr("error[argument-count]: function \"run\" takes at least 1 argument, but 0 were given\n --> Jig:7:7")
+        .stderr("error[run-output]: output of \"sh\" is not valid unicode\n --> Jig:8:7")
         .stderr("configuration failed with 6 errors");
 }
 
@@ -1009,6 +1014,7 @@ crate Upper 'x.rs'
 #[test]
 fn run_environment_names() {
     let project = Project::new("run-env-names", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare name
     default 'world'
 log note '{run('sh', '-c', 'echo $NAME_world', {'NAME_{name}'}: 'computed')}'
@@ -1024,7 +1030,7 @@ set name run('printenv', {'a b'}: 'x')
         .stderr("note: hyphen\n")
         // an expression in `{}` is still an argument unless it is followed by `: `
         .stderr("note: 5|5\n")
-        .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"a b\"\n --> Jig:7:26")
+        .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"a b\"\n --> Jig:8:26")
         .stderr("configuration failed with 1 error");
 }
 
@@ -1096,6 +1102,7 @@ fn run_relative_program() {
     let project = Project::new("run-relative", &[
         ("Jig", "use 'sub'\n"),
         ("sub/Jig", "\
+set diagnostic/impure 'allow'
 log note '{run('../tool.sh', 'arg')}'
 log note '{run('./local.sh')}'
 log note '{run('sh', '-c', 'echo from path')}'
@@ -1137,6 +1144,7 @@ set a which('')
 #[test]
 fn try_function() {
     let project = Project::new("try", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare a
     default 'x'
 log note try(env('BLUEMETAL_CONFIGURE_TEST_UNSET'), 'fallback')
@@ -1150,9 +1158,9 @@ log note try(upper(','), 'x')
     let output = project.configure().ok();
     output
         // errors are reported as warnings, and the default is the value
-        .stderr("warning[environment-variable]: environment variable \"BLUEMETAL_CONFIGURE_TEST_UNSET\" is not set\n --> Jig:3:18")
+        .stderr("warning[environment-variable]: environment variable \"BLUEMETAL_CONFIGURE_TEST_UNSET\" is not set\n --> Jig:4:18")
         .stderr("note: fallback\n")
-        .stderr("warning[invalid-operand]: unsigned value used where str is required\n --> Jig:6:47")
+        .stderr("warning[invalid-operand]: unsigned value used where str is required\n --> Jig:7:47")
         .stderr("warning[unset-property]: no value for property \"missing\"")
         .stderr("warning[expected-expression]: expected expression")
         .stderr("warning[expected-separator]: expected \", \" or \")\"")
@@ -1168,6 +1176,7 @@ log note try(upper(','), 'x')
 #[test]
 fn try_errors() {
     let project = Project::new("try-errors", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare a
 set a try()
 set a try(env('X'))
@@ -1176,16 +1185,85 @@ set a try(upper('unclosed'
 ")]);
     // the default is required, and its errors, or those which leave the end of the argument unknown, are not suppressed
     project.configure().failed()
-        .stderr("error[argument-count]: function \"try\" takes 2 arguments, but 1 was given\n --> Jig:2:7")
         .stderr("error[argument-count]: function \"try\" takes 2 arguments, but 1 was given\n --> Jig:3:7")
-        .stderr("error[unset-property]: no value for property \"nope\"\n --> Jig:4:21")
-        .stderr("error[expected-separator]: expected \", \" or \")\"\n --> Jig:5:27")
+        .stderr("error[argument-count]: function \"try\" takes 2 arguments, but 1 was given\n --> Jig:4:7")
+        .stderr("error[unset-property]: no value for property \"nope\"\n --> Jig:5:21")
+        .stderr("error[expected-separator]: expected \", \" or \")\"\n --> Jig:6:27")
         .stderr("configuration failed with 4 errors");
+}
+
+#[test]
+fn impure_functions() {
+    let project = Project::new("impure", &[("Jig", "\
+declare a
+set a env('PATH')
+@if run('true') == ''
+custom c
+    command 'echo' run('echo', 'x')
+log note try(env('PATH'), 'fallback')
+@if false
+log note 'skipped'
+@else-if env('PATH') != ''
+log note 'else'
+")]);
+    project.configure().failed()
+        // the call is reported, with a suggestion to allow it for the statement
+        .stderr("\
+error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes
+ --> Jig:2:7
+  |
+2 | set a env('PATH')
+  |       ^^^^^^^^^^^
+suggestion: allow it for the statement with `@with`
+ --> Jig:2:1
+  |
+2 + @with diagnostic/impure as 'allow'
+2 | set a env('PATH')
+")
+        // in a meta-statement, the suggestion is before the meta-statement
+        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:3:5")
+        .stderr("suggestion: allow it for the statement with `@with`\n --> Jig:3:1")
+        // in an attribute, the suggestion is before the statement
+        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:5:20")
+        .stderr("suggestion: allow it for the statement with `@with`\n --> Jig:4:1")
+        // `try` does not lower it, as evaluating it did not fail
+        .stderr("error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes\n --> Jig:6:14")
+        .stderr("note: /")
+        // `@with` cannot be before `@else-if`, so there is no suggestion
+        .stderr("error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes\n --> Jig:9:10\n  |\n9 | @else-if env('PATH') != ''\n  |          ^^^^^^^^^^^\nnote: else")
+        .stderr("configuration failed with 5 errors");
+}
+
+#[test]
+fn impure_functions_allowed() {
+    let project = Project::new("impure-allowed", &[
+        ("Jig", "\
+@with diagnostic/impure as 'allow'
+log note 'home is {env('HOME')}'
+@with diagnostic/impure as 'warning'
+use 'sub'
+log note run('echo', 'again')
+"),
+        ("sub/Jig", "log note run('echo', 'sub')\n"),
+    ]);
+    let output = project.configure_with(&[("HOME", "/home/test")]).failed();
+    output
+        .stderr("note: home is /home/test\n")
+        // the property applies within files used by the statement
+        .stderr("warning[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> sub/Jig:1:10")
+        .stderr("suggestion: allow it for the statement with `@with`\n --> sub/Jig:1:1")
+        .stderr("note: sub\n")
+        // and is restored after it
+        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:5:10")
+        .stderr("configuration failed with 1 error, 1 warning");
+    // only the calls outside the first `@with` are reported
+    assert_eq!(output.stderr.matches("[impure]").count(), 2, "{}", output.stderr);
 }
 
 #[test]
 fn missing_paths_are_not_dependencies() {
     let project = Project::new("missing-dependencies", &[("Jig", "\
+set diagnostic/impure 'allow'
 @if try(run('./missing-program') == '', false)
 log note 'ran'
 @if try(read('missing-file') == '', false)
@@ -1290,6 +1368,7 @@ log note
 #[test]
 fn multi_line_message() {
     let project = Project::new("multi-line", &[("Jig", "\
+set diagnostic/impure 'allow'
 log warning run('printf', '%s\\n%s\\n\\n%s', 'first', 'second', 'after blank')
 ")]);
     // continuation lines are aligned with the first, except for blank lines
@@ -1298,7 +1377,7 @@ warning: first
          second
 
          after blank
- --> Jig:1:13
+ --> Jig:2:13
 ");
 }
 
@@ -1495,6 +1574,7 @@ custom skipped
 #[test]
 fn lists() {
     let project = Project::new("lists", &[("Jig", "\
+set diagnostic/impure 'allow'
 declare flags
     type 'list'
     default ['-O', 'dtb']
@@ -2593,7 +2673,7 @@ custom c
 fn run_reference() {
     let project = Project::new("run-reference", &[
         ("Jig", "use 'sub'\n"),
-        ("sub/Jig", "custom script\n    command 'true'\nlog note run(script, 'a')\n"),
+        ("sub/Jig", "set diagnostic/impure 'allow'\ncustom script\n    command 'true'\nlog note run(script, 'a')\n"),
         ("build/script", "#!/bin/sh\necho ran \"$0\" \"$1\"\n"),
     ]);
     make_executable(&project.dir.join("build/script"), &project.dir.join("build/script"));

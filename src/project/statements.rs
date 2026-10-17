@@ -36,6 +36,8 @@ impl Project {
         let data = std::mem::take(&mut self.files[idx].data);
         let mut parser = Parser::new(idx, &data);
         let mut chain = None;
+        // the statement which used the file is still being processed after it
+        let meta_insertion = self.meta_insertion.take();
         loop {
             parser.skip_empty();
             if parser.is_empty() {
@@ -44,6 +46,7 @@ impl Project {
             self.parse_statement(&mut parser, &mut chain);
         }
         self.files[idx].data = data;
+        self.meta_insertion = meta_insertion;
     }
     /// Take a statement, with the meta-statements before it, and the statements chained after it with `@then`, which
     /// are processed or skipped with it.
@@ -102,6 +105,7 @@ impl Project {
     /// Take a statement, after its meta-statements.
     fn parse_single_statement(&mut self, parser: &mut Parser) {
         let start = parser.offset;
+        self.meta_insertion = Some(Span { file: parser.file, offset: start, len: 0 });
         let Some((keyword, span)) = self.parse_ident(parser) else {
             parser.skip_statement();
             return;
