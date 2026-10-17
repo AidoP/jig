@@ -1,0 +1,17 @@
+rule rustc
+    command = rustc --color=always --out-dir=build/tmp -O --emit=link=$out --emit=dep-info=$out.d --crate-type=bin --crate-name=jig --edition=2024 $in
+    description = RUSTC $out
+    deps = gcc
+    depfile = $out.d
+
+rule jig
+    command = build/bootstrap/jig generate $in
+    description = CONFIGURE $out
+    pool = console
+    deps = gcc
+    depfile = $out.d
+    generator = 1
+
+build build/bootstrap/jig: rustc src/main.rs
+
+build build/build.ninja: jig Jig | build/bootstrap/jig

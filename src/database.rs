@@ -1,0 +1,166 @@
+//! The build database, which records what the build needs after configuring, such as the build directory, the
+//! diagnostics to replay for each flycheck label and the tests to run. It is at the project root, which the commands
+//! that read it find it from.
+//!
+//! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
+//! When read, its contents borrow from its bytes.
+//!
+//! The format is the magic bytes and a format version, then the build directory and the missing paths, followed by each
+//! section: the flychecks, then the tests. A section is the number of its records followed by each record. Numbers are little-endian `u32`, strings are their
+//! length followed by their UTF-8 bytes, and a list of strings is their number followed by each string.
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// The path of the database, relative to the project root.
+pub const PATH: &str = ".jig";
+const MAGIC: &[u8; 4] = b"JIGD";
+const VERSION: u32 = 3;
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Database<'a> {
+    /// The build directory, where ninja runs, relative to the project root.
+    pub build_dir: &'a str,
+    /// The paths which the configuration found were missing, relative to the project root, which it is generated again
+    /// once one of them exists.
+    pub missing: Vec<&'a str>,
+    pub flychecks: Vec<Flycheck<'a>>,
+    pub tests: Vec<Test<'a>>,
+}
+
+/// The diagnostics to replay for a flycheck label.
+#[derive(Debug, PartialEq)]
+pub struct Flycheck<'a> {
+    pub label: &'a str,
+    /// The files of JSON diagnostics to replay, in order.
+    pub diagnostics: Vec<&'a str>,
+}
+
+/// A test, which passes if its command succeeds.
+#[derive(Debug, PartialEq)]
+pub struct Test<'a> {
+    pub name: &'a str,
+    /// The program and its arguments, run from the project root.
+    pub command: Vec<&'a str>,
+}
+
+pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
+    w.write_all(MAGIC)?;
+    write_u32(w, VERSION)?;
+    write_str(w, database.build_dir)?;
+    write_strs(w, &database.missing)?;
+    write_u32(w, database.flychecks.len())?;
+    for flycheck in &database.flychecks {
+        write_str(w, flycheck.label)?;
+        write_strs(w, &flycheck.diagnostics)?;
+    }
+    write_u32(w, database.tests.len())?;
+    for test in &database.tests {
+        write_str(w, test.name)?;
+        write_strs(w, &test.command)?;
+    }
+    Ok(())
+}
+
+/// Parse a database, failing with [`std::io::ErrorKind::InvalidData`] if it is not a database of this version.
+pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
+    let mut r = Reader(bytes);
+    if r.take(MAGIC.len())? != MAGIC || r.u32()? != VERSION {
+        return Err(invalid());
+    }
+    let mut database = Database { build_dir: r.str()?, missing: r.strs()?, ..Default::default() };
+    for _ in 0..r.u32()? {
+        database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.strs()? });
+    }
+    for _ in 0..r.u32()? {
+        database.tests.push(Test { name: r.str()?, command: r.strs()? });
+    }
+    Ok(database)
+}
+
+/// Returns the root of the project which contains the working directory, which is the closest directory to it, or it
+/// itself, with a database.
+pub fn root() -> Option<PathBuf> {
+    let dir = std::env::current_dir().ok()?;
+    dir.ancestors().find(|dir| dir.join(PATH).is_file()).map(Path::to_path_buf)
+}
+
+fn invalid() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "not a build database of this version")
+}
+
+fn write_u32(w: &mut dyn Write, value: impl TryInto<u32>) -> std::io::Result<()> {
+    let value: u32 = value.try_into().map_err(|_| std::io::Error::other("value too large for the database"))?;
+    w.write_all(&value.to_le_bytes())
+}
+
+fn write_str(w: &mut dyn Write, s: &str) -> std::io::Result<()> {
+    write_u32(w, s.len())?;
+    w.write_all(s.as_bytes())
+}
+
+fn write_strs(w: &mut dyn Write, strs: &[&str]) -> std::io::Result<()> {
+    write_u32(w, strs.len())?;
+    for s in strs {
+        write_str(w, s)?;
+    }
+    Ok(())
+}
+
+/// The remaining bytes of a database being parsed.
+struct Reader<'a>(&'a [u8]);
+impl<'a> Reader<'a> {
+    fn take(&mut self, len: usize) -> std::io::Result<&'a [u8]> {
+        let Some((taken, rest)) = self.0.split_at_checked(len) else {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        };
+        self.0 = rest;
+        Ok(taken)
+    }
+    fn u32(&mut self) -> std::io::Result<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn str(&mut self) -> std::io::Result<&'a str> {
+        let len = self.u32()? as usize;
+        std::str::from_utf8(self.take(len)?).map_err(|_| invalid())
+    }
+    fn strs(&mut self) -> std::io::Result<Vec<&'a str>> {
+        let len = self.u32()?;
+        (0..len).map(|_| self.str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip() {
+        let database = Database {
+            build_dir: "build",
+            missing: vec!["Debug"],
+            flychecks: vec![
+                Flycheck { label: "app@x86_64", diagnostics: vec!["a.json", "b é.json"] },
+                Flycheck { label: "empty", diagnostics: vec![] },
+            ],
+            tests: vec![Test { name: "unit", command: vec!["./run", "a b"] }],
+        };
+        let mut bytes = Vec::new();
+        write(&mut bytes, &database).unwrap();
+        assert_eq!(read(&bytes).unwrap(), database);
+    }
+
+    #[test]
+    fn rejects_other_files() {
+        let mut bytes = Vec::new();
+        write(&mut bytes, &Database::default()).unwrap();
+        bytes[4] += 1;
+        assert_eq!(read(&bytes).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(read(b"{\"crates\"").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        // truncated
+        let mut bytes = Vec::new();
+        let tests = vec![Test { name: "x", command: vec![] }];
+        write(&mut bytes, &Database { build_dir: "", missing: vec![], flychecks: vec![], tests }).unwrap();
+        assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+}

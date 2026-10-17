@@ -1,0 +1,15 @@
+# defaults
+set codegen/opt-level 3
+
+@if exists('Debug')
+use 'Debug'
+    file
+
+log note 'opt-level: {codegen/opt-level}'
+
+crate jig 'src/main.rs'
+    crate-type 'bin'
+    test
+
+crate integration 'test/main.rs'
+    test
