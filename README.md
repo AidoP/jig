@@ -292,6 +292,11 @@ Functions are called with their arguments in `()`, separated by `, `:
   is
 - `join(list, separator)`: the items of a list, converted to strings as in a string template, separated by a `str`
 - `split(str, separator)`: the parts of a `str` between each non-empty separator, as a list, including empty parts
+- `semver-compatible(version, requirement)`: whether a semantic version, `<major>.<minor>.<patch>`, meets a requirement,
+  as cargo's default requirement for a dependency, as a `bool`. The version is at least the requirement, and before
+  the next version which changes the requirement's leftmost number which is not `0`, or the last number it gives, so
+  `1.2` allows up to `2.0.0`, `0.2.3` up to `0.3.0`, and `0.0.3` only itself. A pre-release, such as `1.2.3-beta.1`, only
+  meets a requirement for a pre-release of the same numbers, and build metadata, after `+`, is ignored
 - `path(str)`: a path relative to the directory of the file containing the expression, as a `str`. An absolute path
   is not made relative. `.` and `..` are resolved without following symbolic links
 - `read(path)`: the contents of a file, without trailing newlines, where the path is relative to the file containing

@@ -9,6 +9,7 @@ mod functions;
 mod install;
 mod meta;
 mod properties;
+mod semver;
 mod references;
 pub mod rust;
 mod statements;

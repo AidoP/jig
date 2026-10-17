@@ -3695,3 +3695,23 @@ custom version
     assert!(!success);
     assert_contains(&output, "missing required argument `toolchain`");
 }
+
+#[test]
+fn semver_compatible() {
+    let project = Project::new("semver-compatible", &[("Jig", "\
+log note '{semver-compatible('1.4.0', '1.2')} {semver-compatible('2.0.0', '1.2')} {semver-compatible('0.3.0', '0.2.1')}'
+log note '{semver-compatible('1.2.3-beta.2', '1.2.3-beta.1')} {semver-compatible('1.3.0-beta', '1.2')}'
+")]);
+    project.configure().ok()
+        // as cargo compares a version to a dependency's requirement
+        .stderr("note: true false false\n")
+        // where a pre-release only meets a requirement for one of the same version
+        .stderr("note: true false\n");
+    let project = Project::new("semver-compatible-errors", &[("Jig", "\
+log note semver-compatible('1.2', '1')
+log note semver-compatible('1.2.3', 'x')
+")]);
+    project.configure().failed()
+        .stderr("error[invalid-version]: invalid version \"1.2\", as its patch number is missing\n --> Jig:1:28")
+        .stderr("error[invalid-version]: invalid version requirement \"x\", as its major number, \"x\", is not a number\n --> Jig:2:37");
+}

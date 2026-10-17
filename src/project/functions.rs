@@ -6,7 +6,7 @@ use super::customs::leading_reference;
 use super::diagnostic::{Diagnostic, Message, Severity};
 use super::syntax::{Parser, Span, argument_end, is_named_entry};
 use super::value::{Coercion, Data, Operand};
-use super::{Project, normalize};
+use super::{Project, normalize, semver};
 
 /// A function which can be called in an expression.
 struct Function {
@@ -34,6 +34,7 @@ const FUNCTIONS: &[Function] = &[
     Function { name: "contains", arguments: Arguments::Exactly(2) },
     Function { name: "join", arguments: Arguments::Exactly(2) },
     Function { name: "split", arguments: Arguments::Exactly(2) },
+    Function { name: "semver-compatible", arguments: Arguments::Exactly(2) },
     Function { name: "get", arguments: Arguments::Either(2, 3) },
     Function { name: "select", arguments: Arguments::AtLeast(1) },
     Function { name: "run", arguments: Arguments::AtLeast(1) },
@@ -272,6 +273,30 @@ impl Project {
                 }
             },
             "lower" => Data::Str(self.str_operand(arguments.next()?)?.to_lowercase()),
+            // as cargo compares a version to a dependency's default requirement
+            "semver-compatible" => {
+                let version = arguments.next()?;
+                let requirement = arguments.next()?;
+                let spans = [version.span, requirement.span];
+                let version = self.str_operand(version)?;
+                let requirement = self.str_operand(requirement)?;
+                match semver::compatible(&version, &requirement) {
+                    Ok(compatible) => Data::Bool(compatible),
+                    Err((which, reason)) => {
+                        let (span, value) = match which {
+                            semver::Which::Version => (spans[0], version),
+                            semver::Which::Requirement => (spans[1], requirement),
+                        };
+                        let requirement = which == semver::Which::Requirement;
+                        self.diagnostics.push(Diagnostic {
+                            span: Some(span),
+                            message: Message::InvalidVersion { value, requirement, reason },
+                            severity: Severity::Error,
+                        });
+                        return None;
+                    },
+                }
+            },
             "starts-with" | "ends-with" => {
                 let string = self.str_operand(arguments.next()?)?;
                 let affix = self.str_operand(arguments.next()?)?;

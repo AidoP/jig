@@ -155,6 +155,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "overlapping-output",
     "invalid-crate-name",
     "invalid-install-mode",
+    "invalid-version",
     "install-conflict",
     "proxy-build",
     "unknown-target",
@@ -349,6 +350,12 @@ pub enum Message {
     },
     /// The value of an `install-mode` attribute, which is not a permission.
     InvalidInstallMode(String),
+    /// A version, or a requirement for one, given to `semver-compatible`, which is not a semantic version.
+    InvalidVersion {
+        value: String,
+        requirement: bool,
+        reason: String,
+    },
     /// A program which a wrapper installed by `jig install --proxy` builds, as it or the configuration is out of date,
     /// before running it. It is reported by `jig build --proxy`, with the severity recorded when configuring.
     ProxyBuild {
@@ -488,6 +495,10 @@ impl core::fmt::Display for Message {
                 write!(f, "output {path:?} of the custom command overlaps {other:?}, the output of the {item} {name:?}")
             },
             Self::InvalidCrateName { name, character } => write!(f, "invalid character {character:?} in crate name {name:?}"),
+            Self::InvalidVersion { value, requirement, reason } => {
+                let kind = if *requirement { "version requirement" } else { "version" };
+                write!(f, "invalid {kind} {value:?}, as {reason}")
+            },
             Self::InvalidInstallMode(mode) => {
                 write!(f, "invalid install mode {mode}, which must be permissions from 0 to 0o7777")
             },
@@ -620,6 +631,7 @@ impl Message {
             Self::OverlappingOutput { .. } => "overlapping-output",
             Self::InvalidCrateName { .. } => "invalid-crate-name",
             Self::InvalidInstallMode(_) => "invalid-install-mode",
+            Self::InvalidVersion { .. } => "invalid-version",
             Self::InstallConflict { .. } => "install-conflict",
             Self::ProxyBuild { .. } => "proxy-build",
             Self::UnknownTarget { .. } => "unknown-target",
