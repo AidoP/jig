@@ -146,6 +146,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;
     let host = rustc_print("host-tuple", toolchain)?;
     let targets = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
+    let version = rustc_version(toolchain)?;
 
     let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets);
     project.toolchain = toolchain.map(String::from);
@@ -155,9 +156,16 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     };
     let builtins = [
         (
-            project::Property::new("sysroot".into(), project::Type::String)
-                .info("the sysroot of the Rust toolchain"),
+            project::Property::new("rustc/sysroot".into(), project::Type::String)
+                .info("the sysroot of the Rust toolchain")
+                .read_only(),
             sysroot.clone(),
+        ),
+        (
+            project::Property::new("rustc/version".into(), project::Type::String)
+                .info("the version of rustc, such as `1.95.0`, or `1.96.0-nightly` for a nightly toolchain")
+                .read_only(),
+            version,
         ),
         (
             project::Property::new("target".into(), project::Type::String)
@@ -311,9 +319,27 @@ impl core::fmt::Display for Error {
 
 /// Returns the trimmed output of `rustc --print=<request>`, with a toolchain if one is given.
 fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> {
+    rustc_output(&format!("--print={request}"), toolchain)
+}
+
+/// Returns the version of rustc, from the `release` line of `rustc -vV`, with a toolchain if one is given.
+fn rustc_version(toolchain: Option<&str>) -> Result<String, Error> {
+    let output = rustc_output("-vV", toolchain)?;
+    match output.lines().find_map(|line| line.strip_prefix("release: ")) {
+        Some(version) => Ok(version.trim().into()),
+        None => {
+            let mut cmd = std::process::Command::new("rustc");
+            cmd.arg("-vV");
+            Err(Error::InvalidOutput(cmd))
+        },
+    }
+}
+
+/// Returns the trimmed output of rustc with an argument, with a toolchain if one is given.
+fn rustc_output(argument: &str, toolchain: Option<&str>) -> Result<String, Error> {
     use std::process::Command;
     let mut cmd = Command::new("rustc");
-    cmd.arg(format!("--print={request}"));
+    cmd.arg(argument);
     toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Err(error) => {

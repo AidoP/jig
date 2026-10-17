@@ -3750,3 +3750,28 @@ log note 'b'
         .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"no spaces\"\n --> Jig:2:8")
         .stderr("error[expected-identifier]: expected identifier\n --> Jig:4:8");
 }
+
+#[test]
+fn rustc_properties() {
+    let project = Project::new("rustc-properties", &[("Jig", "\
+log note 'version {rustc/version}'
+log note 'sysroot {rustc/sysroot}'
+log note keys(rustc/)
+log note semver-compatible(rustc/version, '1')
+")]);
+    let rustc = |arg: &str| {
+        let output = Command::new("rustc").arg(arg).current_dir(&project.dir).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let version = rustc("-vV");
+    let version = version.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
+    let sysroot = rustc("--print=sysroot");
+    project.configure().ok()
+        // the version is the release of rustc, which is semantic
+        .stderr(&format!("note: version {version}\n"))
+        .stderr(&format!("note: sysroot {}\n", sysroot.trim()))
+        .stderr("note: sysroot version\n")
+        .stderr(&format!("note: {}\n", !version.contains('-')));
+    let project = Project::new("rustc-properties-read-only", &[("Jig", "set rustc/version '2.0.0'\n")]);
+    project.configure().failed().stderr("error[read-only-property]: ");
+}

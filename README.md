@@ -511,7 +511,10 @@ target bluemetal-riscv64
 
 ### Builtin properties
 
-- `sysroot`: the sysroot of the Rust toolchain, as printed by `rustc --print=sysroot`
+- `rustc/sysroot`: the sysroot of the Rust toolchain, as printed by `rustc --print=sysroot`, which is read-only
+- `rustc/version`: the version of rustc, from the `release` line of `rustc -vV`, such as `1.95.0`, or `1.96.0-nightly`
+  for a nightly toolchain, which is read-only. As it is semantic, it can be compared with `semver-compatible`, where a
+  nightly version is a pre-release
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
   once it is used, such as by a crate or the outputs of a custom command, so it is set before them. When it changes,
   `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to date, and
