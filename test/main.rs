@@ -3570,3 +3570,51 @@ log note unique()
         .stderr("error[integer-overflow]: integer overflow\n --> Jig:3:15")
         .stderr("error[argument-count]: function \"unique\" takes at least 1 argument, but 0 were given\n --> Jig:4:10");
 }
+
+#[test]
+fn default_flag() {
+    // `default` is `true` without a value, or takes a `bool`
+    let project = Project::new("default-flag", &[("Jig", "\
+crate a 'a.rs'
+    default
+crate b 'b.rs'
+    default false
+crate c 'c.rs'
+    default target == host-target
+custom d
+    command 'true'
+    default true
+custom e
+    command 'true'
+    default 1 == 2
+crate f 'f.rs'
+    builtin false
+    test {'false'}
+crate g 'g.rs'
+    builtin
+    test true
+log note '{a.default} {b.default} {c.default} {d.default} {e.default}'
+log note '{f.builtin} {f.test} {g.builtin} {g.test}'
+")]);
+    let host = project.host();
+    let output = project.configure().ok();
+    output.stderr("note: true false true true false\n").stderr("note: false false true true\n");
+    // `builtin` and `test` of crates are flags too
+    assert_contains(&output.ninja, &format!("\nbuild test/g: phony {host}/test/g\n"));
+    assert!(!output.ninja.contains("test/f"), "{}", output.ninja);
+    assert_contains(&output.ninja, &format!("\ndefault custom/d {host}/liba.rlib {host}/libc.rlib\n"));
+    let project = Project::new("default-flag-errors", &[("Jig", "\
+crate a 'a.rs'
+    default 'yes'
+    builtin 'yes'
+    test 0
+custom b
+    command 'true'
+    default 1
+")]);
+    project.configure().failed()
+        .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:2:13")
+        .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:3:13")
+        .stderr("error[invalid-operand]: unsigned value used where bool is required\n --> Jig:4:10")
+        .stderr("error[invalid-operand]: unsigned value used where bool is required\n --> Jig:7:13");
+}

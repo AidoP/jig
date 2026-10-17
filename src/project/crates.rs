@@ -71,9 +71,21 @@ impl Project {
         let mut install_attributes = Vec::new();
         while let Some(attribute) = self.next_attribute(parser, &["use"]) {
             match attribute.name {
-                "builtin" => builtin = true,
-                "default" => default = true,
-                "test" => test = true,
+                "builtin" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        builtin = value;
+                    }
+                },
+                "default" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        default = value;
+                    }
+                },
+                "test" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        test = value;
+                    }
+                },
                 "crate-type" => {
                     let span = attribute.data_span;
                     let Some(crate_type) = self.str_operand(attribute.operand()) else {

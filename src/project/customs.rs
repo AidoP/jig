@@ -138,14 +138,19 @@ impl Project {
                     };
                     depends.extend(new);
                 },
-                "default" if !test => default = true,
-                "install" | "install-dir" | "install-mode" if !test => {
-                    let Some(operand) = self.parse_install_value(parser, attribute_span) else {
+                "default" | "install" | "install-dir" | "install-mode" if !test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         failed = true;
                         continue;
                     };
-                    self.install_attribute(&mut install, attribute, operand);
+                    if attribute == "default" {
+                        if let Some(value) = self.flag(operand) {
+                            default = value;
+                        }
+                    } else {
+                        self.install_attribute(&mut install, attribute, operand);
+                    }
                 },
                 "command" => {
                     let Some(arguments) = self.parse_command(parser) else {

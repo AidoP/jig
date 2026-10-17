@@ -363,19 +363,22 @@ A `crate` statement may be followed by indented attributes:
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated
-- `builtin`: pass the crate with `--extern` to every crate for the same target which is not builtin, like the standard
-  library. Builtin crates are not passed to each other, so a builtin crate must `use` the ones it depends on
+- `builtin <bool>`: pass the crate with `--extern` to every crate for the same target which is not builtin, like the
+  standard library. Builtin crates are not passed to each other, so a builtin crate must `use` the ones it depends on.
+  It is `false` by default, and `true` without a value
 - `crate-type <type>`: `'lib'`, which is the default, `'bin'` for an executable, `<build-dir>/<target>/<name>`, which
   cannot be used by other crates, or `'proc-macro'` for a procedural macro. A procedural macro is compiled for the
   host target, as rustc runs it, so it is not compiled for the `target` property, and can be used by crates for any
   target
-- `default`: build the crate when `jig build` is run without targets
+- `default <bool>`: build the crate when `jig build` is run without targets, which is `false` by default. Without a
+  value, it is `true`
 - `codegen/<option> <value>`: a codegen option for the crate, which replaces the property of the option. See below
 - `test`: build the crate's tests with `--test` as `<build-dir>/<target>/test/<name>`, and register a test which runs
   them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for the host
   target, a builtin target which the host can run, or a target with `test`, can be tested. The host can run a target
   with its architecture, vendor, operating system and environment, except that a musl target runs where the host's
-  environment is glibc, such as `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu`
+  environment is glibc, such as `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu`. It is `false` by default,
+  and `true` without a value
 - `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is
@@ -425,7 +428,8 @@ A `custom` statement is followed by indented attributes:
   argument, except for a list, each item of which is an argument. As with `run`, a program containing a `/` is a path
   relative to the file, and the outputs are rebuilt when it changes, while any other program is found in `PATH`. A
   program which is a reference is the path of the crate or custom command's output. It is required
-- `default`: run the command when `jig build` is run without targets
+- `default <bool>`: run the command when `jig build` is run without targets, which is `false` by default. Without a
+  value, it is `true`
 - `install <bool>`, `install-dir <str>`, `install-mode <unsigned>`: install the outputs with `jig install`, as for a
   crate, in `'share'` with the permissions `0o644` by default
 

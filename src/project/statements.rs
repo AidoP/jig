@@ -15,6 +15,8 @@ pub(super) struct Attribute<'a> {
     pub(super) data_span: Span,
     /// Where the value was set, if the data is the value of a property.
     pub(super) origin: Option<Span>,
+    /// How far the value may be converted, which is further for an expression in `{}`.
+    pub(super) coerce: Coercion,
 }
 /// The name of a property or crate, as taken by [`Project::parse_name`].
 pub(super) struct Name {
@@ -25,9 +27,9 @@ pub(super) struct Name {
 }
 
 impl Attribute<'_> {
-    /// The value of the attribute as an operand, which is not converted to another type.
+    /// The value of the attribute as an operand, which may be converted as far as its expression permits.
     pub(super) fn operand(self) -> Operand {
-        Operand { data: self.data, span: self.data_span, coerce: Coercion::Strict, origin: self.origin }
+        Operand { data: self.data, span: self.data_span, coerce: self.coerce, origin: self.origin }
     }
 }
 
@@ -354,6 +356,23 @@ impl Project {
         }
         Some((path_buf, span))
     }
+    /// Take the optional value of an attribute after its name, which is at the parser, as an operand which is `none`
+    /// without a value.
+    ///
+    /// Returns [`None`] if the value could not be taken, which has been reported.
+    pub(super) fn parse_attribute_value(&mut self, parser: &mut Parser, name_span: Span) -> Option<Operand> {
+        if !parser.expect(' ') {
+            return Some(Operand { data: Data::None, span: name_span, coerce: Coercion::Strict, origin: None });
+        }
+        self.parse_expression(parser)
+    }
+    /// Returns the value of a flag attribute, such as `default`, which is `true` without a value, or is a `bool`.
+    pub(super) fn flag(&mut self, operand: Operand) -> Option<bool> {
+        if operand.data == Data::None {
+            return Some(true);
+        }
+        self.bool_operand(operand)
+    }
     /// Take the next indented attribute of a statement, skipping those which are invalid, which have been reported.
     pub(super) fn next_attribute<'a>(&mut self, parser: &mut Parser<'a>, names: &[&str]) -> Option<Attribute<'a>> {
         while parser.indent().is_some() {
@@ -379,7 +398,7 @@ impl Project {
         }
         let name = &parser.data[start..parser.offset];
         let name_span = parser.span_from(start);
-        let (data, data_span, origin) = if names.contains(&name) {
+        let (data, data_span, origin, coerce) = if names.contains(&name) {
             if !self.parse_space(parser) {
                 return None;
             }
@@ -399,12 +418,12 @@ impl Project {
                     severity: Severity::Suggestion,
                 });
             }
-            (Data::Str(value), span, None)
+            (Data::Str(value), span, None, Coercion::Strict)
         } else if parser.expect(' ') {
             let operand = self.parse_expression(parser)?;
-            (operand.data, operand.span, operand.origin)
+            (operand.data, operand.span, operand.origin, operand.coerce)
         } else {
-            (Data::None, name_span, None)
+            (Data::None, name_span, None, Coercion::Strict)
         };
         if !self.parse_line_end(parser) {
             parser.skip_line();
@@ -415,6 +434,7 @@ impl Project {
             data,
             data_span,
             origin,
+            coerce,
         })
     }
 }

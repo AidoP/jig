@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use super::{Project, rust};
 use super::customs::CustomKind;
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
-use super::syntax::{Parser, Span};
-use super::value::{Coercion, Data, Operand};
+use super::syntax::Span;
+use super::value::{Data, Operand};
 
 /// Where and how the outputs of a crate or custom command are installed, with defaults depending on what it is.
 #[derive(Clone)]
@@ -63,9 +63,8 @@ impl Project {
     /// attribute without a value.
     pub(super) fn install_attribute(&mut self, install: &mut Install, name: &str, operand: Operand) {
         match name {
-            "install" if operand.data == Data::None => install.enabled = true,
             "install" => {
-                if let Some(enabled) = self.bool_operand(operand) {
+                if let Some(enabled) = self.flag(operand) {
                     install.enabled = enabled;
                 }
             },
@@ -159,15 +158,5 @@ impl Project {
             message: Message::InvalidInstallMode(mode),
             severity: Severity::Error,
         });
-    }
-    /// Take the optional value of an install attribute after its name, which is at the parser, as an operand which is
-    /// `none` without a value.
-    ///
-    /// Returns [`None`] if the value could not be taken, which has been reported.
-    pub(super) fn parse_install_value(&mut self, parser: &mut Parser, name_span: Span) -> Option<Operand> {
-        if !parser.expect(' ') {
-            return Some(Operand { data: Data::None, span: name_span, coerce: Coercion::Strict, origin: None });
-        }
-        self.parse_expression(parser)
     }
 }
