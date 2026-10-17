@@ -3540,3 +3540,33 @@ crate app 'app.rs'
 "))]);
     project.configure().failed().stderr(&format!("error[test-target]: tests for target \"{musl}\" cannot be run"));
 }
+
+#[test]
+fn unique_and_sort() {
+    let project = Project::new("unique-and-sort", &[("Jig", "\
+log note '{unique('a', 'b', 'a')} | {unique([1, 2], 2, [3, 1])}'
+log note '{sort('b', 'a', 'c')} | {sort([3, -1, 2])} | {sort(true, false)} | {len(sort([]))}'
+log note '{sort(unique(['b', 'a'], 'b'))}'
+")]);
+    project.configure().ok()
+        // each item of a list is a value, and the first of those which are equal is kept
+        .stderr("note: a b | 1 2 3\n")
+        // integers of either sign are compared as signed
+        .stderr("note: a b c | -1 2 3 | false true | 0\n")
+        .stderr("note: a b\n");
+}
+
+#[test]
+fn unique_and_sort_errors() {
+    let project = Project::new("unique-and-sort-errors", &[("Jig", "\
+log note sort('a', 1)
+log note sort([['a']])
+log note sort(0xffff_ffff_ffff_ffff, -1)
+log note unique()
+")]);
+    project.configure().failed()
+        .stderr("error[mismatched-operands]: mismatched operand types str and unsigned\n --> Jig:1:10")
+        .stderr("error[invalid-operand]: list value used where str, bool or an integer is required\n --> Jig:2:15")
+        .stderr("error[integer-overflow]: integer overflow\n --> Jig:3:15")
+        .stderr("error[argument-count]: function \"unique\" takes at least 1 argument, but 0 were given\n --> Jig:4:10");
+}

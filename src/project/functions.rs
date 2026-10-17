@@ -27,6 +27,8 @@ const FUNCTIONS: &[Function] = &[
     Function { name: "len", arguments: Arguments::Exactly(1) },
     Function { name: "keys", arguments: Arguments::Exactly(1) },
     Function { name: "values", arguments: Arguments::Exactly(1) },
+    Function { name: "unique", arguments: Arguments::AtLeast(1) },
+    Function { name: "sort", arguments: Arguments::AtLeast(1) },
     Function { name: "starts-with", arguments: Arguments::Exactly(2) },
     Function { name: "ends-with", arguments: Arguments::Exactly(2) },
     Function { name: "contains", arguments: Arguments::Exactly(2) },
@@ -132,17 +134,7 @@ impl Project {
                 self.get(collection, key, default)?
             },
             "min" | "max" => {
-                // each item of a list is a value, which may be signed or unsigned like a literal
-                let mut values = Vec::new();
-                for argument in arguments {
-                    match argument.data {
-                        Data::List(items) => values.extend(items.into_iter().map(|data| {
-                            Operand { data, span: argument.span, coerce: Coercion::Sign, origin: argument.origin }
-                        })),
-                        _ => values.push(argument),
-                    }
-                }
-                let mut values = values.into_iter();
+                let mut values = values(arguments);
                 let Some(first) = values.next() else {
                     self.diagnostics.push(Diagnostic {
                         span: Some(span),
@@ -210,6 +202,17 @@ impl Project {
                 let value = arguments.next()?;
                 Data::Bool(self.contains(collection, value)?)
             },
+            // the first of each value which is equal to others, in order
+            "unique" => {
+                let mut unique = Vec::new();
+                for value in values(arguments) {
+                    if !unique.contains(&value.data) {
+                        unique.push(value.data);
+                    }
+                }
+                Data::List(unique)
+            },
+            "sort" => Data::List(self.sort(values(arguments).collect(), span)?),
             "keys" | "values" => {
                 let operand = arguments.next()?;
                 let Data::Dict(entries) = operand.data else {
@@ -382,6 +385,59 @@ impl Project {
         }
         self.diagnostics.push(Diagnostic { span: Some(key_span), message: missing, severity: Severity::Error });
         None
+    }
+    /// Returns values in order, which are all `str`, `bool` or integers, where integers of either sign are compared as
+    /// `signed` if any is, as by `min` and `max`.
+    fn sort(&mut self, values: Vec<Operand>, span: Span) -> Option<Vec<Data>> {
+        let signed = values.iter().all(|value| value.data.is_integer())
+            && values.iter().any(|value| matches!(value.data, Data::Signed(_)));
+        let mut items = Vec::new();
+        for value in values {
+            let data = match value.data {
+                Data::Unsigned(_) if signed => match value.data.convert_sign() {
+                    Some(data) => data,
+                    None => {
+                        self.diagnostics.push(Diagnostic {
+                            span: Some(value.span),
+                            message: Message::IntegerOverflow,
+                            severity: Severity::Error,
+                        });
+                        return None;
+                    },
+                },
+                Data::Str(_) | Data::Bool(_) | Data::Unsigned(_) | Data::Signed(_) => value.data,
+                _ => {
+                    self.invalid_operand(&value, "str, bool or an integer", false);
+                    return None;
+                },
+            };
+            items.push((data, value.origin));
+        }
+        let Some((first, first_origin)) = items.first() else {
+            return Some(Vec::new());
+        };
+        if let Some((other, other_origin)) = items.iter().find(|(item, _)| item.type_name() != first.type_name()) {
+            self.diagnostics.push(Diagnostic {
+                span: Some(span),
+                message: Message::MismatchedOperands {
+                    lhs: first.type_name(),
+                    rhs: other.type_name(),
+                    lhs_origin: *first_origin,
+                    rhs_origin: *other_origin,
+                },
+                severity: Severity::Error,
+            });
+            return None;
+        }
+        let mut items: Vec<_> = items.into_iter().map(|(item, _)| item).collect();
+        items.sort_by(|lhs, rhs| match (lhs, rhs) {
+            (Data::Str(lhs), Data::Str(rhs)) => lhs.cmp(rhs),
+            (Data::Bool(lhs), Data::Bool(rhs)) => lhs.cmp(rhs),
+            (Data::Unsigned(lhs), Data::Unsigned(rhs)) => lhs.cmp(rhs),
+            (Data::Signed(lhs), Data::Signed(rhs)) => lhs.cmp(rhs),
+            _ => unreachable!("the items have the same type"),
+        });
+        Some(items)
     }
     /// Returns whether a list has an item equal to a value, or a dict has an entry for a key.
     fn contains(&mut self, collection: Operand, value: Operand) -> Option<bool> {
@@ -626,4 +682,16 @@ impl Project {
         };
         Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin })
     }
+}
+
+/// Returns the values of arguments, where each item of a list is a value, which may be signed or unsigned like a
+/// literal.
+fn values(arguments: impl Iterator<Item = Operand>) -> impl Iterator<Item = Operand> {
+    arguments.flat_map(|argument| match argument.data {
+        Data::List(items) => {
+            let (span, origin) = (argument.span, argument.origin);
+            items.into_iter().map(|data| Operand { data, span, coerce: Coercion::Sign, origin }).collect()
+        },
+        _ => vec![argument],
+    })
 }

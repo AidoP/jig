@@ -275,6 +275,11 @@ Functions are called with their arguments in `()`, separated by `, `:
 - `get(list, index, default)`: the item of a list at an index, counting from `0`, or the value of a dict for a key, or
   the default if there is none, which is an error without a default
 - `min(value, ...)` and `max(value, ...)`: the smallest or largest of integers, where each item of a list is a value
+- `unique(value, ...)`: the values without those equal to an earlier one, as a list, where each item of a list is a
+  value
+- `sort(value, ...)`: the values in order, as a list, where each item of a list is a value. They must all be `str`,
+  which are ordered by their bytes, `bool`, where `false` is first, or integers, which are compared as `signed` if any
+  is
 - `join(list, separator)`: the items of a list, converted to strings as in a string template, separated by a `str`
 - `split(str, separator)`: the parts of a `str` between each non-empty separator, as a list, including empty parts
 - `path(str)`: a path relative to the directory of the file containing the expression, as a `str`. An absolute path
