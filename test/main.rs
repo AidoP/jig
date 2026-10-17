@@ -3775,3 +3775,25 @@ log note semver-compatible(rustc/version, '1')
     let project = Project::new("rustc-properties-read-only", &[("Jig", "set rustc/version '2.0.0'\n")]);
     project.configure().failed().stderr("error[read-only-property]: ");
 }
+
+#[test]
+fn semver_compatible_ignoring_pre_releases() {
+    let project = Project::new("semver-ignore-pre", &[("Jig", "\
+log note semver-compatible('1.101.0-nightly', '1.95')
+log note semver-compatible('1.101.0-nightly', '1.95', ignore-pre-release: true)
+log note semver-compatible('1.95.0-nightly', '1.95', ignore-pre-release: {'true'})
+log note semver-compatible('1.94.0-nightly', '1.95', ignore-pre-release: true)
+")]);
+    // a nightly version is compatible as its release would be
+    project.configure().ok().stderr("note: false\n").stderr("note: true\n --> Jig:2:10").stderr("note: true\n --> Jig:3:10")
+        .stderr("note: false\n --> Jig:4:10");
+    let project = Project::new("semver-ignore-pre-errors", &[("Jig", "\
+log note semver-compatible('1.0.0', '1', nightly: true)
+log note semver-compatible('1.0.0', '1', ignore-pre-release: true, ignore-pre-release: false)
+log note semver-compatible('1.0.0', ignore-pre-release: 1)
+")]);
+    project.configure().failed()
+        .stderr("error[unknown-keyword-argument]: function \"semver-compatible\" has no keyword argument \"nightly\"\n --> Jig:1:42")
+        .stderr("error[repeated-keyword-argument]: keyword argument \"ignore-pre-release\" cannot be repeated\n --> Jig:2:68")
+        .stderr("error[argument-count]: function \"semver-compatible\" takes 2 arguments, but 1 was given\n --> Jig:3:10");
+}

@@ -301,7 +301,14 @@ Functions are called with their arguments in `()`, separated by `, `:
   as cargo's default requirement for a dependency, as a `bool`. The version is at least the requirement, and before
   the next version which changes the requirement's leftmost number which is not `0`, or the last number it gives, so
   `1.2` allows up to `2.0.0`, `0.2.3` up to `0.3.0`, and `0.0.3` only itself. A pre-release, such as `1.2.3-beta.1`, only
-  meets a requirement for a pre-release of the same numbers, and build metadata, after `+`, is ignored
+  meets a requirement for a pre-release of the same numbers, and build metadata, after `+`, is ignored. With
+  `ignore-pre-release: true`, pre-releases are ignored, so that a version is compared by its numbers alone, as a
+  nightly version of rustc has the features of its release
+
+```
+@if !semver-compatible(rustc/version, '1.95', ignore-pre-release: true)
+log error 'Rust 1.95 or later is needed'
+```
 - `path(str)`: a path relative to the directory of the file containing the expression, as a `str`. An absolute path
   is not made relative. `.` and `..` are resolved without following symbolic links
 - `read(path)`: the contents of a file, without trailing newlines, where the path is relative to the file containing
@@ -514,7 +521,7 @@ target bluemetal-riscv64
 - `rustc/sysroot`: the sysroot of the Rust toolchain, as printed by `rustc --print=sysroot`, which is read-only
 - `rustc/version`: the version of rustc, from the `release` line of `rustc -vV`, such as `1.95.0`, or `1.96.0-nightly`
   for a nightly toolchain, which is read-only. As it is semantic, it can be compared with `semver-compatible`, where a
-  nightly version is a pre-release
+  nightly version is a pre-release, unless it is given `ignore-pre-release: true`
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
   once it is used, such as by a crate or the outputs of a custom command, so it is set before them. When it changes,
   `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to date, and

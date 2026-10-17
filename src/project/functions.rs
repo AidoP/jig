@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::customs::leading_reference;
 use super::diagnostic::{Diagnostic, Message, Severity};
+use super::statements::Name;
 use super::syntax::{Parser, Span, argument_end, is_named_entry};
 use super::value::{Coercion, Data, Operand};
 use super::{Project, normalize, semver};
@@ -76,11 +77,11 @@ impl core::fmt::Display for Arguments {
     }
 }
 
-/// An argument of the `run` function.
-enum RunArgument {
+/// An argument of a function which takes keyword arguments, `<name>: <value>`, such as the environment variables of
+/// `run`.
+enum Argument {
     Positional(Operand),
-    /// An environment variable for the program.
-    Env(String, Operand),
+    Named { name: String, span: Span, value: Operand },
 }
 
 impl Project {
@@ -102,10 +103,16 @@ impl Project {
             return self.parse_try(parser, name_span);
         }
         if name == "run" {
-            let arguments = self.parse_arguments(parser, ')', Self::parse_run_argument)?;
+            let arguments = self.parse_arguments(parser, ')', Self::parse_argument)?;
             let span = parser.span_from(name_span.offset);
             self.impure("run", span);
             return self.run(arguments, span);
+        }
+        if name == "semver-compatible" {
+            let arguments = self.parse_arguments(parser, ')', Self::parse_argument)?;
+            let span = parser.span_from(name_span.offset);
+            let data = self.semver_compatible(arguments, expected, span)?;
+            return Some(Operand { data, span, coerce: Coercion::Strict, origin: None });
         }
         if name == "select" {
             let names = self.parse_arguments(parser, ')', |this, parser| {
@@ -273,30 +280,6 @@ impl Project {
                 }
             },
             "lower" => Data::Str(self.str_operand(arguments.next()?)?.to_lowercase()),
-            // as cargo compares a version to a dependency's default requirement
-            "semver-compatible" => {
-                let version = arguments.next()?;
-                let requirement = arguments.next()?;
-                let spans = [version.span, requirement.span];
-                let version = self.str_operand(version)?;
-                let requirement = self.str_operand(requirement)?;
-                match semver::compatible(&version, &requirement) {
-                    Ok(compatible) => Data::Bool(compatible),
-                    Err((which, reason)) => {
-                        let (span, value) = match which {
-                            semver::Which::Version => (spans[0], version),
-                            semver::Which::Requirement => (spans[1], requirement),
-                        };
-                        let requirement = which == semver::Which::Requirement;
-                        self.diagnostics.push(Diagnostic {
-                            span: Some(span),
-                            message: Message::InvalidVersion { value, requirement, reason },
-                            severity: Severity::Error,
-                        });
-                        return None;
-                    },
-                }
-            },
             "starts-with" | "ends-with" => {
                 let string = self.str_operand(arguments.next()?)?;
                 let affix = self.str_operand(arguments.next()?)?;
@@ -490,31 +473,99 @@ impl Project {
     ///
     /// The name of an environment variable is a name, as taken by [`Self::parse_name`]. As an expression can also be
     /// an identifier or start with `{`, it is only a name if it is followed by `: `.
-    fn parse_run_argument(&mut self, parser: &mut Parser) -> Option<RunArgument> {
+    fn parse_argument(&mut self, parser: &mut Parser) -> Option<Argument> {
         if !is_named_entry(parser) {
-            return Some(RunArgument::Positional(self.parse_binary(parser, 0)?));
+            return Some(Argument::Positional(self.parse_binary(parser, 0)?));
         }
-        let name = self.parse_name(parser)?.name;
+        let Name { name, span, .. } = self.parse_name(parser)?;
         parser.offset += 2;
-        Some(RunArgument::Env(name, self.parse_binary(parser, 0)?))
+        Some(Argument::Named { name, span, value: self.parse_binary(parser, 0)? })
+    }
+    /// Returns whether a version meets a requirement, as cargo compares a version to a dependency's default
+    /// requirement, from the arguments of `semver-compatible`, which are the version and the requirement, and
+    /// `ignore-pre-release: <bool>`, which compares them by their numbers alone, so that a nightly version of rustc is
+    /// compatible as its release would be.
+    fn semver_compatible(&mut self, arguments: Vec<Argument>, expected: Arguments, span: Span) -> Option<Data> {
+        let mut positional = Vec::new();
+        let mut ignore_pre_release = None;
+        let mut failed = false;
+        for argument in arguments {
+            match argument {
+                Argument::Positional(operand) => positional.push(operand),
+                Argument::Named { name, span, value } if name == "ignore-pre-release" => {
+                    if ignore_pre_release.is_some() {
+                        self.diagnostics.push(Diagnostic {
+                            span: Some(span),
+                            message: Message::RepeatedKeywordArgument(name),
+                            severity: Severity::Error,
+                        });
+                        failed = true;
+                        continue;
+                    }
+                    match self.bool_operand(value) {
+                        Some(value) => ignore_pre_release = Some(value),
+                        None => failed = true,
+                    }
+                },
+                Argument::Named { name, span, .. } => {
+                    self.diagnostics.push(Diagnostic {
+                        span: Some(span),
+                        message: Message::UnknownKeywordArgument { function: "semver-compatible", name },
+                        severity: Severity::Error,
+                    });
+                    failed = true;
+                },
+            }
+        }
+        if positional.len() != 2 {
+            self.argument_count("semver-compatible", expected, positional.len(), span);
+            return None;
+        }
+        let mut positional = positional.into_iter();
+        let (version, requirement) = (positional.next()?, positional.next()?);
+        let spans = [version.span, requirement.span];
+        let version = self.str_operand(version);
+        let requirement = self.str_operand(requirement);
+        let (Some(version), Some(requirement)) = (version, requirement) else {
+            return None;
+        };
+        if failed {
+            return None;
+        }
+        match semver::compatible(&version, &requirement, ignore_pre_release.unwrap_or(false)) {
+            Ok(compatible) => Some(Data::Bool(compatible)),
+            Err((which, reason)) => {
+                let (span, value) = match which {
+                    semver::Which::Version => (spans[0], version),
+                    semver::Which::Requirement => (spans[1], requirement),
+                };
+                let requirement = which == semver::Which::Requirement;
+                self.diagnostics.push(Diagnostic {
+                    span: Some(span),
+                    message: Message::InvalidVersion { value, requirement, reason },
+                    severity: Severity::Error,
+                });
+                None
+            },
+        }
     }
     /// Run a program, returning its output without trailing newlines.
     ///
     /// The first argument is the program, followed by its arguments and then any environment variables.
-    fn run(&mut self, arguments: Vec<RunArgument>, span: Span) -> Option<Operand> {
+    fn run(&mut self, arguments: Vec<Argument>, span: Span) -> Option<Operand> {
         let mut command_line = Vec::new();
         let mut env = Vec::new();
         let mut failed = false;
         // the path of a program which is a reference, which is already resolved
         let mut program_path = None;
         for argument in arguments {
-            if command_line.is_empty() && let RunArgument::Positional(operand) = &argument
+            if command_line.is_empty() && let Argument::Positional(operand) = &argument
                 && let Some(reference) = leading_reference(&operand.data)
             {
                 program_path = reference.paths.first().cloned();
             }
             match argument {
-                RunArgument::Positional(operand) if !env.is_empty() => {
+                Argument::Positional(operand) if !env.is_empty() => {
                     self.diagnostics.push(Diagnostic {
                         span: Some(operand.span),
                         message: Message::PositionalAfterEnv,
@@ -523,14 +574,14 @@ impl Project {
                     failed = true;
                 },
                 // each item of a list is a separate argument
-                RunArgument::Positional(Operand { data: Data::List(items), .. }) => {
+                Argument::Positional(Operand { data: Data::List(items), .. }) => {
                     command_line.extend(Data::List(items).spread());
                 },
-                RunArgument::Positional(operand) => match self.str_operand(operand) {
+                Argument::Positional(operand) => match self.str_operand(operand) {
                     Some(string) => command_line.push(string),
                     None => failed = true,
                 },
-                RunArgument::Env(name, operand) => match self.str_operand(operand) {
+                Argument::Named { name, value: operand, .. } => match self.str_operand(operand) {
                     Some(value) => env.push((name, value)),
                     None => failed = true,
                 },

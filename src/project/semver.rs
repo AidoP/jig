@@ -93,12 +93,18 @@ fn compare_pre(lhs: &[String], rhs: &[String]) -> Ordering {
 /// last number it gives: `1.2.3` allows up to `2.0.0`, `0.2.3` up to `0.3.0`, `0.0.3` only itself, `1.2` up to `2.0.0`
 /// and `0` up to `1.0.0`.
 ///
-/// A pre-release is only compatible with a requirement for a pre-release of the same numbers, as with cargo.
+/// A pre-release is only compatible with a requirement for a pre-release of the same numbers, as with cargo, unless
+/// `ignore_pre_release`, which compares them by their numbers alone, as a nightly version of rustc has the features of
+/// its release.
 ///
 /// Returns a description of what is wrong with the version or the requirement if one is invalid.
-pub(super) fn compatible(version: &str, requirement: &str) -> Result<bool, (Which, String)> {
-    let version = Version::parse(version, false).map_err(|error| (Which::Version, error))?;
-    let requirement = Version::parse(requirement, true).map_err(|error| (Which::Requirement, error))?;
+pub(super) fn compatible(version: &str, requirement: &str, ignore_pre_release: bool) -> Result<bool, (Which, String)> {
+    let mut version = Version::parse(version, false).map_err(|error| (Which::Version, error))?;
+    let mut requirement = Version::parse(requirement, true).map_err(|error| (Which::Requirement, error))?;
+    if ignore_pre_release {
+        version.pre.clear();
+        requirement.pre.clear();
+    }
     if !version.pre.is_empty() && (requirement.pre.is_empty() || version.numbers() != requirement.numbers()) {
         return Ok(false);
     }
@@ -126,7 +132,7 @@ mod tests {
 
     #[track_caller]
     fn check(version: &str, requirement: &str, expected: bool) {
-        assert_eq!(compatible(version, requirement), Ok(expected), "{version} with {requirement}");
+        assert_eq!(compatible(version, requirement, false), Ok(expected), "{version} with {requirement}");
     }
 
     #[test]
@@ -168,8 +174,21 @@ mod tests {
     }
 
     #[test]
+    fn ignored_pre_releases() {
+        let check = |version, requirement, expected| {
+            assert_eq!(compatible(version, requirement, true), Ok(expected), "{version} with {requirement}");
+        };
+        // a nightly version is compatible as its release is
+        check("1.101.0-nightly", "1.95", true);
+        check("1.95.0-nightly", "1.95", true);
+        check("1.94.0-nightly", "1.95", false);
+        check("1.95.0", "1.95.0-beta.1", true);
+        check("2.0.0-nightly", "1.95", false);
+    }
+
+    #[test]
     fn invalid_versions() {
-        let error = |version, requirement| compatible(version, requirement).unwrap_err();
+        let error = |version, requirement| compatible(version, requirement, false).unwrap_err();
         assert_eq!(error("1.2", "1"), (Which::Version, "its patch number is missing".into()));
         assert_eq!(error("1.2.3", "1.x"), (Which::Requirement, "its minor number, \"x\", is not a number".into()));
         assert_eq!(error("1.2.3", ""), (Which::Requirement, "its major number, \"\", is not a number".into()));
