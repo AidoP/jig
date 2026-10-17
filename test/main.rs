@@ -1783,7 +1783,7 @@ test app
     let host = project.host();
     project.configure().failed()
         // other environments are not supported yet
-        .stderr(&format!("error[test-target]: tests for target \"riscv64gc-unknown-none-elf\" cannot be run, only those for the host target \"{host}\" or a target with `test`\n --> Jig:2:12"))
+        .stderr(&format!("error[test-target]: tests for target \"riscv64gc-unknown-none-elf\" cannot be run, only those for targets which the host \"{host}\" can run, or a target with `test`\n --> Jig:2:12"))
         // the test of a crate is forward declared with it
         .stderr("error[redeclare-custom]: redeclaration of test \"app\"\n --> Jig:6:6")
         .stderr("note: previously declared here\n --> Jig:4:7");
@@ -2078,7 +2078,7 @@ crate c 'c.rs'
         .stderr("error[repeated-target]: target \"riscv64gc-unknown-none-elf\" is listed more than once\n --> Jig:2:12")
         .stderr("error[invalid-operand]: list value used where str is required\n --> Jig:4:12")
         // only the crate for the host target is tested
-        .stderr(&format!("error[test-target]: tests for target \"riscv64gc-unknown-none-elf\" cannot be run, only those for the host target \"{host}\" or a target with `test`\n --> Jig:6:12"))
+        .stderr(&format!("error[test-target]: tests for target \"riscv64gc-unknown-none-elf\" cannot be run, only those for targets which the host \"{host}\" can run, or a target with `test`\n --> Jig:6:12"))
         .stderr("configuration failed with 3 errors");
 }
 
@@ -2134,7 +2134,7 @@ target bad
     let host = project.host();
     project.configure_with(NIGHTLY).failed()
         // a runner does not allow tests on its own
-        .stderr(&format!("error[test-target]: tests for target \"no-tests\" cannot be run, only those for the host target \"{host}\" or a target with `test`\n --> Jig:2:12"))
+        .stderr(&format!("error[test-target]: tests for target \"no-tests\" cannot be run, only those for targets which the host \"{host}\" can run, or a target with `test`\n --> Jig:2:12"))
         .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:9:10")
         .stderr("error[invalid-operand]: list value used where str or a list of str is required\n  --> Jig:10:12")
         .stderr("configuration failed with 3 errors");
@@ -3503,4 +3503,40 @@ log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
     // so that the test of the crate finds what it depends on
     let run = Command::new(configure_path()).args(["test", "app"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+}
+
+#[test]
+fn host_compatible_targets_test() {
+    let host = Command::new("rustc").arg("--print=host-tuple").output().unwrap();
+    let host = String::from_utf8(host.stdout).unwrap().trim().to_string();
+    // a musl target which the host can run, as it is statically linked
+    let Some(musl) = host.strip_suffix("-gnu").map(|prefix| format!("{prefix}-musl")) else {
+        return;
+    };
+    let project = Project::new("host-compatible", &[("Jig", &format!("\
+crate app 'app.rs'
+    target '{musl}'
+    test
+"))]);
+    let output = project.configure().ok();
+    // tests are allowed for the target without a `target` statement
+    assert_contains(&output.ninja, &format!("\nbuild test/app@{musl}: phony {musl}/test/app\n"));
+    // or with one which does not change it
+    let project = Project::new("host-compatible-override", &[("Jig", &format!("\
+target {musl}
+    override
+    runner 'env'
+log note '{{{musl}.test}}'
+"))]);
+    project.configure().ok().stderr("note: true\n");
+    // unless it disallows them
+    let project = Project::new("host-compatible-disallowed", &[("Jig", &format!("\
+target {musl}
+    override
+    test false
+crate app 'app.rs'
+    target '{musl}'
+    test
+"))]);
+    project.configure().failed().stderr(&format!("error[test-target]: tests for target \"{musl}\" cannot be run"));
 }

@@ -71,8 +71,9 @@ pub struct Field {
 pub struct Target {
     pub name: String,
     pub kind: TargetKind,
-    /// Whether crates for the target can be tested, as those for the host target always can.
-    pub test: bool,
+    /// Whether crates for the target can be tested, from its `test` attribute, or by default, as given by
+    /// [`Self::can_test`]. Those for the host target always can be.
+    pub test: Option<bool>,
     /// The index of the runner of a test harness for the target, which is its last argument, or none to run it
     /// directly.
     pub runner: Option<usize>,
@@ -96,7 +97,16 @@ pub enum TargetKind {
 impl Target {
     /// A builtin target, before any `target` statement overrides it.
     pub fn builtin(name: String) -> Self {
-        Self { name, kind: TargetKind::Builtin { overridden: None }, test: false, runner: None }
+        Self { name, kind: TargetKind::Builtin { overridden: None }, test: None, runner: None }
+    }
+    /// Whether crates for the target can be tested, which is given by its `test` attribute, or is whether the host can
+    /// run what is built for a builtin target, while a custom target's specification may describe anything.
+    pub fn can_test(&self, host: &str) -> bool {
+        match (self.test, &self.kind) {
+            (Some(test), _) => test,
+            (None, TargetKind::Builtin { .. }) => host_compatible(&self.name, host),
+            (None, TargetKind::Custom { .. }) => false,
+        }
     }
     pub fn is_custom(&self) -> bool {
         matches!(self.kind, TargetKind::Custom { .. })
@@ -152,7 +162,7 @@ impl Project {
         }
         let mut inherit = None;
         let mut fields: Vec<Field> = Vec::new();
-        let mut test = false;
+        let mut test = None;
         let mut runner = None;
         let mut overrides = false;
         // the attributes which describe the specification, which a builtin target has already, are reported if it turns
@@ -183,8 +193,8 @@ impl Project {
                     }
                 },
                 // tests are only run where they are allowed, and without a runner, they are run directly
-                ("test", Data::None) => test = true,
-                ("test", Data::Bool(value)) => test = value,
+                ("test", Data::None) => test = Some(true),
+                ("test", Data::Bool(value)) => test = Some(value),
                 ("runner", Data::Str(program)) => runner = Some(self.add_runner(vec![program], parser.file)),
                 ("runner", Data::List(items)) if !items.is_empty() && items.iter().all(|item| matches!(item, Data::Str(_))) => {
                     runner = Some(self.add_runner(items.iter().map(Data::coerce_string).collect(), parser.file));
@@ -302,5 +312,48 @@ impl Project {
         let runner = self.resolve_command(command, file);
         self.runners.push(runner);
         self.runners.len() - 1
+    }
+}
+
+/// Whether the host can run what is built for a target, which has the host's architecture, vendor and operating system,
+/// and its environment, except that a musl target runs where the host's is glibc, as it is statically linked, such as
+/// `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu` or `armv7-unknown-linux-musleabihf` on
+/// `armv7-unknown-linux-gnueabihf`.
+pub fn host_compatible(target: &str, host: &str) -> bool {
+    if target == host {
+        return true;
+    }
+    let target: Vec<_> = target.splitn(4, '-').collect();
+    let host: Vec<_> = host.splitn(4, '-').collect();
+    let ([arch, vendor, os, env], [host_arch, host_vendor, host_os, host_env]) = (&target[..], &host[..]) else {
+        return false;
+    };
+    let compatible_env = match (env.strip_prefix("musl"), host_env.strip_prefix("gnu")) {
+        (Some(abi), Some(host_abi)) => abi == host_abi,
+        _ => env == host_env,
+    };
+    (arch, vendor, os) == (host_arch, host_vendor, host_os) && compatible_env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_compatible;
+
+    #[test]
+    fn host_compatible_targets() {
+        let host = "x86_64-unknown-linux-gnu";
+        assert!(host_compatible(host, host));
+        assert!(host_compatible("x86_64-unknown-linux-musl", host));
+        assert!(host_compatible("armv7-unknown-linux-musleabihf", "armv7-unknown-linux-gnueabihf"));
+        assert!(host_compatible("aarch64-apple-darwin", "aarch64-apple-darwin"));
+        // the ABI, architecture, vendor and operating system must match
+        assert!(!host_compatible("armv7-unknown-linux-musleabi", "armv7-unknown-linux-gnueabihf"));
+        assert!(!host_compatible("x86_64-unknown-linux-gnux32", host));
+        assert!(!host_compatible("i686-unknown-linux-gnu", host));
+        assert!(!host_compatible("x86_64-unikraft-linux-musl", host));
+        assert!(!host_compatible("x86_64-unknown-freebsd", host));
+        // a glibc target needs glibc, which a musl host may not have
+        assert!(!host_compatible(host, "x86_64-unknown-linux-musl"));
+        assert!(!host_compatible("x86_64-apple-darwin", "aarch64-apple-darwin"));
     }
 }

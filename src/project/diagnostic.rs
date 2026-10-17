@@ -476,8 +476,8 @@ impl core::fmt::Display for Message {
             Self::RepeatedTarget(target) => write!(f, "target {target:?} is listed more than once"),
             Self::TestTarget { target, host } => write!(
                 f,
-                "tests for target {target:?} cannot be run, only those for the host target {host:?} or a target with \
-                 `test`",
+                "tests for target {target:?} cannot be run, only those for targets which the host {host:?} can run, or \
+                 a target with `test`",
             ),
             Self::UnknownCrate { name, target } => write!(f, "no crate {name:?} for target {target:?}"),
             Self::InvalidTarget(target) => write!(f, "`{target}` is not a valid target"),

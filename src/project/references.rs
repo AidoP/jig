@@ -149,7 +149,7 @@ impl Project {
             let value = match (attribute, &target.kind) {
                 ("inherit", TargetKind::Custom { inherit, .. }) => AttributeValue::optional(inherit.clone().map(Data::Str)),
                 ("inherit", TargetKind::Builtin { .. }) => AttributeValue::Unset,
-                ("test", _) => AttributeValue::Set(Data::Bool(target.test)),
+                ("test", _) => AttributeValue::Set(Data::Bool(target.can_test(&self.host()))),
                 ("override", kind) => AttributeValue::Set(Data::Bool(matches!(kind, TargetKind::Builtin { .. }))),
                 ("runner", _) => match target.runner {
                     Some(runner) => AttributeValue::Set(strings(&self.runners[runner].command)),

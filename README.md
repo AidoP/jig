@@ -368,7 +368,9 @@ A `crate` statement may be followed by indented attributes:
 - `codegen/<option> <value>`: a codegen option for the crate, which replaces the property of the option. See below
 - `test`: build the crate's tests with `--test` as `<build-dir>/<target>/test/<name>`, and register a test which runs
   them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for the host
-  target, or a custom target with `test`, can be tested
+  target, a builtin target which the host can run, or a target with `test`, can be tested. The host can run a target
+  with its architecture, vendor, operating system and environment, except that a musl target runs where the host's
+  environment is glibc, such as `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu`
 - `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is
@@ -445,7 +447,8 @@ A `target` statement is followed by indented attributes, which describe the targ
 - `target-feature <features>`: the features of the target, as a `str` separated by `,`, or a list of them
 - `no-redzone`: disable the red zone
 - `link-script <str>`: the linker script, which is usually a multi-line string, where braces must be doubled
-- `test <bool>`: whether crates for the target can be tested, which is `false` by default. Without a value, it is `true`
+- `test <bool>`: whether crates for the target can be tested, which by default is whether the host can run a builtin
+  target, as described for crates, and `false` for a custom target. Without a value, it is `true`
 - `runner <program>`: the program which runs a test harness for the target, given as its last argument, or a list of the
   program and its first arguments. As with `run`, a program containing a `/` is a path relative to the file. Without
   it, a test harness is run directly
