@@ -165,6 +165,11 @@ const DIAGNOSTIC_IDS: &[&str] = &[
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
 pub enum Message {
     User(String),
+    /// The message of a `log` statement with an `id` attribute, which is identified by it.
+    Logged {
+        id: String,
+        message: String,
+    },
     UnknownSeverity(String),
     UnknownStatement(String),
     UnknownMetaStatement(String),
@@ -385,7 +390,7 @@ pub enum Message {
 impl core::fmt::Display for Message {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::User(string) => f.write_str(string),
+            Self::User(string) | Self::Logged { message: string, .. } => f.write_str(string),
             Self::UnknownSeverity(name) => write!(f, "unknown severity {name:?}"),
             Self::UnknownStatement(name) => write!(f, "unknown statement {name:?}"),
             Self::UnknownMetaStatement(name) => write!(f, "unknown meta-statement \"@{name}\""),
@@ -554,9 +559,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 impl Message {
     /// The identifier of the kind of message, by which its severity is overridden.
-    pub fn id(&self) -> &'static str {
+    pub fn id(&self) -> &str {
         match self {
             Self::User { .. } => "user",
+            Self::Logged { id, .. } => id,
             Self::UnknownSeverity { .. } => "unknown-severity",
             Self::UnknownStatement { .. } => "unknown-statement",
             Self::UnknownMetaStatement { .. } => "unknown-meta-statement",
@@ -661,10 +667,18 @@ impl Project {
     /// Declare the property of each diagnostic, `diagnostic/<id>`, which has no value until it is set.
     pub fn declare_diagnostic_overrides(&mut self) {
         for id in DIAGNOSTIC_IDS {
-            let name = format!("diagnostic/{id}");
-            let info = "the severity of the diagnostic where it is reported: 'error', 'warning', 'note' or 'allow'";
-            self.declare(name.clone(), Some(Property::new(name, Type::String).info(info)));
+            self.declare_diagnostic_override(id);
         }
+    }
+    /// Declare the property of a diagnostic, `diagnostic/<id>`, unless it has been declared, such as for the ID of a
+    /// `log` statement which is used again.
+    pub(super) fn declare_diagnostic_override(&mut self, id: &str) {
+        let name = format!("diagnostic/{id}");
+        if self.properties_idx.get(&name).is_some_and(|&property| self.properties[property].is_some()) {
+            return;
+        }
+        let info = "the severity of the diagnostic where it is reported: 'error', 'warning', 'note' or 'allow'";
+        self.declare(name.clone(), Some(Property::new(name, Type::String).info(info)));
     }
     /// Give the diagnostics reported since this was last called the severities of their `diagnostic/<id>` properties.
     pub(super) fn override_severities(&mut self) {

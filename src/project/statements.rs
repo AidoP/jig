@@ -212,18 +212,43 @@ impl Project {
         }
         // a quiet message is shown without where it was logged
         let mut quiet = false;
+        // the identifier of the diagnostic, which is shown with it and whose property overrides its severity
+        let mut id = None;
         while let Some(attribute) = self.next_attribute(parser, &[]) {
             match attribute.name {
-                "quiet" => quiet = true,
+                "quiet" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        quiet = value;
+                    }
+                },
+                "id" => {
+                    let span = attribute.data_span;
+                    if let Some(name) = self.str_operand(attribute.operand()) && self.diagnostic_id(&name, span) {
+                        self.declare_diagnostic_override(&name);
+                        id = Some(name);
+                    }
+                },
                 name => self.unknown_attribute("log", name, attribute.name_span),
             }
         }
         // any value can be logged, as it would be in a string template
-        self.diagnostics.push(Diagnostic {
-            span: (!quiet).then_some(operand.span),
-            message: Message::User(operand.data.coerce_string()),
-            severity,
-        });
+        let message = operand.data.coerce_string();
+        let message = match id {
+            Some(id) => Message::Logged { id, message },
+            None => Message::User(message),
+        };
+        self.diagnostics.push(Diagnostic { span: (!quiet).then_some(operand.span), message, severity });
+    }
+    /// Returns whether a diagnostic's identifier is valid, which is an identifier, as it is part of the name of its
+    /// property, `diagnostic/<id>`, or reports why not.
+    fn diagnostic_id(&mut self, id: &str, span: Span) -> bool {
+        let message = match id.char_indices().find(invalid_ident_char) {
+            _ if id.is_empty() => Message::ExpectedIdentifier,
+            Some((_, character)) => Message::InvalidIdentifier { name: id.into(), character },
+            None => return true,
+        };
+        self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
+        false
     }
     fn unknown_attribute(&mut self, keyword: &'static str, name: &str, span: Span) {
         self.diagnostics.push(Diagnostic {

@@ -92,7 +92,9 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `crate <name> [<path>]`: introduce a Rust library crate named `<name>`, with its root at `<path>`, or at
   `<name>/lib.rs` relative to the file without one
 - `log <severity> <expression>`: report the value of an expression as an `error`, `warning`, `note` or `suggestion`.
-  With the `quiet` attribute, only the message is shown, without where it was logged
+  With the `quiet` attribute, only the message is shown, without where it was logged. With `id <str>`, the diagnostic
+  has that identifier, which is shown with it and whose property, `diagnostic/<id>`, overrides its severity, as for
+  other diagnostics, and is declared by the first `log` with the identifier
 - `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `target <name>`: a custom target, which crates can be compiled for. See below
@@ -106,6 +108,9 @@ use 'local.jig'
 
 log note 'configured'
     quiet
+
+log warning 'the `legacy` feature is deprecated'
+    id 'deprecated'
 ```
 
 A crate is a read-only property, `<target>/<name>`, for each target it is declared for, whose value is a reference to
@@ -524,7 +529,7 @@ target bluemetal-riscv64
 ### Diagnostics
 
 Each diagnostic has an identifier, shown after its severity, as in `error[unknown-target]`, except for those of `log`
-statements, whose identifier is `user`. Its severity is replaced by the value of its property, `diagnostic/<id>`, where
+statements without an `id` attribute, whose identifier is `user`. Its severity is replaced by the value of its property, `diagnostic/<id>`, where
 it is reported: `'error'`, `'warning'`, `'note'`, or `'allow'` to hide it. A note or suggestion attached to a
 diagnostic, such as the list of targets after an unknown target, is hidden with it. Errors within the first argument
 of `try` are still reported as warnings, except for `impure`. Diagnostics found once the files are read, such as unknown targets of crates,

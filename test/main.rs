@@ -3715,3 +3715,38 @@ log note semver-compatible('1.2.3', 'x')
         .stderr("error[invalid-version]: invalid version \"1.2\", as its patch number is missing\n --> Jig:1:28")
         .stderr("error[invalid-version]: invalid version requirement \"x\", as its major number, \"x\", is not a number\n --> Jig:2:37");
 }
+
+#[test]
+fn log_id() {
+    let project = Project::new("log-id", &[("Jig", "\
+set diagnostic/deprecated 'warning'
+log note 'old api'
+    id 'deprecated'
+log note 'quiet one'
+    id 'deprecated'
+    quiet
+@with diagnostic/deprecated as 'allow'
+log error 'hidden'
+    id 'deprecated'
+log note 'plain'
+log note diagnostic/deprecated.info
+    quiet
+")]);
+    let output = project.configure().ok();
+    // the identifier is shown, and its property, which may be set before the first, overrides the severity
+    output
+        .stderr("warning[deprecated]: old api\n --> Jig:2:10")
+        .stderr("warning[deprecated]: quiet one\n")
+        .stderr("note: plain\n")
+        .stderr("note: the severity of the diagnostic where it is reported");
+    assert!(!output.stderr.contains("hidden"), "{}", output.stderr);
+    let project = Project::new("log-id-errors", &[("Jig", "\
+log note 'a'
+    id 'no spaces'
+log note 'b'
+    id ''
+")]);
+    project.configure().failed()
+        .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"no spaces\"\n --> Jig:2:8")
+        .stderr("error[expected-identifier]: expected identifier\n --> Jig:4:8");
+}
