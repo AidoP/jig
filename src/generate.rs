@@ -234,7 +234,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             // crates from the toolchain, such as `core`, are not edited
             member: !rust_analyzer::absolute(&c.path).starts_with(sysroot),
             build_file: project.files[c.name_span.file].path.clone(),
-            codegen: c.codegen.clone(),
+            codegen: codegen(c, project),
             dir: c.dir.clone(),
         });
     }
@@ -348,7 +348,7 @@ fn write_build_ninja(
         }
         let target = TargetFlag::new(&c.target, project, build_dir);
         let spec = at.paths(&target.spec);
-        let flags = rustc_flags(&target.flag(at), &at.path(&c.dir), c.kind, &deps, &c.codegen, at);
+        let flags = rustc_flags(&target.flag(at), &at.path(&c.dir), c.kind, &deps, &codegen(c, project), at);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
@@ -588,6 +588,17 @@ fn ninja_quote(s: &str) -> String {
 /// Quote a string as a single argument for `sh`.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Returns the codegen options of a crate, followed by the linker of its target, unless the crate sets its own linker or
+/// linker flavor, as the two go together.
+fn codegen(c: &Crate, project: &Project) -> Vec<String> {
+    let mut codegen = c.codegen.clone();
+    let own_linker = c.codegen.iter().any(|option| option.starts_with("linker=") || option.starts_with("linker-flavor="));
+    if !own_linker && let Some(target) = project.target(&c.target) {
+        codegen.extend(target.codegen());
+    }
+    codegen
 }
 
 /// Returns the indices in `crates` of the crates passed to a crate with `--extern`.

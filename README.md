@@ -448,8 +448,13 @@ A `target` statement is followed by indented attributes, which describe the targ
 `<build-dir>/targets/<name>.json`. Custom targets need a nightly toolchain.
 
 - `inherit <target>`: the builtin target whose specification it is based on
-- `override`: set the attributes of the builtin target with the name, rather than declaring a target. Only `test` and
-  `runner` can be used with it, as the builtin target keeps its specification
+- `override`: set the attributes of the builtin target with the name, rather than declaring a target. Only `test`,
+  `runner`, `linker` and `linker-flavor` can be used with it, as the builtin target keeps its specification. The linker
+  and its flavor are passed to rustc as codegen options of each crate for the target, unless the crate has its own
+  `codegen/linker` or `codegen/linker-flavor`, and a linker which is a path is relative to the file, as a runner is.
+  `rust-lld`, which rustup installs with the toolchain, cross-links a musl target, such as
+  `aarch64-unknown-linux-musl` on `x86_64-unknown-linux-gnu`, as it has its own C runtime, while a glibc target also
+  needs that target's C libraries
 - `env`, `os`, `arch`, `linker <str>`: replace the field of the specification
 - `code-model`, `relocation-model`, `target-cpu`, `linker-flavor`, `panic <str>`: replace the field of the
   specification for the codegen option
@@ -467,6 +472,10 @@ target riscv64gc-unknown-none-elf
     override
     test
     runner ['qemu-system-riscv64', '-machine', 'virt', '-nographic', '-kernel']
+
+target aarch64-unknown-linux-musl
+    override
+    linker 'rust-lld'
 
 target bluemetal-riscv64
     inherit 'riscv64gc-unknown-none-elf'

@@ -3618,3 +3618,34 @@ custom b
         .stderr("error[invalid-operand]: unsigned value used where bool is required\n --> Jig:4:10")
         .stderr("error[invalid-operand]: unsigned value used where bool is required\n --> Jig:7:13");
 }
+
+#[test]
+fn target_override_linker() {
+    let project = Project::new("target-override-linker", &[("Jig", "\
+target aarch64-unknown-linux-musl
+    override
+    linker 'rust-lld'
+    linker-flavor 'ld.lld'
+target riscv64gc-unknown-linux-musl
+    override
+    linker 'tools/ld.lld'
+crate app 'app.rs'
+    crate-type 'bin'
+    target ['aarch64-unknown-linux-musl', 'riscv64gc-unknown-linux-musl']
+crate own 'own.rs'
+    crate-type 'bin'
+    target 'aarch64-unknown-linux-musl'
+    codegen/linker 'cc'
+log note '{aarch64-unknown-linux-musl.linker} {aarch64-unknown-linux-musl.linker-flavor} {riscv64gc-unknown-linux-musl.linker}'
+")]);
+    let output = project.configure().ok();
+    // the linker of a builtin target is given to the crates for it, where a path is relative to the file
+    output.stderr("note: rust-lld ld.lld tools/ld.lld\n");
+    assert_contains(output.build("aarch64-unknown-linux-musl/app"), "\
+    flags = --target=aarch64-unknown-linux-musl -L dependency=aarch64-unknown-linux-musl -C linker=rust-lld -C linker-flavor=ld.lld");
+    assert_contains(output.build("riscv64gc-unknown-linux-musl/app"), " -C linker=tools/ld.lld");
+    // unless a crate has its own, as a linker and its flavor go together
+    let own = output.build("aarch64-unknown-linux-musl/own");
+    assert_contains(own, " -C linker=cc");
+    assert!(!own.contains("rust-lld") && !own.contains("linker-flavor"), "{own}");
+}

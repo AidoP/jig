@@ -4,7 +4,7 @@ use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::statements::{Attribute, Name};
 use super::syntax::{Parser, Span};
 use super::value::Data;
-use super::Project;
+use super::{Project, normalize};
 
 /// An attribute of a `target` statement which replaces a field of its specification.
 pub(super) struct TargetOption {
@@ -81,9 +81,14 @@ pub struct Target {
 
 /// Whether a [`Target`] is builtin or has its own specification.
 pub enum TargetKind {
-    /// A target of rustc, whose `test` and `runner` may be set by a `target` statement with `override`, at
+    /// A target of rustc, whose `test`, `runner` and linker may be set by a `target` statement with `override`, at
     /// `overridden`.
-    Builtin { overridden: Option<Span> },
+    Builtin {
+        overridden: Option<Span>,
+        /// The `linker` and `linker-flavor` fields, which are passed to rustc as the codegen options of the crates for
+        /// the target, as its specification is not written.
+        fields: Vec<Field>,
+    },
     /// A target declared with its own specification, which is written to `<build-dir>/targets/<name>.json`.
     Custom {
         span: Span,
@@ -97,7 +102,7 @@ pub enum TargetKind {
 impl Target {
     /// A builtin target, before any `target` statement overrides it.
     pub fn builtin(name: String) -> Self {
-        Self { name, kind: TargetKind::Builtin { overridden: None }, test: None, runner: None }
+        Self { name, kind: TargetKind::Builtin { overridden: None, fields: Vec::new() }, test: None, runner: None }
     }
     /// Whether crates for the target can be tested, which is given by its `test` attribute, or is whether the host can
     /// run what is built for a builtin target, while a custom target's specification may describe anything.
@@ -114,15 +119,13 @@ impl Target {
     /// The `target` statement which declared or overrode the target, if there is one.
     pub(super) fn declaration(&self) -> Option<Span> {
         match self.kind {
-            TargetKind::Builtin { overridden } => overridden,
+            TargetKind::Builtin { overridden, .. } => overridden,
             TargetKind::Custom { span, .. } => Some(span),
         }
     }
     /// Returns the value of a field of the specification, if it is replaced.
     pub(super) fn field(&self, name: &str) -> Option<&Data> {
-        let TargetKind::Custom { fields, .. } = &self.kind else {
-            return None;
-        };
+        let (TargetKind::Builtin { fields, .. } | TargetKind::Custom { fields, .. }) = &self.kind;
         for field in fields {
             if field.name == name {
                 return Some(&field.value);
@@ -130,7 +133,18 @@ impl Target {
         }
         None
     }
+    /// The codegen options of the crates for a builtin target, as `<option>=<value>`, from its linker fields.
+    pub fn codegen(&self) -> Vec<String> {
+        let TargetKind::Builtin { fields, .. } = &self.kind else {
+            return Vec::new();
+        };
+        fields.iter().map(|field| format!("{}={}", field.name, field.value.coerce_string())).collect()
+    }
 }
+
+/// The fields of a builtin target's specification which a `target` statement with `override` can set, as they are
+/// codegen options too.
+const OVERRIDE_FIELDS: &[&str] = &["linker", "linker-flavor"];
 
 impl Project {
     /// Take a custom target, whose attributes are `inherit`, the builtin target whose specification it is based on, and
@@ -169,7 +183,7 @@ impl Project {
         // out to be overridden
         let mut override_errors = Vec::new();
         while let Some(attribute) = self.next_attribute(parser, &[]) {
-            if !matches!(attribute.name, "override" | "test" | "runner") {
+            if !matches!(attribute.name, "override" | "test" | "runner") && !OVERRIDE_FIELDS.contains(&attribute.name) {
                 override_errors.push(Diagnostic {
                     span: Some(attribute.name_span),
                     message: Message::OverrideAttribute(attribute.name.into()),
@@ -255,9 +269,18 @@ impl Project {
                 self.targets.push(Target { name, kind, test, runner });
                 return;
             },
-            Some((index, TargetKind::Builtin { overridden: None })) if overrides => {
+            Some((index, TargetKind::Builtin { overridden: None, .. })) if overrides => {
+                // a linker which is a path is relative to the file, as a runner is, and the others are found in `PATH`
+                let fields = fields.into_iter().filter(|field| OVERRIDE_FIELDS.contains(&&*field.name));
+                let mut fields: Vec<_> = fields.collect();
+                for field in &mut fields {
+                    if let Data::Str(linker) = &field.value && field.name == "linker" && linker.contains('/') {
+                        let path = normalize(&self.file(parser.file).relative_path(linker));
+                        field.value = Data::Str(path.display().to_string());
+                    }
+                }
                 let target = &mut self.targets[index];
-                target.kind = TargetKind::Builtin { overridden: Some(span) };
+                target.kind = TargetKind::Builtin { overridden: Some(span), fields };
                 target.test = test;
                 target.runner = runner;
                 return;
