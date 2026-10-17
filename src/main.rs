@@ -10,6 +10,7 @@ mod project;
 mod rust_analyzer;
 mod target_spec;
 mod test_runner;
+mod toolchain;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os();
@@ -28,7 +29,9 @@ fn main() -> std::process::ExitCode {
 /// The internal commands are left out: `check <label>`, which rust-analyzer runs as its flycheck, and
 /// `build --proxy <prefix> <wrapper>`, which the wrappers installed by `install --proxy` run.
 const USAGE: &str = "\
-usage: jig <command> [<argument> ...]
+usage: jig [+<toolchain>] <command> [<argument> ...]
+
+A rustup toolchain given with `+` configures the project with it, and is used until it is configured with another.
 
 commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
@@ -41,18 +44,25 @@ commands:
                          other files
     help                 show this message";
 
-fn run(mut args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
+fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     use std::process::ExitCode;
+    let mut args = args.peekable();
+    let toolchain = toolchain::parse(&mut args)?;
     let Some(command) = args.next() else {
         return Err(Error::MissingArg("command"));
     };
-    match command.to_string_lossy().as_ref() {
+    let command = command.to_string_lossy();
+    // the other commands use the toolchain the project is configured with, which is changed first if another is given
+    if let Some(toolchain) = &toolchain && !matches!(command.as_ref(), "generate" | "help") {
+        switch_toolchain(toolchain)?;
+    }
+    match command.as_ref() {
         "generate" => {
             let input = args.next().map_or_else(|| PathBuf::from("Jig"), PathBuf::from);
             if let Some(extra) = args.next() {
                 return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
             }
-            generate(input).map(|()| ExitCode::SUCCESS)
+            generate(input, toolchain.as_deref()).map(|()| ExitCode::SUCCESS)
         },
         "build" => {
             let mut args = args.peekable();
@@ -111,14 +121,34 @@ fn run(mut args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     }
 }
 
-/// Evaluate the configuration from its root file, `input`, then generate `build.ninja` and the files beside it.
-fn generate(input: PathBuf) -> Result<(), Error> {
+/// Configure the project which contains the working directory again with a toolchain, from the input it was configured
+/// with, unless it is configured with the toolchain already.
+fn switch_toolchain(toolchain: &str) -> Result<(), Error> {
+    let Some(root) = database::root() else {
+        return Err(Error::NotConfigured);
+    };
+    let path = root.join(database::PATH);
+    let bytes = std::fs::read(&path).map_err(|error| Error::Read(path.clone(), error))?;
+    let database = database::read(&bytes).map_err(|error| Error::Read(path, error))?;
+    if database.toolchain == toolchain {
+        return Ok(());
+    }
+    // the configuration is generated from the project root, as by the rule which regenerates `build.ninja`
+    if let Err(error) = std::env::set_current_dir(&root) {
+        return Err(Error::Read(root, error));
+    }
+    generate(PathBuf::from(database.input), Some(toolchain))
+}
 
-    let sysroot = rustc_print("sysroot")?;
-    let host = rustc_print("host-tuple")?;
-    let targets = rustc_print("target-list")?.lines().map(String::from).collect();
+/// Evaluate the configuration from its root file, `input`, then generate `build.ninja` and the files beside it, with a
+/// rustup toolchain if one is given.
+fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
+    let sysroot = rustc_print("sysroot", toolchain)?;
+    let host = rustc_print("host-tuple", toolchain)?;
+    let targets = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
 
     let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets);
+    project.toolchain = toolchain.map(String::from);
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
@@ -149,6 +179,12 @@ fn generate(input: PathBuf) -> Result<(), Error> {
                 .info("the target triple of the machine running the build")
                 .read_only(),
             host,
+        ),
+        (
+            project::Property::new("toolchain".into(), project::Type::String)
+                .info("the rustup toolchain given with `+<toolchain>`, or empty if none was given")
+                .read_only(),
+            toolchain.unwrap_or_default().into(),
         ),
     ];
     for (property, value) in builtins {
@@ -223,6 +259,7 @@ enum Error {
     Exec(std::process::Command, std::io::Error),
     Install(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     NotConfigured,
+    Toolchain(String, String),
     BuildFailed,
     ProxyOutOfDate,
     ProxyNotInstalled(PathBuf),
@@ -261,6 +298,7 @@ impl core::fmt::Display for Error {
                 "no `{}` in the working directory or its parents, which `generate` writes to the project root",
                 database::PATH,
             ),
+            Self::Toolchain(name, message) => write!(f, "cannot use toolchain {name:?}: {message}"),
             Self::BuildFailed => write!(f, "the build failed"),
             Self::ProxyNotInstalled(wrapper) => write!(
                 f,
@@ -271,11 +309,12 @@ impl core::fmt::Display for Error {
     }
 }
 
-/// Returns the trimmed output of `rustc --print=<request>`.
-fn rustc_print(request: &str) -> Result<String, Error> {
+/// Returns the trimmed output of `rustc --print=<request>`, with a toolchain if one is given.
+fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> {
     use std::process::Command;
     let mut cmd = Command::new("rustc");
     cmd.arg(format!("--print={request}"));
+    toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Err(error) => {
             return Err(Error::Exec(cmd, error));

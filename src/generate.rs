@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, Installed, Project, Severity, Target, TargetKind};
-use crate::{Error, check, database, rust_analyzer, target_spec};
+use crate::{Error, check, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
 ///
@@ -22,7 +22,7 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     }
     let at = Rebase::new(&build_dir);
     write_reconfigure_stamp(&build_dir)?;
-    write_target_specs(&project.targets, &build_dir)?;
+    write_target_specs(&project.targets, &build_dir, project.toolchain.as_deref())?;
     write_depfile(&project, &at, &build_dir)?;
 
     let installed = project.installed();
@@ -32,7 +32,7 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     write_build_ninja(&project, &crates, &units, &installed, input, &at, &build_dir)?;
     write_rust_project(sysroot, &units)?;
     retire_build_dir(&build_dir)?;
-    write_database(&project, &units, &installed, &at, &build_dir)
+    write_database(&project, &units, &installed, input, &at, &build_dir)
 }
 
 /// Rebases the paths of a project, relative to its root, for ninja, which runs in the build directory.
@@ -149,13 +149,13 @@ struct Extern<'a> {
 }
 
 /// Write the specification of each custom target.
-fn write_target_specs(targets: &[Target], build_dir: &Path) -> Result<(), Error> {
+fn write_target_specs(targets: &[Target], build_dir: &Path, toolchain: Option<&str>) -> Result<(), Error> {
     for target in targets {
         let TargetKind::Custom { inherit, fields, .. } = &target.kind else {
             continue;
         };
         let inherited = match inherit {
-            Some(base) => Some(target_spec_json(base)?),
+            Some(base) => Some(target_spec_json(base, toolchain)?),
             None => None,
         };
         let path = target_spec::path(build_dir, &target.name);
@@ -258,11 +258,16 @@ fn write_build_ninja(
     // a project which builds the tool, such as its own, has ninja build it first
     let exe = std::env::current_exe().ok();
     let configure = exe.clone().unwrap_or_else(|| "jig".into());
+    // with the toolchain it was configured with
+    let toolchain = project.toolchain.as_deref();
+    let plus = toolchain.map(|toolchain| format!(" {}", ninja_quote(&format!("+{toolchain}")))).unwrap_or_default();
     let command = format!(
-        "{cd} {} generate {}",
+        "{cd} {}{plus} generate {}",
         ninja_quote(&configure.display().to_string()),
         ninja_quote(&input.display().to_string()),
     );
+    // rustc and custom commands run with the toolchain, even when ninja is run directly
+    let env = toolchain::shell_prefix(toolchain).replace('$', "$$");
     build_ninja.rule("configure", &[
         ("command", &command),
         ("description", "CONFIGURE $out"),
@@ -282,7 +287,7 @@ fn write_build_ninja(
 
     build_ninja.variable("edition", "2024")?;
     // the temporary files rustc writes to `--out-dir` are kept in the build directory
-    let rustc = "rustc --color=always --out-dir=tmp --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in";
+    let rustc = &format!("{env}rustc --color=always --out-dir=tmp --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
     build_ninja.rule("rustc", &[
         ("command", rustc),
         ("description", "RUSTC $out"),
@@ -291,7 +296,7 @@ fn write_build_ninja(
     ])?;
 
     build_ninja.rule("rustc-check", &[
-        ("command", "rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics"),
+        ("command", &format!("{env}rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
         ("description", "CHECK $out"),
         ("deps", "gcc"),
         ("depfile", "$out.d"),
@@ -301,7 +306,7 @@ fn write_build_ninja(
     let mut defaults: Vec<PathBuf> = Vec::new();
 
     // the command of an edge is `command-line`, as its `command` would replace the rule's
-    build_ninja.rule("custom", &[("command", &format!("{cd} $command-line")), ("description", "CUSTOM $name")])?;
+    build_ninja.rule("custom", &[("command", &format!("{cd} {env}$command-line")), ("description", "CUSTOM $name")])?;
     let mut tests = Vec::new();
     for custom in &project.customs {
         // a test is run by `jig test`, which builds its inputs and program with this target first
@@ -496,9 +501,11 @@ fn write_database(
     project: &Project,
     units: &[Unit],
     installed: &[Installed],
+    input: &Path,
     at: &Rebase,
     build_dir: &Path,
 ) -> Result<(), Error> {
+    let input = input.display().to_string();
     let build_dir = build_dir.display().to_string();
     let install_prefix = project.install_prefix();
     let proxy_build = project.deferred_severity("proxy-build", Severity::Warning).to_string();
@@ -523,6 +530,8 @@ fn write_database(
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets: Vec<_> = installed.iter().map(|file| at.path(&file.path).display().to_string()).collect();
     let mut database = database::Database {
+        input: &input,
+        toolchain: project.toolchain.as_deref().unwrap_or_default(),
         build_dir: &build_dir,
         missing,
         install_prefix: &install_prefix,
@@ -619,9 +628,10 @@ fn externs(c: &Crate, crates: &[Crate]) -> Vec<usize> {
 }
 
 /// Returns the specification of a builtin target, which is unstable.
-fn target_spec_json(target: &str) -> Result<String, Error> {
+fn target_spec_json(target: &str, toolchain: Option<&str>) -> Result<String, Error> {
     let mut cmd = std::process::Command::new("rustc");
     cmd.args(["-Zunstable-options", "--print=target-spec-json", &format!("--target={target}")]);
+    toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Ok(output) => output,
         Err(error) => return Err(Error::Exec(cmd, error)),

@@ -40,7 +40,10 @@ pub fn test(names: &[String]) -> Result<(), Error> {
 
     let mut failures = Vec::new();
     for test in &tests {
-        let output = std::process::Command::new(test.command[0])
+        let mut command = std::process::Command::new(test.command[0]);
+        // with the toolchain the project is configured with, as its commands are
+        crate::toolchain::apply(&mut command, project.toolchain.as_deref());
+        let output = command
             .args(&test.command[1..])
             .current_dir(&project.root)
             .stdin(std::process::Stdio::null())

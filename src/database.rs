@@ -1,15 +1,15 @@
 //! The build database, which records what the build needs after configuring, such as the build directory, the
-//! diagnostics to replay for each flycheck label, the tests to run and the files to install. It is at the project root, which the commands
-//! that read it find it from.
+//! diagnostics to replay for each flycheck label, the tests to run and the files to install. It is at the project root,
+//! which the commands that read it find it from.
 //!
 //! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
 //! When read, its contents borrow from its bytes.
 //!
-//! The format is the magic bytes and a format version, then the build directory, the missing paths, the install prefix
-//! and the severity of `proxy-build`, followed by each section: the flychecks, the tests, then the installed files. A
-//! section is the number of its records followed by each record. Numbers are little-endian `u32`, strings are their
-//! length followed by their UTF-8 bytes, a list of strings is their number followed by each string, and a `bool` is a
-//! number which is `0` or `1`.
+//! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
+//! paths, the install prefix and the severity of `proxy-build`, followed by each section: the flychecks, the tests,
+//! then the installed files. A section is the number of its records followed by each record. Numbers are
+//! little-endian `u32`, strings are their length followed by their UTF-8 bytes, a list of strings is their number
+//! followed by each string, and a `bool` is a number which is `0` or `1`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,10 +17,14 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
+    /// The root file of the configuration, relative to the project root, which it is generated from.
+    pub input: &'a str,
+    /// The rustup toolchain it is configured with, given with `+<toolchain>`, or empty if none was given.
+    pub toolchain: &'a str,
     /// The build directory, where ninja runs, relative to the project root.
     pub build_dir: &'a str,
     /// The paths which the configuration found were missing, relative to the project root, which it is generated again
@@ -69,6 +73,8 @@ pub struct Install<'a> {
 pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.write_all(MAGIC)?;
     write_u32(w, VERSION)?;
+    write_str(w, database.input)?;
+    write_str(w, database.toolchain)?;
     write_str(w, database.build_dir)?;
     write_strs(w, &database.missing)?;
     write_str(w, database.install_prefix)?;
@@ -101,6 +107,8 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         return Err(invalid());
     }
     let mut database = Database {
+        input: r.str()?,
+        toolchain: r.str()?,
         build_dir: r.str()?,
         missing: r.strs()?,
         install_prefix: r.str()?,
@@ -192,6 +200,8 @@ mod tests {
     fn round_trip() {
         let database = Database {
             build_dir: "build",
+            input: "Jig",
+            toolchain: "nightly",
             missing: vec!["Debug"],
             install_prefix: "/usr/local",
             proxy_build: "warning",

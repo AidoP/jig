@@ -1802,7 +1802,7 @@ fn commands() {
     assert_contains(&stderr, "note: generated");
     let (success, stdout, _) = run(&["help"]);
     assert!(success);
-    assert_contains(&stdout, "usage: jig <command>");
+    assert_contains(&stdout, "usage: jig [+<toolchain>] <command>");
     // a mistaken command is shown with the usage
     for (args, error) in [
         (&[][..], "missing required argument `command`"),
@@ -1813,7 +1813,7 @@ fn commands() {
         let (success, _, stderr) = run(args);
         assert!(!success, "{args:?}");
         assert_contains(&stderr, error);
-        assert_contains(&stderr, "usage: jig <command>");
+        assert_contains(&stderr, "usage: jig [+<toolchain>] <command>");
     }
 }
 
@@ -3648,4 +3648,50 @@ log note '{aarch64-unknown-linux-musl.linker} {aarch64-unknown-linux-musl.linker
     let own = output.build("aarch64-unknown-linux-musl/own");
     assert_contains(own, " -C linker=cc");
     assert!(!own.contains("rust-lld") && !own.contains("linker-flavor"), "{own}");
+}
+
+#[test]
+fn toolchain_option() {
+    let project = Project::new("toolchain", &[("Jig", "\
+log note 'toolchain: {toolchain}'
+    quiet
+custom version
+    output 'version.txt'
+    command 'sh' '-c' 'rustc --version > \"$1\"' 'sh' output
+    default
+")]);
+    let jig = |args: &[&str]| {
+        let output = Command::new(configure_path()).args(args).current_dir(&project.dir).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), String::from_utf8(output.stdout).unwrap() + &stderr)
+    };
+    let version = || std::fs::read_to_string(project.dir.join("build/version.txt")).unwrap();
+    // the project is configured with a toolchain given with `+`, which its commands are run with
+    let (success, output) = jig(&["+nightly", "generate"]);
+    assert!(success, "{output}");
+    assert_contains(&output, "note: toolchain: nightly\n");
+    let ninja = project.ninja();
+    assert_contains(&ninja, "' '+nightly' generate 'Jig'\n");
+    assert_contains(&ninja, "\n    command = RUSTUP_TOOLCHAIN='nightly' rustc ");
+    assert_contains(&ninja, " && RUSTUP_TOOLCHAIN='nightly' $command-line\n");
+    // and which is kept by the other commands
+    let (success, output) = jig(&["build"]);
+    assert!(success, "{output}");
+    assert_contains(&version(), "-nightly");
+    // until it is configured without one
+    let (success, output) = jig(&["generate"]);
+    assert!(success, "{output}");
+    assert_contains(&output, "note: toolchain: \n");
+    assert!(!project.ninja().contains("RUSTUP_TOOLCHAIN"));
+    // or another command is given one, which configures it again
+    let (success, output) = jig(&["+nightly", "build"]);
+    assert!(success, "{output}");
+    assert_contains(&output, "note: toolchain: nightly\n");
+    assert_contains(&version(), "-nightly");
+    let (success, output) = jig(&["+no-such-toolchain", "build"]);
+    assert!(!success);
+    assert_contains(&output, "cannot use toolchain \"no-such-toolchain\": toolchain 'no-such-toolchain' is not installed");
+    let (success, output) = jig(&["+", "build"]);
+    assert!(!success);
+    assert_contains(&output, "missing required argument `toolchain`");
 }

@@ -532,11 +532,10 @@ impl Project {
         } else {
             program.clone()
         };
-        let output = std::process::Command::new(program)
-            .args(args)
-            .envs(env)
-            .stdin(std::process::Stdio::null())
-            .output();
+        let mut command = std::process::Command::new(program);
+        // with the toolchain the project is configured with, unless the program's own environment replaces it
+        crate::toolchain::apply(&mut command, self.toolchain.as_deref());
+        let output = command.args(args).envs(env).stdin(std::process::Stdio::null()).output();
         let message = match output {
             Err(error) => Message::RunSpawn { program: program.clone(), error: error.to_string() },
             Ok(output) if !output.status.success() => Message::RunFailed {

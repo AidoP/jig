@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Error, database, generate};
+use crate::{Error, database, generate, toolchain};
 
 /// Where ninja's output is written while finding a project, as `jig check` keeps it out of stdout.
 #[derive(Clone, Copy)]
@@ -20,6 +20,8 @@ pub struct Configured {
     pub root: PathBuf,
     /// The build directory, where `build.ninja` is, which is where ninja runs.
     pub build_dir: PathBuf,
+    /// The rustup toolchain the project is configured with, which ninja and the tests are run with.
+    pub toolchain: Option<String>,
 }
 impl Configured {
     /// Find the project which contains the working directory, which must have been configured.
@@ -55,7 +57,8 @@ impl Configured {
                 return Err(Error::Write(stamp, error));
             }
         }
-        Ok(Self { root, build_dir })
+        let toolchain = toolchain(&database);
+        Ok(Self { root, build_dir, toolchain })
     }
     /// Regenerate `build.ninja` with ninja if it is out of date, then take the build directory from the database again,
     /// as `build-dir` may have changed, which leaves a stub in the previous build directory.
@@ -90,13 +93,16 @@ impl Configured {
             Err(error) => return Err(Error::Exec(ninja, error)),
         }
         let bytes = read(&self.root)?;
-        self.build_dir = self.root.join(parse(&self.root, &bytes)?.build_dir);
+        let database = parse(&self.root, &bytes)?;
+        self.build_dir = self.root.join(database.build_dir);
+        self.toolchain = toolchain(&database);
         Ok(())
     }
     /// Returns ninja, to run in the build directory.
     pub fn ninja(&self) -> Command {
         let mut ninja = Command::new("ninja");
         ninja.current_dir(&self.build_dir);
+        toolchain::apply(&mut ninja, self.toolchain.as_deref());
         ninja
     }
     /// Returns the bytes of the database, which is read again once ninja has run, as it reconfigures if needed.
@@ -116,4 +122,9 @@ fn read(root: &Path) -> Result<Vec<u8>, Error> {
 
 fn parse<'a>(root: &Path, bytes: &'a [u8]) -> Result<database::Database<'a>, Error> {
     database::read(bytes).map_err(|error| Error::Read(root.join(database::PATH), error))
+}
+
+/// Returns the toolchain a project is configured with, from its database, if it is configured with one.
+fn toolchain(database: &database::Database) -> Option<String> {
+    (!database.toolchain.is_empty()).then(|| database.toolchain.into())
 }

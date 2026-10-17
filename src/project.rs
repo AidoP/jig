@@ -27,6 +27,8 @@ use customs::{Custom, Runner};
 
 pub struct Project {
     root: PathBuf,
+    /// The rustup toolchain the project is configured with, which the programs `run` runs are given.
+    pub toolchain: Option<String>,
     pub files: Vec<File>,
     /// Files read by expressions, which the configuration depends on as well as `files`.
     pub dependencies: Vec<PathBuf>,
@@ -83,6 +85,7 @@ impl Project {
             crates: HashMap::new(),
             customs: Vec::new(),
             runners: Vec::new(),
+            toolchain: None,
         }
     }
     pub fn file(&self, idx: usize) -> &File {

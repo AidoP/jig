@@ -44,6 +44,16 @@ parents, so they can be run from anywhere in the project. `jig build` passes its
 targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test` and
 `test/<name>`. `build.ninja` regenerates itself when the configuration, or `jig`, changes.
 
+A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
+project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is
+run directly, until the project is configured with another. `jig +<toolchain> generate` configures it with the
+toolchain, and `jig generate` without one leaves the toolchain to rustup, while the other commands configure it again
+if they are given a different toolchain. Without rustup, a toolchain cannot be selected.
+
+```
+./build/bootstrap/jig +nightly build
+```
+
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
 builds as `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
@@ -501,6 +511,7 @@ target bluemetal-riscv64
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
+- `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set
 - `diagnostic/<id>`: the severity of a diagnostic, as described below
