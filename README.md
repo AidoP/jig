@@ -1,3 +1,10 @@
+# Jig
+
+A build system for Rust.
+
+**note:** This project is almost entirely vibe-coded with Claude.
+
+
 ## Building
 
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
@@ -5,6 +12,14 @@ The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` n
 ```
 ninja -f bootstrap.ninja
 ```
+
+Then run the bootstrapped `jig` to install.
+
+```
+/build/bootstrap/jig install [prefix]
+```
+
+## Usage
 
 This builds `build/bootstrap/jig` and generates `build/build.ninja`. From then on, the project is rebuilt with `jig build`,
 which runs ninja in the build directory, and tested with `jig test`.
