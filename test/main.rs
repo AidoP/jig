@@ -131,6 +131,21 @@ impl Output {
     }
 }
 
+/// Make an executable at `destination` from `source`, which may be the same file, so that it can be run.
+///
+/// The executable is a new file written by `cp` rather than by the tests' process, as a file it has open for writing is
+/// held open by a process which another test forks until that process executes its program, and running the file in
+/// the meantime fails with `ExecutableFileBusy`.
+#[track_caller]
+fn make_executable(source: &std::path::Path, destination: &std::path::Path) {
+    let status = Command::new("sh")
+        .args(["-c", "cp \"$1\" \"$2.tmp\" && chmod 755 \"$2.tmp\" && mv \"$2.tmp\" \"$2\"", "sh"])
+        .args([source, destination])
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to make {destination:?} executable");
+}
+
 #[track_caller]
 fn assert_contains(haystack: &str, needle: &str) {
     assert!(haystack.contains(needle), "{needle:?} not found in:\n{haystack}");
@@ -1088,9 +1103,8 @@ log note '{run('sh', '-c', 'echo from path')}'
         ("tool.sh", "#!/bin/sh\necho \"tool $1\"\n"),
         ("sub/local.sh", "#!/bin/sh\necho local\n"),
     ]);
-    use std::os::unix::fs::PermissionsExt;
     for script in ["tool.sh", "sub/local.sh"] {
-        std::fs::set_permissions(project.dir.join(script), std::fs::Permissions::from_mode(0o755)).unwrap();
+        make_executable(&project.dir.join(script), &project.dir.join(script));
     }
     // a program with a `/` is relative to the file, and the configuration depends on it
     project.configure().ok().stderr("note: tool arg\n").stderr("note: local\n").stderr("note: from path\n");
@@ -1396,8 +1410,7 @@ custom tool
         ("sub/in.txt", "hello\n"),
         ("sub/tool.sh", "#!/bin/sh\necho \"tool: $*\" > \"$1\"\n"),
     ]);
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(project.dir.join("sub/tool.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&project.dir.join("sub/tool.sh"), &project.dir.join("sub/tool.sh"));
     let output = project.configure().ok();
     // `input` and `output` are the paths, and the arguments are quoted for `sh`, with `$` escaped for ninja
     assert_contains(output.build("out/copy.txt"), "\
@@ -1573,8 +1586,7 @@ test passes
 "),
         ("sub/check.sh", "#!/bin/sh\ngrep -q hello \"$1\"\n"),
     ]);
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(project.dir.join("sub/check.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&project.dir.join("sub/check.sh"), &project.dir.join("sub/check.sh"));
     let output = project.configure().ok();
     // a test's target builds its inputs and program, and `test` builds those of every test
     assert_contains(&output.ninja, "\nbuild test/generated: phony gen.txt sub/check.sh\n");
@@ -1791,7 +1803,7 @@ fn rebased_paths() {
     // a configure tool within the build directory is relative to it, so that it can be the output which builds it
     let tool = project.dir.join("build/jig");
     std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
-    std::fs::copy(configure_path(), &tool).unwrap();
+    make_executable(&configure_path(), &tool);
     let output = Command::new(&tool).args(["generate", "Jig"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let ninja = std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap();
@@ -2584,8 +2596,7 @@ fn run_reference() {
         ("sub/Jig", "custom script\n    command 'true'\nlog note run(script, 'a')\n"),
         ("build/script", "#!/bin/sh\necho ran \"$0\" \"$1\"\n"),
     ]);
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(project.dir.join("build/script"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    make_executable(&project.dir.join("build/script"), &project.dir.join("build/script"));
     // the program is the path of the output, rather than resolved again relative to the file
     project.configure().ok().stderr("note: ran ./build/script a\n");
 }
