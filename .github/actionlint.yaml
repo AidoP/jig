@@ -1,0 +1,5 @@
+# runner labels which actionlint does not know
+self-hosted-runner:
+  labels:
+    # the RISE RISC-V runners
+    - ubuntu-24.04-riscv

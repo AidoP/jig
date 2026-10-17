@@ -15,11 +15,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        # `ubuntu-24.04-riscv` is a RISE RISC-V runner, which needs its GitHub App installed for the repository
+        os: [ubuntu-latest, ubuntu-24.04-arm, ubuntu-24.04-riscv]
         toolchain: [stable, msrv]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install rustup
+        # the RISC-V runners may not have it
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: Install the toolchains
         # the tests of custom targets use nightly as well
         run: |
@@ -28,7 +36,7 @@ jobs:
           rustup toolchain install "$toolchain" nightly --profile minimal
           echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - name: Install ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: command -v ninja >/dev/null || (sudo apt-get update && sudo apt-get install -y ninja-build)
       - name: Bootstrap
         run: ninja -f bootstrap.ninja
       - name: Build
