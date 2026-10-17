@@ -286,8 +286,9 @@ fn write_build_ninja(
     })?;
 
     build_ninja.variable("edition", "2024")?;
-    // the temporary files rustc writes to `--out-dir` are kept in the build directory
-    let rustc = &format!("{env}rustc --color=always --out-dir=tmp --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
+    // the temporary files rustc writes to `--out-dir` are kept in the build directory, in a directory for each edge, as
+    // they are named after the crate, which may be compiled for several targets, or as a test harness, at once
+    let rustc = &format!("{env}rustc --color=always --out-dir=$tmpdir --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
     build_ninja.rule("rustc", &[
         ("command", rustc),
         ("description", "RUSTC $out"),
@@ -359,23 +360,35 @@ fn write_build_ninja(
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
         let input = at.path(&c.path);
+        let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
         build_ninja.build(&ninja::Build {
             rule: "rustc",
             outputs: &[&output],
             inputs: &[&input],
             implicit: &deps,
             order_only: &as_paths(&depends),
-            variables: &[("crate-name", &c.name), ("crate-type", crate_type), ("flags", &flags)],
+            variables: &[
+                ("crate-name", &c.name),
+                ("crate-type", crate_type),
+                ("flags", &flags),
+                ("tmpdir", &tmpdir.display().to_string()),
+            ],
             ..Default::default()
         })?;
         if c.test {
+            let tmpdir = Path::new("tmp").join(&c.target).join("test").join(&c.name);
             build_ninja.build(&ninja::Build {
                 rule: "rustc",
                 outputs: &[&at.path(&c.test_harness())],
                 inputs: &[&input],
                 implicit: &deps,
                 order_only: &as_paths(&depends),
-                variables: &[("crate-name", &c.name), ("crate-type", crate_type), ("flags", &format!("{flags} --test"))],
+                variables: &[
+                    ("crate-name", &c.name),
+                    ("crate-type", crate_type),
+                    ("flags", &format!("{flags} --test")),
+                    ("tmpdir", &tmpdir.display().to_string()),
+                ],
                 ..Default::default()
             })?;
         }

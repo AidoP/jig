@@ -1837,7 +1837,10 @@ custom image
     assert_contains(&ninja, &format!("\nbuild {host}/test/kernel: rustc kernel.rs\n"));
     assert_contains(&ninja, &format!("\nbuild {host}/check/libkernel.rmeta | {host}/check/kernel.json: rustc-check"));
     assert_contains(&ninja, &format!("\nbuild image: custom {host}/libkernel.rlib\n"));
-    assert_contains(&ninja, "--out-dir=tmp ");
+    // with a directory for the temporary files of each edge, as they are named after the crate
+    assert_contains(&ninja, "--out-dir=$tmpdir ");
+    assert_contains(&ninja, &format!("\n    tmpdir = tmp/{host}/kernel\n"));
+    assert_contains(&ninja, &format!("\n    tmpdir = tmp/{host}/test/kernel\n"));
     // while the database is at the project root, so that it is found without the configuration
     assert!(project.dir.join(".jig").exists());
     // `jig build` finds it from within the project, and runs ninja in the build directory, while the custom command
