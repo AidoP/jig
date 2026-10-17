@@ -162,7 +162,7 @@ fn destination(prefix: &Path, file: &database::Install) -> PathBuf {
 /// Returns whether the wrapper was reinstalled, as it should then be run again.
 pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
     let mut project = Configured::locate()?;
-    {
+    let stale = {
         let bytes = project.read()?;
         let database = project.parse(&bytes)?;
         let severity = project::severity_override(database.proxy_build).unwrap_or(Severity::Warning);
@@ -179,6 +179,7 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
         } else {
             None
         };
+        let stale = message.is_some();
         if let Some(message) = message && severity != Severity::Allow {
             let diagnostic = Diagnostic { span: None, message, severity };
             // a diagnostic without a span needs nothing from the configuration
@@ -192,7 +193,8 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
                 return Err(Error::ProxyOutOfDate);
             }
         }
-    }
+        stale
+    };
     // what is installed at the wrapper may change with the configuration
     project.reconfigure(Output::Quiet)?;
     let bytes = project.read()?;
@@ -200,7 +202,11 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
     let Some(file) = find_program(&database, prefix, wrapper) else {
         return Err(Error::ProxyNotInstalled(wrapper.into()));
     };
-    build(&project, &["--quiet", file.target])?;
+    // ninja is not run when nothing is out of date, as before 1.12, it reports that there is nothing to do even when
+    // it is quiet
+    if stale {
+        build(&project, &["--quiet", file.target])?;
+    }
     let source = project.root.join(file.path);
     match write_proxy(&project.root, prefix, wrapper, &source, file.mode) {
         Ok(reinstalled) => Ok(reinstalled),
