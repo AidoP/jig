@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # the minimum supported Rust version, which the README gives too
+  MSRV: "1.95"
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+        toolchain: [stable, msrv]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchains
+        # the tests of custom targets use nightly as well
+        run: |
+          toolchain=${{ matrix.toolchain }}
+          if [ "$toolchain" = msrv ]; then toolchain=$MSRV; fi
+          rustup toolchain install "$toolchain" nightly --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Bootstrap
+        run: ninja -f bootstrap.ninja
+      - name: Build
+        run: build/bootstrap/jig build
+      - name: Test
+        run: build/bootstrap/jig test

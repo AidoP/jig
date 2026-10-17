@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchains
+        # the tests of custom targets use nightly as well
+        run: |
+          rustup toolchain install stable nightly --profile minimal
+          rustup target add --toolchain stable ${{ matrix.target }}
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Configure the release
+        # `Jig` uses `Dev` if it exists, which builds jig and its tests for musl, so that it is statically linked and
+        # runs on any Linux, and which runs the tests for that target, as they run on the host
+        run: |
+          cat > Dev <<EOF
+          set target '${{ matrix.target }}'
+          set codegen/strip 'symbols'
+          target ${{ matrix.target }}
+              override
+              test
+          EOF
+      - name: Bootstrap
+        run: ninja -f bootstrap.ninja
+      - name: Build
+        run: build/bootstrap/jig build
+      - name: Test
+        run: build/bootstrap/jig test
+      - name: Install
+        run: build/bootstrap/jig install dist
+      - name: Package
+        run: |
+          name="jig-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp dist/bin/jig README.md "$name"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: jig-*.tar.gz*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        # a tag with a suffix, such as `v1.0.0-rc.1`, is a prerelease
+        run: |
+          prerelease=
+          case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
+            --generate-notes $prerelease dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}

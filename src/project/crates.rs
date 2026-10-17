@@ -129,12 +129,13 @@ impl Project {
         }
         // a procedural macro is loaded by rustc, so it is compiled for the host target, which is otherwise the `target`
         // property in effect at its declaration
-        let host = self.property("host-target", span).map_or_default(|host| host.data.coerce_string());
+        let host = self.property("host-target", span).map(|host| host.data.coerce_string()).unwrap_or_default();
         let targets = match targets {
             Some(targets) => targets,
             None => {
                 let property = if kind == rust::Kind::ProcMacro { "host-target" } else { "target" };
-                let target = self.property(property, span).map_or_default(|target| target.data.coerce_string());
+                let target = self.property(property, span).map(|target| target.data.coerce_string());
+                let target = target.unwrap_or_default();
                 CrateTargets { names: vec![target], span }
             },
         };

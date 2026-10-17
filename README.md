@@ -5,7 +5,16 @@ A build system for Rust.
 **note:** This project is almost entirely vibe-coded with Claude.
 
 
+## Installing
+
+Each release on GitHub has a statically linked `jig` for x86_64 and aarch64 Linux, which is built and tested by
+`.github/workflows/release.yml` when a tag starting with `v` is pushed. A tag with a suffix, such as `v1.0.0-rc.1`, is a
+prerelease.
+
 ## Building
+
+Building `jig` needs Rust 1.95 or later, and ninja 1.11 or later. Its tests need a nightly toolchain as well, for those
+of custom targets.
 
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
 
@@ -16,7 +25,7 @@ ninja -f bootstrap.ninja
 Then run the bootstrapped `jig` to install.
 
 ```
-/build/bootstrap/jig install [prefix]
+build/bootstrap/jig install [prefix]
 ```
 
 ## Usage

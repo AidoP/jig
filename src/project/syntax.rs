@@ -204,7 +204,7 @@ impl <'a> Parser<'a> {
         Span {
             file: self.file,
             offset: self.offset,
-            len: self.as_str().chars().next().map_or_default(|c| c.len_utf8()),
+            len: self.as_str().chars().next().map(|c| c.len_utf8()).unwrap_or_default(),
         }
     }
     /// Returns the span from `start` to the current offset.

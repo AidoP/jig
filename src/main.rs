@@ -118,7 +118,7 @@ fn generate(input: PathBuf) -> Result<(), Error> {
     let host = rustc_print("host-tuple")?;
     let targets = rustc_print("target-list")?.lines().map(String::from).collect();
 
-    let mut project = project::Project::new(input.parent().map_or_default(|path| path.into()), targets);
+    let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets);
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
