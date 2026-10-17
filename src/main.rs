@@ -24,6 +24,9 @@ fn main() -> std::process::ExitCode {
 }
 
 /// How jig is used, as shown by `jig help` and with a mistaken command.
+///
+/// The internal commands are left out: `check <label>`, which rust-analyzer runs as its flycheck, and
+/// `build --proxy <prefix> <wrapper>`, which the wrappers installed by `install --proxy` run.
 const USAGE: &str = "\
 usage: jig <command> [<argument> ...]
 
@@ -31,10 +34,6 @@ commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
                          directory
     build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
-    build --proxy <prefix> <wrapper>
-                         build the program of a wrapper installed by `install --proxy`, reporting `proxy-build` if
-                         it is out of date, and reinstall the wrapper if it has changed
-    check <label>        run the flycheck of rust-analyzer for a crate, printing its saved diagnostics
     test [<name> ...]    build and run the tests, or only those named
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
