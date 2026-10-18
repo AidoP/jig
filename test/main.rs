@@ -1754,6 +1754,8 @@ test fails
     command 'sh' '-c' 'echo some output; echo an error >&2; exit 3'
 test passes
     command 'true'
+test arguments
+    command 'sh' '-c' 'echo \"arguments:$*\"' 'sh'
 "),
         ("sub/check.sh", "#!/bin/sh\ngrep -q hello \"$1\"\n"),
     ]);
@@ -1761,14 +1763,14 @@ test passes
     let output = project.configure().ok();
     // a test's target builds its inputs and program, and `test` builds those of every test
     assert_contains(&output.ninja, "\nbuild test/generated: phony gen.txt sub/check.sh\n");
-    assert_contains(&output.ninja, "\nbuild test: phony test/generated test/fails test/passes\n");
+    assert_contains(&output.ninja, "\nbuild test: phony test/generated test/fails test/passes test/arguments\n");
 
     let run = |names: &[&str]| {
         let output = Command::new(configure_path()).arg("test").args(names).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
     // the inputs are built before the tests run, and the output of a failed test is shown
-    let (success, stdout, stderr) = run(&[]);
+    let (success, stdout, stderr) = run(&["generated", "fails", "passes"]);
     assert!(!success);
     // the results line up, with how long each test took
     assert_contains(&without_durations(&stdout), "
@@ -1812,6 +1814,10 @@ failures:
     fails
 ");
     assert!(!stdout.contains("---- fails ----"), "{stdout}");
+    // only a crate's test harness is given libtest's `--color`
+    let (success, stdout, _) = run(&["-v", "arguments"]);
+    assert!(success);
+    assert_contains(&stdout, "\n    arguments:\n");
     let (success, _, stderr) = run(&["nope"]);
     assert!(!success);
     assert_contains(&stderr, "no test named \"nope\"");
@@ -1881,6 +1887,8 @@ mod tests {
     assert_contains(&stdout, "\ntest app ... FAILED\n    exit status: 101\n\n    running 2 tests\n");
     assert_contains(&stdout, "\n    test tests::works ... ok\n");
     assert_contains(&stdout, "\n    test result: FAILED. 1 passed; 1 failed;");
+    // which is not coloured, as stdout is not a terminal
+    assert!(!stdout.contains('\x1b'), "{stdout}");
 }
 
 #[test]

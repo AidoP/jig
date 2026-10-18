@@ -58,8 +58,12 @@ pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
         // with the toolchain the project is configured with, as its commands are
         crate::toolchain::apply(&mut command, project.toolchain.as_deref());
         let test_started = Instant::now();
+        command.args(&test.command[1..]);
+        // a test harness colours its results as jig does, though its output is captured
+        if test.libtest {
+            command.arg(if style.pretty { "--color=always" } else { "--color=never" });
+        }
         let output = command
-            .args(&test.command[1..])
             .current_dir(&project.root)
             .stdin(std::process::Stdio::null())
             .output();

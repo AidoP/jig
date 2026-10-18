@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -65,6 +65,9 @@ pub struct Test<'a> {
     pub name: &'a str,
     /// The program and its arguments, run from the project root.
     pub command: Vec<&'a str>,
+    /// Whether the program is a test harness built by libtest, run directly, which takes its arguments, such as
+    /// `--color`.
+    pub libtest: bool,
 }
 
 /// A file which `jig install` installs.
@@ -104,6 +107,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     for test in &database.tests {
         write_str(w, test.name)?;
         write_strs(w, &test.command)?;
+        write_u32(w, test.libtest as u32)?;
     }
     write_u32(w, database.installs.len())?;
     for install in &database.installs {
@@ -137,7 +141,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: r.bool()?, deps: r.u32s()? });
     }
     for _ in 0..r.u32()? {
-        database.tests.push(Test { name: r.str()?, command: r.strs()? });
+        database.tests.push(Test { name: r.str()?, command: r.strs()?, libtest: r.bool()? });
     }
     for _ in 0..r.u32()? {
         database.installs.push(Install {
@@ -241,7 +245,10 @@ mod tests {
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
             ],
-            tests: vec![Test { name: "unit", command: vec!["./run", "a b"] }],
+            tests: vec![
+                Test { name: "unit", command: vec!["./run", "a b"], libtest: false },
+                Test { name: "app", command: vec!["./build/test/app"], libtest: true },
+            ],
             installs: vec![
                 Install { path: "build/app", target: "app", dir: "bin", mode: 0o755, program: true },
                 Install { path: "build/data", target: "custom/data", dir: "share", mode: 0o644, program: false },
@@ -261,7 +268,7 @@ mod tests {
         assert_eq!(read(b"{\"crates\"").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         // truncated
         let mut bytes = Vec::new();
-        let tests = vec![Test { name: "x", command: vec![] }];
+        let tests = vec![Test { name: "x", command: vec![], libtest: false }];
         write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     }
@@ -280,7 +287,7 @@ mod benches {
                 let deps = if i > 0 { vec![i as u32 - 1, 0] } else { vec![] };
                 Flycheck { label, diagnostics, member: true, deps }
             }).collect();
-            let tests = labels[..n].iter().map(|(label, _)| Test { name: label, command: vec![label, "--quiet"] }).collect();
+            let tests = labels[..n].iter().map(|(label, _)| Test { name: label, command: vec![label, "--quiet"], libtest: true }).collect();
             Database { flychecks, tests, ..Default::default() }
         };
         assert_linear("database", 5000, database, |database| {

@@ -549,6 +549,7 @@ fn retire_build_dir(build_dir: &Path) -> Result<(), Error> {
 struct TestCommand<'a> {
     name: &'a str,
     command: Vec<String>,
+    libtest: bool,
 }
 
 fn write_database(
@@ -572,7 +573,8 @@ fn write_database(
     let mut commands = Vec::new();
     for custom in &project.customs {
         if custom.is_test() {
-            commands.push(TestCommand { name: &custom.name, command: custom.command(&project.runners) });
+            let command = custom.command(&project.runners);
+            commands.push(TestCommand { name: &custom.name, command, libtest: custom.is_libtest() });
         }
     }
 
@@ -597,7 +599,7 @@ fn write_database(
     }
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
-        database.tests.push(database::Test { name: test.name, command });
+        database.tests.push(database::Test { name: test.name, command, libtest: test.libtest });
     }
     for ((file, path), target) in installed.iter().zip(&install_paths).zip(&install_targets) {
         let (dir, mode, program) = (&file.dir, file.mode, file.program);

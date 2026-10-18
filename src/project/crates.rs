@@ -333,7 +333,7 @@ impl Project {
             depends,
             command,
             program: None,
-            kind: CustomKind::Test { runner: None },
+            kind: CustomKind::Test { runner: None, harness: true },
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their
@@ -375,7 +375,7 @@ impl Project {
                 },
             };
             if let Some(declared) = declared {
-                self.customs[declared].kind = CustomKind::Test { runner };
+                self.customs[declared].kind = CustomKind::Test { runner, harness: true };
             }
         }
         if !removed.is_empty() {
