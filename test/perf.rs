@@ -184,6 +184,16 @@ fn files(n: usize) -> Vec<(String, String)> {
     files
 }
 
+/// Files which each use the next, in the directory beside their own.
+fn sibling_files(n: usize) -> Vec<(String, String)> {
+    let mut files = vec![("Jig".into(), "use 'f0'\n".into())];
+    files.extend((0..n).map(|i| {
+        let next = if i + 1 < n { format!("use '../f{}'\n", i + 1) } else { String::new() };
+        (format!("f{i}/Jig"), format!("declare v{i}\n    default {i}\n{next}"))
+    }));
+    files
+}
+
 /// Files which each use the file in the directory within their own.
 fn nested_files(n: usize) -> Vec<(String, String)> {
     (0..n).map(|i| {
@@ -202,8 +212,8 @@ fn empty_project() {
 
 #[test]
 fn many_properties() {
-    // properties are not linear in their number, so only the time is checked
-    assert_within("properties", 8000, 2000, properties);
+    assert_within("properties", 16000, 2000, properties);
+    assert_linear("properties", 16000, properties);
 }
 
 #[test]
@@ -226,14 +236,14 @@ fn many_crates() {
 
 #[test]
 fn crate_chain() {
-    // a chain of `use` is not linear, so only the time of a moderate one is checked
-    assert_within("crates-chain", 500, 3000, crates_chain);
+    assert_within("crates-chain", 4000, 3000, crates_chain);
+    assert_linear("crates-chain", 1000, crates_chain);
 }
 
 #[test]
 fn many_customs() {
-    // checking that the outputs do not overlap is not linear, so only the time is checked
-    assert_within("customs", 2000, 3000, customs);
+    assert_within("customs", 4000, 3000, customs);
+    assert_linear("customs", 4000, customs);
 }
 
 #[test]
@@ -244,8 +254,14 @@ fn many_files() {
 
 #[test]
 fn deeply_nested_files() {
-    // nesting is not linear in its depth, so only the time of a moderate one is checked
-    assert_within("nested-files", 200, 3000, nested_files);
+    // the path of each file is as long as its depth, which the kernel walks to open it, so only the time is checked
+    assert_within("nested-files", 1000, 3000, nested_files);
+}
+
+#[test]
+fn chain_of_sibling_files() {
+    // each path is resolved, rather than growing with each `..` until it is too long to open
+    assert_within("sibling-files", 2000, 3000, sibling_files);
 }
 
 #[test]
