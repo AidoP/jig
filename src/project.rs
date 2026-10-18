@@ -399,13 +399,12 @@ pub struct File {
 }
 impl File {
     pub fn read(path: std::path::PathBuf) -> std::io::Result<Self> {
-        Ok(Self {
-            data: std::fs::read_to_string(&path)?,
-            path,
-            locals: HashMap::new(),
-            active: false,
-            used: None,
-        })
+        let data = std::fs::read_to_string(&path)?;
+        Ok(Self::new(path, data))
+    }
+    /// A file with its contents, which need not exist.
+    pub fn new(path: PathBuf, data: String) -> Self {
+        Self { data, path, locals: HashMap::new(), active: false, used: None }
     }
     /// Returns the path relative to the file.
     pub fn relative_path<P: AsRef<Path>>(&self, path: P) -> PathBuf {
@@ -417,5 +416,117 @@ impl File {
         let line = before.matches('\n').count() + 1;
         let col = offset - before.rfind('\n').map_or(0, |i| i + 1) + 1;
         (line, col)
+    }
+}
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use crate::bench::{assert_linear, configure};
+
+    /// Configure the source `source` gives for each size, which must be valid.
+    #[track_caller]
+    fn assert_configures_linearly(name: &str, size: usize, source: impl Fn(usize) -> String) {
+        let valid = configure(&source(1));
+        assert!(valid.diagnostics.iter().all(|d| d.severity != Severity::Error), "the source of {name} is invalid");
+        assert_linear(name, size, source, |source| {
+            configure(source);
+        });
+    }
+
+    #[test]
+    fn statements() {
+        assert_configures_linearly("statements", 2000, |n| {
+            let mut source = String::from("declare a\n    default 1\n");
+            for i in 0..n {
+                source += &format!("set a (a * 3 + {i}) % 1000003\n");
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn string_templates() {
+        assert_configures_linearly("string-templates", 1000, |n| {
+            let mut source = String::from("declare a\n    default 1\ndeclare s\n");
+            for i in 0..n {
+                source += &format!("set s '{{a}} {{upper('x{i}')}} {{len(split('a,b,c', ','))}} {{join(['x', a], '-')}}'\n");
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn properties() {
+        assert_configures_linearly("properties", 8000, |n| {
+            let mut source = String::new();
+            for i in 0..n {
+                source += &format!("declare p{i}\n    default {i}\n");
+                if i > 0 {
+                    source += &format!("set p{i} p{} + 1\n", i - 1);
+                }
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn properties_set_before_declared() {
+        assert_configures_linearly("set-before-declared", 8000, |n| {
+            let sets = (0..n).map(|i| format!("set p{i} {i}\n"));
+            let declarations = (0..n).map(|i| format!("declare p{i}\n    type 'unsigned'\n"));
+            sets.chain(declarations).collect()
+        });
+    }
+
+    #[test]
+    fn for_loop() {
+        assert_configures_linearly("for-loop", 5000, |n| {
+            let values: Vec<_> = (0..n).map(|i| i.to_string()).collect();
+            format!("declare total\n    default 0\n@for i in {}\nset total total + i\n", values.join(" "))
+        });
+    }
+
+    #[test]
+    fn crate_chain() {
+        assert_configures_linearly("crate-chain", 500, |n| {
+            let mut source = String::from("crate c0 'c.rs'\n");
+            for i in 1..n {
+                source += &format!("crate c{i} 'c.rs'\n    use c{}\n", i - 1);
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn crates_using_one() {
+        assert_configures_linearly("crates-using-one", 500, |n| {
+            let mut source = String::from("crate base 'c.rs'\n");
+            for i in 0..n {
+                source += &format!("crate c{i} 'c.rs'\n    use base\n");
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn custom_commands() {
+        assert_configures_linearly("custom-commands", 1000, |n| {
+            let mut source = String::from("custom k0\n    output 'gen/k0'\n    command 'touch' output\n");
+            for i in 1..n {
+                source += &format!("custom k{i}\n    input k{}\n    output 'gen/k{i}'\n    command 'cp' input output\n", i - 1);
+            }
+            source
+        });
+    }
+
+    #[test]
+    fn resolving_parents() {
+        let dir = std::env::temp_dir().join(format!("jig-bench-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("d")).unwrap();
+        assert_linear("resolve-parents", 200, |n| dir.join("d/../".repeat(n)).join("Jig"), |path| {
+            resolve_parents(path);
+        });
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -266,3 +266,27 @@ mod tests {
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use crate::bench::assert_linear;
+
+    #[test]
+    fn round_trip() {
+        let labels: Vec<_> = (0..20000).map(|i| (format!("c{i}@x86_64-unknown-linux-gnu"), format!("check/c{i}.json"))).collect();
+        let database = |n: usize| {
+            let flychecks = labels[..n].iter().enumerate().map(|(i, (label, diagnostics))| {
+                let deps = if i > 0 { vec![i as u32 - 1, 0] } else { vec![] };
+                Flycheck { label, diagnostics, member: true, deps }
+            }).collect();
+            let tests = labels[..n].iter().map(|(label, _)| Test { name: label, command: vec![label, "--quiet"] }).collect();
+            Database { flychecks, tests, ..Default::default() }
+        };
+        assert_linear("database", 5000, database, |database| {
+            let mut bytes = Vec::new();
+            write(&mut bytes, database).unwrap();
+            assert_eq!(read(&bytes).unwrap().flychecks.len(), database.flychecks.len());
+        });
+    }
+}

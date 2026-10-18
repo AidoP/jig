@@ -973,3 +973,20 @@ fn write_location(
     writeln!(w, "{line} | {text}")?;
     writeln!(w, "{gutter} | {indent}{style_accent}{}{style_reset}", "^".repeat(width))
 }
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use crate::bench::assert_linear;
+
+    #[test]
+    fn suggesting_a_target() {
+        // a misspelt target is compared with every target, of which rustc has a few hundred
+        let targets = |n: usize| -> Vec<String> {
+            (0..n).map(|i| format!("{}-unknown-linux-{}", ["x86_64", "aarch64", "riscv64gc", "armv7"][i % 4], i)).collect()
+        };
+        assert_linear("suggest", 250, targets, |targets| {
+            std::hint::black_box(suggest("x86_64-unknown-linux-gnux", targets));
+        });
+    }
+}

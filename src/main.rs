@@ -1,5 +1,7 @@
 use std::{io::IsTerminal, path::PathBuf};
 
+#[cfg(test)]
+mod bench;
 mod check;
 mod configured;
 mod database;
@@ -127,21 +129,42 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;
     let host = rustc_print("host-tuple", toolchain)?;
     let targets: Vec<String> = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
-    let target_list = targets.iter().map(|target| project::Data::Str(target.clone())).collect();
     let version = rustc_version(toolchain)?;
 
-    let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets);
+    let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
     };
+    declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
+    project.parse(file);
+    // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
+    if !project.fatal {
+        project.check();
+    }
+
+    report_diagnostics(&project)?;
+    generate::write(project, &input, &sysroot)
+}
+
+/// Declare the builtin properties, with the sysroot, host target, version and targets of the toolchain as rustc reports
+/// them, and the properties of the codegen options and diagnostics.
+fn declare_builtins(
+    project: &mut project::Project,
+    sysroot: &str,
+    host: &str,
+    version: String,
+    targets: &[String],
+    toolchain: Option<&str>,
+) {
+    let target_list = targets.iter().map(|target| project::Data::Str(target.clone())).collect();
     let builtins = [
         (
             project::Property::new("rustc/sysroot".into(), project::Type::String)
                 .info("the sysroot of the Rust toolchain")
                 .read_only(),
-            sysroot.clone(),
+            sysroot.into(),
         ),
         (
             project::Property::new("rustc/version".into(), project::Type::String)
@@ -152,7 +175,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
         (
             project::Property::new("target".into(), project::Type::String)
                 .info("the target triple for crates without a `target` attribute"),
-            host.clone(),
+            host.into(),
         ),
         (
             project::Property::new("build-dir".into(), project::Type::String)
@@ -168,7 +191,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
             project::Property::new("host-target".into(), project::Type::String)
                 .info("the target triple of the machine running the build")
                 .read_only(),
-            host,
+            host.into(),
         ),
         (
             project::Property::new("toolchain".into(), project::Type::String)
@@ -191,14 +214,6 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     }
     project.declare_codegen_options();
     project.declare_diagnostic_overrides();
-    project.parse(file);
-    // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
-    if !project.fatal {
-        project.check();
-    }
-
-    report_diagnostics(&project)?;
-    generate::write(project, &input, &sysroot)
 }
 
 /// Write the diagnostics of a project to stderr, failing if there are errors.

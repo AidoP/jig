@@ -28,6 +28,10 @@ The `perf` test times `jig` on large generated projects, failing if one takes fa
 faster than its size where it should be linear. Its time budgets are multiplied by the `JIG_PERF_SCALE` environment
 variable, such as `JIG_PERF_SCALE=4 jig test perf` on a slow machine.
 
+The unit tests, run by `jig test jig`, include micro-benchmarks of parts of `jig`, such as reading a configuration and
+finding the crates passed to each crate, which fail if one grows much faster than its input. Their times are shown by
+running the test harness with `--nocapture`, as in `build/<target>/test/jig benches --nocapture`.
+
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
 
 ```

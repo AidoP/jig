@@ -726,3 +726,58 @@ fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result
         }),
     }
 }
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use crate::bench::{assert_linear, configure};
+
+    /// The crates of a project, in the order they are generated.
+    fn crates(source: &str) -> Vec<Crate> {
+        let mut crates: Vec<_> = configure(source).crates.into_values().collect();
+        crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
+        crates
+    }
+
+    #[test]
+    fn externs_of_a_chain() {
+        let chain = |n: usize| {
+            let mut source = String::from("crate c0 'c.rs'\n");
+            for i in 1..n {
+                source += &format!("crate c{i} 'c.rs'\n    use c{}\n", i - 1);
+            }
+            crates(&source)
+        };
+        assert_linear("externs-chain", 2000, chain, |crates| {
+            std::hint::black_box(externs(crates));
+        });
+    }
+
+    #[test]
+    fn externs_with_builtins() {
+        // like the crates of the standard library, which are passed to every other crate
+        let with_builtins = |n: usize| {
+            let mut source = String::from("crate core 'c.rs'\n    builtin\ncrate alloc 'c.rs'\n    builtin\n    use core\n");
+            for i in 0..n {
+                source += &format!("crate c{i} 'c.rs'\n");
+            }
+            crates(&source)
+        };
+        assert_linear("externs-builtins", 2000, with_builtins, |crates| {
+            std::hint::black_box(externs(crates));
+        });
+    }
+
+    #[test]
+    fn normalizing_through_links() {
+        // a symbolic link before each `..` is resolved, which reads the link
+        let dir = std::env::temp_dir().join(format!("jig-bench-normalize-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("real/inner")).unwrap();
+        let _ = std::os::unix::fs::symlink("real/inner", dir.join("link"));
+        let path = |n: usize| dir.join("link/../inner/../".repeat(n)).join("Jig");
+        assert_linear("normalize", 50, path, |path| {
+            std::hint::black_box(normalize(path));
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

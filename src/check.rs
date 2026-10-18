@@ -101,3 +101,39 @@ mod tests {
         assert_eq!(replayed(&corrupt[0], &corrupt), ["app", "lib"]);
     }
 }
+
+#[cfg(test)]
+mod benches {
+    use super::*;
+    use crate::bench::assert_linear;
+
+    #[test]
+    fn replaying_a_chain() {
+        // the flycheck of the first crate replays every crate after it, which each use the next
+        let labels: Vec<_> = (0..4000).map(|i| format!("c{i}")).collect();
+        let chain = |n: usize| -> Vec<Flycheck> {
+            (0..n).map(|i| {
+                let deps = if i + 1 < n { vec![i as u32 + 1] } else { vec![] };
+                Flycheck { label: &labels[i], diagnostics: &labels[i], member: true, deps }
+            }).collect()
+        };
+        assert_linear("replay-chain", 1000, chain, |flychecks| {
+            assert_eq!(replayed(&flychecks[0], flychecks).len(), flychecks.len());
+        });
+    }
+
+    #[test]
+    fn replaying_shared_dependencies() {
+        // each crate uses the eight after it, so that each is reached many times but replayed once
+        let labels: Vec<_> = (0..4000).map(|i| format!("c{i}")).collect();
+        let shared = |n: usize| -> Vec<Flycheck> {
+            (0..n).map(|i| {
+                let deps = (i as u32 + 1..n.min(i + 9) as u32).collect();
+                Flycheck { label: &labels[i], diagnostics: &labels[i], member: true, deps }
+            }).collect()
+        };
+        assert_linear("replay-shared", 1000, shared, |flychecks| {
+            assert_eq!(replayed(&flychecks[0], flychecks).len(), flychecks.len());
+        });
+    }
+}
