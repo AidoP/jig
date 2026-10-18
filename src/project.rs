@@ -40,6 +40,8 @@ pub struct Project {
     properties: Vec<Option<Property>>,
     properties_idx: HashMap<String, usize>,
     values: Vec<Value>,
+    /// The indices in `values` of the values assigned to each property, in the order they were assigned.
+    property_values: HashMap<usize, Vec<usize>>,
     values_idx: HashMap<String, usize>,
     pub diagnostics: Vec<Diagnostic>,
     /// The number of diagnostics which have been given the severities of their `diagnostic/<id>` properties.
@@ -85,6 +87,7 @@ impl Project {
             properties: Vec::new(),
             properties_idx: HashMap::new(),
             values: Vec::new(),
+            property_values: HashMap::new(),
             values_idx: HashMap::new(),
             diagnostics: Vec::new(),
             overridden: 0,
@@ -174,8 +177,18 @@ impl Project {
                 let _ = file.locals.remove(&name);
             }
         }
-        self.values.push(value);
+        self.push_value(value);
         self.values_idx.insert(name, id);
+        id
+    }
+    /// Add a value, returning its index.
+    fn push_value(&mut self, value: Value) -> usize {
+        let id = self.values.len();
+        // a local value, given by `@for`, is not a property's
+        if value.property != usize::MAX {
+            self.property_values.entry(value.property).or_default().push(id);
+        }
+        self.values.push(value);
         id
     }
     fn value(&self, name: &str, file: usize) -> Option<&Value> {

@@ -47,7 +47,7 @@ impl Project {
             parser.skip_statement();
         }
         // values set before the declaration, which are errors if the property is read-only and already has a value
-        let set_before: Vec<_> = (0..self.values.len()).filter(|&value| self.values[value].property == idx).collect();
+        let set_before = self.property_values.get(&idx).cloned().unwrap_or_default();
         let mut ty = Type::Any;
         let mut read_only = false;
         // the default is assigned immediately so that later attributes can use it, but its type is only checked once the
@@ -229,8 +229,8 @@ impl Project {
             },
             Err(data) => {
                 // keep the value for the diagnostic, but not as the property's value
-                self.values.push(Value { data, ..value });
-                self.mismatched_type(self.values.len() - 1, name);
+                let id = self.push_value(Value { data, ..value });
+                self.mismatched_type(id, name);
                 false
             },
         }
@@ -278,9 +278,8 @@ impl Project {
     }
     /// Give a property a value until the end of the statement in a file, without declaring it.
     pub(super) fn set_local(&mut self, name: &str, data: Data, file: usize) {
-        let id = self.values.len();
         // the value is not a property's, so it has no declaration
-        self.values.push(Value { property: usize::MAX, span: None, data, data_span: None, origin: None, local: true });
+        let id = self.push_value(Value { property: usize::MAX, span: None, data, data_span: None, origin: None, local: true });
         self.files[file].locals.insert(name.into(), id);
     }
     /// Returns the value of a property referenced by an expression, and where the value was set.
