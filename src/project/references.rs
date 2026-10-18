@@ -147,15 +147,21 @@ impl Project {
         // a builtin target, or one declared by a `target` statement
         if let Some(target) = self.target(name) {
             let custom = target.is_custom();
-            if attribute == "has-std" {
-                let value = AttributeValue::Set(Data::Bool(!custom && self.has_std(name)));
+            // what is found from the toolchain, or by running a probe
+            let value = match attribute {
+                "has-std" => Some(!custom && self.has_std(name)),
+                "can-run" => Some(self.can_run(name)),
+                "test" => Some(self.can_test(name)),
+                _ => None,
+            };
+            if let Some(value) = value {
+                let value = AttributeValue::Set(Data::Bool(value));
                 return self.attribute_value(Item::Target, name, attribute, attribute_span, value, start, parser);
             }
             let target = self.target(name).unwrap();
             let value = match (attribute, &target.kind) {
                 ("inherit", TargetKind::Custom { inherit, .. }) => AttributeValue::optional(inherit.clone().map(Data::Str)),
                 ("inherit", TargetKind::Builtin { .. }) => AttributeValue::Unset,
-                ("test", _) => AttributeValue::Set(Data::Bool(target.can_test(&self.host()))),
                 ("override", kind) => {
                     AttributeValue::Set(Data::Bool(matches!(kind, TargetKind::Builtin { overridden: Some(_), .. })))
                 },

@@ -8,6 +8,7 @@ mod expressions;
 mod functions;
 mod install;
 mod meta;
+mod probe;
 mod properties;
 mod semver;
 mod references;
@@ -63,6 +64,8 @@ pub struct Project {
     pub customs: Vec<Custom>,
     /// The runners of targets, which targets and tests refer to by index.
     pub runners: Vec<Runner>,
+    /// Whether the host can run what is built for each target which has been probed.
+    can_run: HashMap<String, bool>,
 }
 impl Project {
     pub fn new(root: PathBuf, targets: Vec<String>) -> Self {
@@ -87,6 +90,7 @@ impl Project {
             customs: Vec::new(),
             runners: Vec::new(),
             toolchain: None,
+            can_run: HashMap::new(),
         }
     }
     pub fn file(&self, idx: usize) -> &File {

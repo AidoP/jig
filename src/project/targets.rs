@@ -4,7 +4,7 @@ use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::statements::{Attribute, Name};
 use super::syntax::{Parser, Span};
 use super::value::Data;
-use super::{Project, normalize};
+use super::{Project, normalize, probe};
 
 /// An attribute of a `target` statement which replaces a field of its specification.
 pub(super) struct TargetOption {
@@ -72,7 +72,7 @@ pub struct Target {
     pub name: String,
     pub kind: TargetKind,
     /// Whether crates for the target can be tested, from its `test` attribute, or by default, as given by
-    /// [`Self::can_test`]. Those for the host target always can be.
+    /// [`Project::can_test`]. Those for the host target always can be.
     pub test: Option<bool>,
     /// The index of the runner of a test harness for the target, which is its last argument, or none to run it
     /// directly.
@@ -103,15 +103,6 @@ impl Target {
     /// A builtin target, before any `target` statement overrides it.
     pub fn builtin(name: String) -> Self {
         Self { name, kind: TargetKind::Builtin { overridden: None, fields: Vec::new() }, test: None, runner: None }
-    }
-    /// Whether crates for the target can be tested, which is given by its `test` attribute, or is whether the host can
-    /// run what is built for a builtin target, while a custom target's specification may describe anything.
-    pub fn can_test(&self, host: &str) -> bool {
-        match (self.test, &self.kind) {
-            (Some(test), _) => test,
-            (None, TargetKind::Builtin { .. }) => host_compatible(&self.name, host),
-            (None, TargetKind::Custom { .. }) => false,
-        }
     }
     pub fn is_custom(&self) -> bool {
         matches!(self.kind, TargetKind::Custom { .. })
@@ -314,6 +305,34 @@ impl Project {
             name.starts_with("libstd-") && name.ends_with(".rlib")
         })
     }
+    /// Returns whether the host can run what is built for a target, which it can for the host target, while for
+    /// another, a probe for its architecture is run, with its runner if it has one, as described in [`probe`].
+    ///
+    /// The result is kept for the configuration, as a probe is a program which is run.
+    pub(super) fn can_run(&mut self, name: &str) -> bool {
+        if name == self.host() {
+            return true;
+        }
+        if let Some(&can_run) = self.can_run.get(name) {
+            return can_run;
+        }
+        let runner = match self.target(name).and_then(|target| target.runner) {
+            Some(runner) => self.runners[runner].command.clone(),
+            None => Vec::new(),
+        };
+        let can_run = probe::can_run(name, &runner, self.toolchain.as_deref());
+        self.can_run.insert(name.into(), can_run);
+        can_run
+    }
+    /// Returns whether crates for a target can be tested, which is given by its `test` attribute, or is whether the
+    /// host can run what is built for a builtin target, while a custom target's specification may describe anything.
+    pub(super) fn can_test(&mut self, name: &str) -> bool {
+        match self.target(name).map(|target| (target.test, target.is_custom())) {
+            Some((Some(test), _)) => test,
+            Some((None, false)) => self.can_run(name),
+            Some((None, true)) | None => false,
+        }
+    }
     /// Returns a target which is builtin or has been declared.
     pub fn target(&self, name: &str) -> Option<&Target> {
         self.targets.iter().find(|target| target.name == name)
@@ -359,45 +378,3 @@ impl Project {
     }
 }
 
-/// Whether the host can run what is built for a target, which has the host's architecture, vendor and operating system,
-/// and its environment, except that a musl target runs where the host's is glibc, as it is statically linked, such as
-/// `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu` or `armv7-unknown-linux-musleabihf` on
-/// `armv7-unknown-linux-gnueabihf`.
-pub fn host_compatible(target: &str, host: &str) -> bool {
-    if target == host {
-        return true;
-    }
-    let target: Vec<_> = target.splitn(4, '-').collect();
-    let host: Vec<_> = host.splitn(4, '-').collect();
-    let ([arch, vendor, os, env], [host_arch, host_vendor, host_os, host_env]) = (&target[..], &host[..]) else {
-        return false;
-    };
-    let compatible_env = match (env.strip_prefix("musl"), host_env.strip_prefix("gnu")) {
-        (Some(abi), Some(host_abi)) => abi == host_abi,
-        _ => env == host_env,
-    };
-    (arch, vendor, os) == (host_arch, host_vendor, host_os) && compatible_env
-}
-
-#[cfg(test)]
-mod tests {
-    use super::host_compatible;
-
-    #[test]
-    fn host_compatible_targets() {
-        let host = "x86_64-unknown-linux-gnu";
-        assert!(host_compatible(host, host));
-        assert!(host_compatible("x86_64-unknown-linux-musl", host));
-        assert!(host_compatible("armv7-unknown-linux-musleabihf", "armv7-unknown-linux-gnueabihf"));
-        assert!(host_compatible("aarch64-apple-darwin", "aarch64-apple-darwin"));
-        // the ABI, architecture, vendor and operating system must match
-        assert!(!host_compatible("armv7-unknown-linux-musleabi", "armv7-unknown-linux-gnueabihf"));
-        assert!(!host_compatible("x86_64-unknown-linux-gnux32", host));
-        assert!(!host_compatible("i686-unknown-linux-gnu", host));
-        assert!(!host_compatible("x86_64-unikraft-linux-musl", host));
-        assert!(!host_compatible("x86_64-unknown-freebsd", host));
-        // a glibc target needs glibc, which a musl host may not have
-        assert!(!host_compatible(host, "x86_64-unknown-linux-musl"));
-        assert!(!host_compatible("x86_64-apple-darwin", "aarch64-apple-darwin"));
-    }
-}

@@ -247,8 +247,8 @@ impl Project {
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their
-    /// target. Tests run on the host target, a builtin target which the host can run, or a target which allows tests,
-    /// and the others are removed.
+    /// target. Tests run for a target which allows them, which a builtin target does by default if the host can run
+    /// what is built for it, and the others are removed.
     pub(super) fn add_crate_tests(&mut self) {
         let host = self.host();
         for key in self.crate_keys() {
@@ -263,15 +263,16 @@ impl Project {
             let declared = self.customs.iter().position(|test| {
                 test.is_test() && test.name == name && (test.name_span.file, test.name_span.offset) == (span.file, span.offset)
             });
-            let runner = match self.target(&c.target) {
-                Some(target) if target.can_test(&host) => target.runner,
-                _ if c.target == host => None,
+            let target = c.target.clone();
+            let runner = match self.target(&target).map(|target| target.runner) {
+                Some(runner) if self.can_test(&target) => runner,
+                _ if target == host => None,
                 // an unknown target is reported anyway
                 None => continue,
                 Some(_) => {
                     self.diagnostics.push(Diagnostic {
                         span: Some(target_span),
-                        message: Message::TestTarget { target: c.target.clone(), host: host.clone() },
+                        message: Message::TestTarget { target: target.clone(), host: host.clone() },
                         severity: Severity::Error,
                     });
                     // nor is its harness built

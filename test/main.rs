@@ -3828,3 +3828,36 @@ log note {target}.has-std
     // is installed
     assert_contains(&project.depfile(), &format!("/lib/rustlib/{host}/lib "));
 }
+
+#[test]
+fn target_can_run() {
+    let project = Project::new("target-can-run", &[("Jig", "\
+target s390x-unknown-linux-gnu
+    override
+    runner 'true'
+target powerpc64le-unknown-linux-gnu
+    override
+    runner 'false'
+log note '{({host-target}.can-run)} {s390x-unknown-linux-gnu.can-run} {powerpc64le-unknown-linux-gnu.can-run}'
+log note '{riscv64gc-unknown-none-elf.can-run} {s390x-unknown-linux-gnu.test} {powerpc64le-unknown-linux-gnu.test}'
+crate app 'app.rs'
+    target 's390x-unknown-linux-gnu'
+    test
+")]);
+    let output = project.configure().ok();
+    // a probe is run with the runner of a target, which here stands in for an emulator, while the host target can run
+    // its own, and a target which is not for Linux has no probe
+    output.stderr("note: true true false\n").stderr("note: false true false\n");
+    // and `test` is whether it can run by default
+    assert_contains(&output.ninja, "\nbuild test/app@s390x-unknown-linux-gnu: phony s390x-unknown-linux-gnu/test/app\n");
+    let project = Project::new("target-can-run-errors", &[("Jig", "\
+target powerpc64le-unknown-linux-gnu
+    override
+    runner 'false'
+crate app 'app.rs'
+    target 'powerpc64le-unknown-linux-gnu'
+    test
+")]);
+    project.configure().failed()
+        .stderr("error[test-target]: tests for target \"powerpc64le-unknown-linux-gnu\" cannot be run");
+}

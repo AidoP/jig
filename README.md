@@ -244,8 +244,8 @@ property are `default`, `type`, `read-only` and `info`, those of a custom comman
 `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
 after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
 `builtin`, `default`, `test`, `use`, `depends`, `install`, `install-dir` and `install-mode`, and those of a target,
-builtin or declared, are `inherit`, `test`, `runner`, `override`, `has-std` and its options, such as `code-model`. An
-attribute which is not set is an error.
+builtin or declared, are `inherit`, `test`, `runner`, `override`, `has-std`, `can-run` and its options, such as
+`code-model`. An attribute which is not set is an error.
 
 `has-std` is whether the toolchain has the standard library of a builtin target, as installed by `rustup target add`,
 which is `false` for a custom target. The configuration is generated again when the target's libraries change, so it
@@ -256,6 +256,14 @@ follows the standard library being installed.
 @if {target}.has-std
 crate app 'app.rs'
 ```
+
+`can-run` is whether the host can run what is built for a target, which it can for the host target. For another, jig
+runs a probe, a tiny program for the target's architecture which exits successfully, with the target's runner if it
+has one, so it is `true` where the kernel runs the architecture, or an emulator does, such as one registered with
+binfmt or given as the runner, or Wine for a Windows target. Probes are for Linux targets of x86_64, x86, the x32 ABI,
+AArch64, 32-bit ARM, RISC-V, little-endian 64-bit PowerPC and s390x, and Windows targets of x86_64, x86 and AArch64, so
+another target can only be run if it is the host target. The probe is run when the project is configured, so an
+emulator which is installed later is found once it is configured again.
 
 A list is written as expressions in `[]`, separated by `, `, such as `['-O', 'dtb']`, and its items can have any type.
 Lists can be joined with `+` and compared with `==` and `!=`. As a string, such as in a string template, the items of
@@ -413,11 +421,10 @@ A `crate` statement may be followed by indented attributes:
   value, it is `true`
 - `codegen/<option> <value>`: a codegen option for the crate, which replaces the property of the option. See below
 - `test`: build the crate's tests with `--test` as `<build-dir>/<target>/test/<name>`, and register a test which runs
-  them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for the host
-  target, a builtin target which the host can run, or a target with `test`, can be tested. The host can run a target
-  with its architecture, vendor, operating system and environment, except that a musl target runs where the host's
-  environment is glibc, such as `x86_64-unknown-linux-musl` on `x86_64-unknown-linux-gnu`. It is `false` by default,
-  and `true` without a value
+  them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for a target
+  whose `test` is `true` can be tested, which it is by default for the host target and a builtin target which the host
+  can run, as found by `can-run`. It is `false` by default, and `true` without a value, so `test {target}.test` tests a
+  crate where its tests can run
 - `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is
@@ -500,8 +507,8 @@ A `target` statement is followed by indented attributes, which describe the targ
 - `target-feature <features>`: the features of the target, as a `str` separated by `,`, or a list of them
 - `no-redzone`: disable the red zone
 - `link-script <str>`: the linker script, which is usually a multi-line string, where braces must be doubled
-- `test <bool>`: whether crates for the target can be tested, which by default is whether the host can run a builtin
-  target, as described for crates, and `false` for a custom target. Without a value, it is `true`
+- `test <bool>`: whether crates for the target can be tested, which by default is its `can-run` for a builtin target,
+  and `false` for a custom target. Without a value, it is `true`
 - `runner <program>`: the program which runs a test harness for the target, given as its last argument, or a list of the
   program and its first arguments. As with `run`, a program containing a `/` is a path relative to the file. Without
   it, a test harness is run directly
