@@ -66,7 +66,11 @@ impl Rebase {
     }
 }
 
-/// Returns a path with its `.` and `..` components resolved, without following symbolic links.
+/// Returns a path with its `.` and `..` components resolved, for ninja.
+///
+/// Ninja removes a `..` with the component before it, without following symbolic links, but a `..` after a symbolic
+/// link leaves the directory the link points to, rather than the one containing the link. So a symbolic link followed
+/// by `..` is resolved first, and the path is otherwise left as it is, including the paths which do not exist yet.
 fn normalize(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut normal = PathBuf::new();
@@ -74,6 +78,11 @@ fn normalize(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => (),
             Component::ParentDir => {
+                if normal.symlink_metadata().is_ok_and(|metadata| metadata.is_symlink())
+                    && let Ok(target) = std::fs::canonicalize(&normal)
+                {
+                    normal = target;
+                }
                 normal.pop();
             },
             component => normal.push(component),
