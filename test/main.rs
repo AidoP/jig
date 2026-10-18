@@ -3675,7 +3675,7 @@ custom version
     assert_contains(&output, "note: toolchain: nightly\n");
     let ninja = project.ninja();
     assert_contains(&ninja, "' '+nightly' generate 'Jig'\n");
-    assert_contains(&ninja, "\n    command = RUSTUP_TOOLCHAIN='nightly' rustc ");
+    assert_contains(&ninja, "\n    command = RUSTUP_TOOLCHAIN='nightly' $crate-env rustc ");
     assert_contains(&ninja, " && RUSTUP_TOOLCHAIN='nightly' $command-line\n");
     // and which is kept by the other commands
     let (success, output) = jig(&["build"]);
@@ -4030,4 +4030,49 @@ log note '{kernel.use} | {other.use} | {third.use} | {len(none.use)}'
     assert!(!externs("none").contains("--extern"), "{}", externs("none"));
     let project = Project::new("use-list-errors", &[("Jig", "crate app 'app.rs'\n    use [1]\n")]);
     project.configure().failed().stderr("error[invalid-operand]: list value used where list of crate names is required");
+}
+
+#[test]
+fn cfg_and_env() {
+    let jig = |uart: &str| format!("\
+crate app 'app.rs'
+    crate-type 'bin'
+    cfg 'virt'
+    cfg [feature: ['uart', 'plic'], board: 'virt']
+    env [UART_BASE: {uart}]
+    default
+log note '{{app.cfg}} | {{app.env}}'
+");
+    let project = Project::new("cfg-and-env", &[
+        ("Jig", &jig("0x1000")),
+        ("app.rs", "#[cfg(all(virt, feature = \"uart\", feature = \"plic\", board = \"virt\"))]\nfn main() { println!(\"{}\", env!(\"UART_BASE\")); }\n"),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // a name, or names with values, as rustc reads them
+    output.stderr("note: virt board=\"virt\" feature=\"uart\" feature=\"plic\" | UART_BASE: 4096\n");
+    let build = || {
+        let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
+        String::from_utf8(app.stdout).unwrap()
+    };
+    assert_eq!(build(), "4096\n");
+    // which rust-analyzer is given too
+    let json = std::fs::read_to_string(project.dir.join(".rust-project.json")).unwrap();
+    assert_contains(&json, "\"cfg\": [\"virt\", \"board=\\\"virt\\\"\", \"feature=\\\"uart\\\"\", \"feature=\\\"plic\\\"\"]");
+    assert_contains(&json, "\"env\": { \"UART_BASE\": \"4096\" }");
+    // and the crate is built again when they change
+    std::fs::write(project.dir.join("Jig"), jig("0x2000")).unwrap();
+    assert_eq!(build(), "8192\n");
+    let project = Project::new("cfg-and-env-errors", &[("Jig", "\
+crate app 'app.rs'
+    cfg 1
+    env [uart-base: 1]
+    env 'x'
+")]);
+    project.configure().failed()
+        .stderr("error[invalid-operand]: unsigned value used where str, list of str, or dict is required\n --> Jig:2:9")
+        .stderr("error[invalid-identifier]: invalid character '-' in identifier \"uart-base\"\n --> Jig:3:9")
+        .stderr("error[invalid-operand]: str value used where dict is required\n --> Jig:4:9");
 }

@@ -21,6 +21,10 @@ pub struct Crate {
     pub uses: Vec<Use>,
     /// What is built before the crate and its test harness, and before its test runs, but is not an input.
     pub depends: Vec<PathBuf>,
+    /// The configuration options passed with `--cfg`, as `<name>` or `<name>="<value>"`.
+    pub cfg: Vec<String>,
+    /// The environment variables rustc is run with, which `env!` reads.
+    pub env: Vec<(String, String)>,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
     /// Where `jig install` installs the output, if it does.

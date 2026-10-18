@@ -231,6 +231,11 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
             AttributeValue::Set(Data::List(names))
         },
         "depends" => AttributeValue::Set(paths(&c.depends)),
+        "cfg" => AttributeValue::Set(strings(&c.cfg)),
+        "env" => {
+            let entries = c.env.iter().map(|(name, value)| (name.clone(), Data::Str(value.clone()))).collect();
+            AttributeValue::Set(Data::Dict(entries))
+        },
         attribute => install_attribute(&c.install, attribute),
     }
 }

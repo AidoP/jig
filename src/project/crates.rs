@@ -9,7 +9,7 @@ use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
-use super::value::{Data, Ref, Referent};
+use super::value::{Data, Operand, Ref, Referent};
 use super::{Project, rust};
 
 /// The targets a crate is declared for, from its `target` attribute or the property in effect.
@@ -65,6 +65,8 @@ impl Project {
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
+        let mut cfg = Vec::new();
+        let mut env = Vec::new();
         let mut kind = rust::Kind::Lib;
         let mut codegen = Vec::new();
         // the defaults of the install attributes depend on the crate type, so they are applied once it is known
@@ -110,6 +112,16 @@ impl Project {
                         targets = Some(CrateTargets { names, span: attribute.data_span });
                     },
                     _ => self.invalid_operand(&attribute.operand(), "str", false),
+                },
+                "cfg" => {
+                    if let Some(options) = self.cfg_options(attribute.operand()) {
+                        cfg.extend(options);
+                    }
+                },
+                "env" => {
+                    if let Some(variables) = self.env_variables(attribute.operand()) {
+                        env.extend(variables);
+                    }
                 },
                 "depends" => {
                     let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
@@ -212,6 +224,8 @@ impl Project {
                         test,
                         uses: uses.clone(),
                         depends: depends.clone(),
+                        cfg: cfg.clone(),
+                        env: env.clone(),
                         codegen: codegen[i].clone(),
                         install: install.clone(),
                     });
@@ -234,6 +248,70 @@ impl Project {
             let referent = Referent::Crate { name: c.name.clone(), target: c.target.clone() };
             self.declare_reference(property, span, Item::Crate, Ref { referent, paths: vec![output] });
         }
+    }
+    /// Returns the configuration options of a `cfg` attribute, which is a name, a list of them, or a dict of names to
+    /// values, or lists of them, as `<name>="<value>"`, reporting a value which is none of these.
+    fn cfg_options(&mut self, operand: Operand) -> Option<Vec<String>> {
+        let mut options = Vec::new();
+        let valid = match &operand.data {
+            Data::Str(name) => {
+                options.push(name.clone());
+                true
+            },
+            Data::List(names) => names.iter().all(|name| match name {
+                Data::Str(name) => {
+                    options.push(name.clone());
+                    true
+                },
+                _ => false,
+            }),
+            Data::Dict(entries) => entries.iter().all(|(name, value)| {
+                let values = match value {
+                    Data::List(values) => values.clone(),
+                    value => vec![value.clone()],
+                };
+                values.iter().all(|value| match value {
+                    Data::Str(_) | Data::Unsigned(_) | Data::Signed(_) | Data::Bool(_) => {
+                        // as rustc reads a string literal
+                        options.push(format!("{name}={:?}", value.coerce_string()));
+                        true
+                    },
+                    _ => false,
+                })
+            }),
+            _ => false,
+        };
+        if !valid {
+            self.invalid_operand(&operand, "str, list of str, or dict", false);
+            return None;
+        }
+        Some(options)
+    }
+    /// Returns the environment variables of an `env` attribute, which is a dict of their names to their values,
+    /// reporting a value which is not, or a name which cannot be an environment variable's.
+    fn env_variables(&mut self, operand: Operand) -> Option<Vec<(String, String)>> {
+        let Data::Dict(entries) = &operand.data else {
+            self.invalid_operand(&operand, "dict", false);
+            return None;
+        };
+        let mut variables = Vec::new();
+        for (name, value) in entries {
+            // a variable is given to rustc by `sh`, so its name is letters, digits and `_`
+            if let Some(character) = name.chars().find(|&c| !c.is_ascii_alphanumeric() && c != '_') {
+                self.diagnostics.push(Diagnostic {
+                    span: Some(operand.span),
+                    message: Message::InvalidIdentifier { name: name.clone(), character },
+                    severity: Severity::Error,
+                });
+                return None;
+            }
+            if matches!(value, Data::List(_) | Data::Dict(_) | Data::None) {
+                self.invalid_operand(&operand, "dict of str", false);
+                return None;
+            }
+            variables.push((name.clone(), value.coerce_string()));
+        }
+        Some(variables)
     }
     /// Register the test harness of a crate, like a `test` statement which runs it.
     ///

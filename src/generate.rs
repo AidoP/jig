@@ -103,6 +103,10 @@ pub struct Unit {
     pub build_file: PathBuf,
     /// The codegen options of the crate, which can change its `cfg`, so it is checked with them.
     pub codegen: Vec<String>,
+    /// The configuration options of the crate, given with `--cfg`.
+    pub cfg: Vec<String>,
+    /// The environment variables rustc is run with for the crate.
+    pub env: Vec<(String, String)>,
     /// The directory of the outputs for the target.
     pub dir: PathBuf,
 }
@@ -235,6 +239,8 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             member: !rust_analyzer::absolute(&c.path).starts_with(sysroot),
             build_file: project.files[c.name_span.file].path.clone(),
             codegen: codegen(c, project),
+            cfg: c.cfg.clone(),
+            env: c.env.clone(),
             dir: c.dir.clone(),
         });
     }
@@ -288,7 +294,8 @@ fn write_build_ninja(
     build_ninja.variable("edition", "2024")?;
     // the temporary files rustc writes to `--out-dir` are kept in the build directory, in a directory for each edge, as
     // they are named after the crate, which may be compiled for several targets, or as a test harness, at once
-    let rustc = &format!("{env}rustc --color=always --out-dir=$tmpdir --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
+    // `crate-env` is the environment variables of a crate, before rustc, as `sh` takes them
+    let rustc = &format!("{env}$crate-env rustc --color=always --out-dir=$tmpdir --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
     build_ninja.rule("rustc", &[
         ("command", rustc),
         ("description", "RUSTC $out"),
@@ -297,7 +304,7 @@ fn write_build_ninja(
     ])?;
 
     build_ninja.rule("rustc-check", &[
-        ("command", &format!("{env}rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
+        ("command", &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
         ("description", "CHECK $out"),
         ("deps", "gcc"),
         ("depfile", "$out.d"),
@@ -354,7 +361,9 @@ fn write_build_ninja(
         }
         let target = TargetFlag::new(&c.target, project, build_dir);
         let spec = at.paths(&target.spec);
-        let flags = rustc_flags(&target.flag(at), &at.path(&c.dir), c.kind, &deps, &codegen(c, project), at);
+        let mut flags = rustc_flags(&target.flag(at), &at.path(&c.dir), c.kind, &deps, &codegen(c, project), at);
+        flags.push_str(&cfg_flags(&c.cfg));
+        let crate_env = crate_env(&c.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
@@ -372,6 +381,7 @@ fn write_build_ninja(
                 ("crate-type", crate_type),
                 ("flags", &flags),
                 ("tmpdir", &tmpdir.display().to_string()),
+                ("crate-env", &crate_env),
             ],
             ..Default::default()
         })?;
@@ -388,6 +398,7 @@ fn write_build_ninja(
                     ("crate-type", crate_type),
                     ("flags", &format!("{flags} --test")),
                     ("tmpdir", &tmpdir.display().to_string()),
+                    ("crate-env", &crate_env),
                 ],
                 ..Default::default()
             })?;
@@ -414,9 +425,11 @@ fn write_build_ninja(
         let spec = at.paths(&target.spec);
         let outdir = at.path(&unit.check_dir());
         let mut flags = rustc_flags(&target.flag(at), &outdir, unit.kind, &deps, &unit.codegen, at);
+        flags.push_str(&cfg_flags(&unit.cfg));
         if unit.test {
             flags.push_str(" --test");
         }
+        let crate_env = crate_env(&unit.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
         let diagnostics = at.path(&unit.diagnostics());
@@ -432,6 +445,7 @@ fn write_build_ninja(
                 ("flags", &flags),
                 ("outdir", &outdir.display().to_string()),
                 ("diagnostics", &diagnostics.display().to_string()),
+                ("crate-env", &crate_env),
             ],
             ..Default::default()
         })?;
@@ -600,6 +614,17 @@ fn rustc_flags(target: &str, search: &Path, kind: Kind, deps: &[Extern], codegen
         flags.push_str(&format!(" --extern {}={}", dep.name, dep.path.display()));
     }
     flags
+}
+
+/// Returns the `--cfg` flags of configuration options, each quoted for `sh`, with `$` escaped for ninja.
+fn cfg_flags(cfg: &[String]) -> String {
+    cfg.iter().map(|option| format!(" --cfg {}", ninja_quote(option))).collect()
+}
+
+/// Returns environment variables as the assignments which `sh` takes before a command, quoted for it, with `$` escaped
+/// for ninja.
+fn crate_env(env: &[(String, String)]) -> String {
+    env.iter().map(|(name, value)| format!("{name}={} ", ninja_quote(value))).collect()
 }
 
 /// Quote a string as a single argument for `sh`, in a ninja command.

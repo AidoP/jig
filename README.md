@@ -255,9 +255,9 @@ attributes of a property whose value is a reference are those of the crate or cu
 property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`, `depends` and
 `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
 after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
-`builtin`, `default`, `test`, `use`, `depends`, `install`, `install-dir` and `install-mode`, and those of a target,
-builtin or declared, are `inherit`, `test`, `runner`, `override`, `has-std`, `can-run` and its options, such as
-`code-model`. An attribute which is not set is an error.
+`builtin`, `default`, `test`, `use`, `depends`, `cfg`, `env`, `install`, `install-dir` and `install-mode`, and those of
+a target, builtin or declared, are `inherit`, `test`, `runner`, `override`, `has-std`, `can-run` and its options, such
+as `code-model`. An attribute which is not set is an error.
 
 `has-std` is whether the toolchain has the standard library of a builtin target, as installed by `rustup target add`,
 which is `false` for a custom target. The configuration is generated again when the target's libraries change, so it
@@ -424,6 +424,13 @@ A `crate` statement may be followed by indented attributes:
   repeated, and the crate can be declared later or in another file. It can be a list of them instead, written in `[]` or
   computed in `{}`, such as a property, `use {drivers}`, whose items are names, or crates which have been declared, so
   the crates a crate uses can be chosen by the configuration
+- `cfg <option>`: a configuration option, given with `--cfg`, as a name, a list of names, or a dict of names to values
+  or lists of them, as `<name>="<value>"`, such as `cfg [feature: ['uart', 'plic']]`. It can be repeated, and is also
+  given to rust-analyzer
+- `env <variables>`: the environment variables rustc is run with for the crate, which `env!` reads, as a dict of
+  their names to their values, such as `env [UART_BASE: uart-base]`, whose names are letters, digits and `_`. It can be
+  repeated, and is also given to rust-analyzer. The crate is built again when its `cfg` or `env` change, as they are
+  part of its command
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated

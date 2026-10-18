@@ -32,7 +32,12 @@ fn entry(unit: &Unit, units: &[Unit]) -> String {
     let deps: Vec<_> = unit.deps.iter()
         .map(|&index| format!("{{ \"crate\": {index}, \"name\": {} }}", string(&units[index].name)))
         .collect();
-    let cfg = if unit.test { "\"test\"" } else { "" };
+    let mut cfg: Vec<_> = unit.cfg.iter().map(|option| string(option)).collect();
+    if unit.test {
+        cfg.push(string("test"));
+    }
+    let cfg = cfg.join(", ");
+    let env: Vec<_> = unit.env.iter().map(|(name, value)| format!("{}: {}", string(name), string(value))).collect();
     let kind = match unit.kind {
         crate::project::rust::Kind::Bin => "bin",
         crate::project::rust::Kind::Lib | crate::project::rust::Kind::ProcMacro => "lib",
@@ -54,6 +59,9 @@ fn entry(unit: &Unit, units: &[Unit]) -> String {
         entry.push_str(&format!("            \"proc_macro_dylib_path\": {},\n", path(&unit.output)));
     }
     entry.push_str(&format!("            \"cfg\": [{cfg}],\n"));
+    if !env.is_empty() {
+        entry.push_str(&format!("            \"env\": {{ {} }},\n", env.join(", ")));
+    }
     entry.push_str(&format!(
         "            \"build\": {{ \"label\": {}, \"build_file\": {}, \"target_kind\": \"{kind}\" }},\n",
         string(&unit.label),
