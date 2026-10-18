@@ -519,6 +519,8 @@ target bluemetal-riscv64
 ### Builtin properties
 
 - `rustc/sysroot`: the sysroot of the Rust toolchain, as printed by `rustc --print=sysroot`, which is read-only
+- `rustc/targets`: the builtin targets of rustc, as a list of their names, as printed by `rustc --print=target-list`,
+  which is read-only. It does not include targets declared by `target` statements
 - `rustc/version`: the version of rustc, from the `release` line of `rustc -vV`, such as `1.95.0`, or `1.96.0-nightly`
   for a nightly toolchain, which is read-only. As it is semantic, it can be compared with `semver-compatible`, where a
   nightly version is a pre-release, unless it is given `ignore-pre-release: true`

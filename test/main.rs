@@ -3761,6 +3761,7 @@ log note 'version {rustc/version}'
 log note 'sysroot {rustc/sysroot}'
 log note keys(rustc/)
 log note semver-compatible(rustc/version, '1')
+log note 'targets {len(rustc/targets)} {contains(rustc/targets, host-target)} {contains(rustc/targets, 'no-such-target')}'
 ")]);
     let rustc = |arg: &str| {
         let output = Command::new("rustc").arg(arg).current_dir(&project.dir).output().unwrap();
@@ -3769,12 +3770,15 @@ log note semver-compatible(rustc/version, '1')
     let version = rustc("-vV");
     let version = version.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
     let sysroot = rustc("--print=sysroot");
+    let targets = rustc("--print=target-list").lines().count();
     project.configure().ok()
         // the version is the release of rustc, which is semantic
         .stderr(&format!("note: version {version}\n"))
         .stderr(&format!("note: sysroot {}\n", sysroot.trim()))
-        .stderr("note: sysroot version\n")
-        .stderr(&format!("note: {}\n", !version.contains('-')));
+        .stderr("note: sysroot targets version\n")
+        .stderr(&format!("note: {}\n", !version.contains('-')))
+        // the builtin targets, which include the host
+        .stderr(&format!("note: targets {targets} true false\n"));
     let project = Project::new("rustc-properties-read-only", &[("Jig", "set rustc/version '2.0.0'\n")]);
     project.configure().failed().stderr("error[read-only-property]: ");
 }

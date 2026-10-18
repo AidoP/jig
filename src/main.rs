@@ -145,7 +145,8 @@ fn switch_toolchain(toolchain: &str) -> Result<(), Error> {
 fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;
     let host = rustc_print("host-tuple", toolchain)?;
-    let targets = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
+    let targets: Vec<String> = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
+    let target_list = targets.iter().map(|target| project::Data::Str(target.clone())).collect();
     let version = rustc_version(toolchain)?;
 
     let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets);
@@ -195,10 +196,17 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
             toolchain.unwrap_or_default().into(),
         ),
     ];
+    let lists = [(
+        project::Property::new("rustc/targets".into(), project::Type::List)
+            .info("the builtin targets of rustc, as printed by `rustc --print=target-list`")
+            .read_only(),
+        project::Data::List(target_list),
+    )];
+    let builtins = builtins.into_iter().map(|(property, value)| (property, project::Data::Str(value))).chain(lists);
     for (property, value) in builtins {
         let name = property.name().to_string();
         let id = project.declare(name.clone(), Some(property));
-        project.set(name, project::Value::new(id, project::Data::Str(value)));
+        project.set(name, project::Value::new(id, value));
     }
     project.declare_codegen_options();
     project.declare_diagnostic_overrides();
