@@ -466,9 +466,16 @@ each item is a separate option. A path, such as for `linker`, is relative to the
 `codegen/` is a dict of the options which are set, by name, as a crate declared there would be given them, such as
 `[opt-level: 's']`, as described for namespaces.
 
+Each target has a property for each option too, `codegen/<target>/<option>`, such as
+`codegen/x86_64-unknown-linux-gnu/opt-level`, which replaces `codegen/<option>` for the crates for that target, while a
+crate's own attribute replaces both. They are declared when they are first used, for a builtin target or one declared
+by a `target` statement, which may come after they are set. `codegen/<target>/` is a dict of those which are set for
+the target, which are also in `codegen/`, by `<target>/<option>`.
+
 ```
 set codegen/opt-level 's'
 set codegen/debug-assertions true
+set codegen/{host-target}/opt-level 3
 crate kernel 'kernel.rs'
 crate boot 'boot.rs'
     codegen/opt-level 'z'
@@ -568,6 +575,8 @@ target bluemetal-riscv64
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set
+- `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
+  `codegen/<option>`
 - `diagnostic/<id>`: the severity of a diagnostic, as described below
 
 ### Diagnostics

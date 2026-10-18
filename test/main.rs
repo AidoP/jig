@@ -3944,3 +3944,43 @@ fn generates_when_needed() {
         assert_contains(&String::from_utf8(output.stderr).unwrap(), "no `.jig` or `Jig` in the working directory or its parents");
     }
 }
+
+#[test]
+fn target_codegen_options() {
+    let project = Project::new("target-codegen", &[("Jig", "\
+set codegen/opt-level 2
+set codegen/{host-target}/opt-level 3
+set codegen/riscv64gc-unknown-none-elf/debuginfo 1
+set codegen/custom/opt-level 's'
+target custom
+    inherit 'x86_64-unknown-none'
+crate app 'app.rs'
+    target [host-target, 'riscv64gc-unknown-none-elf', 'custom']
+crate own 'own.rs'
+    codegen/opt-level 1
+log note codegen/{host-target}/
+log note '{len(codegen/aarch64-unknown-none/)} {codegen/{host-target}/lto.info}'
+")]);
+    let host = project.host();
+    let output = project.configure_with(NIGHTLY).ok();
+    let flags = |output_path: &str| output.build(output_path).lines().find(|line| line.contains("flags =")).unwrap().to_string();
+    // the options for a target replace the others for its crates
+    assert!(flags(&format!("{host}/libapp.rlib")).ends_with(" -C opt-level=3"), "{}", flags(&format!("{host}/libapp.rlib")));
+    assert!(flags("riscv64gc-unknown-none-elf/libapp.rlib").ends_with(" -C debuginfo=1 -C opt-level=2"));
+    assert!(flags("custom/libapp.rlib").ends_with(" -C opt-level=s"));
+    // while a crate's own replace them
+    assert!(flags(&format!("{host}/libown.rlib")).ends_with(" -C opt-level=1"));
+    // and those for a target are a namespace, of those which are set, while they are declared when they are used,
+    // including before the target is declared
+    output.stderr("note: opt-level: 3\n");
+    output.stderr(&format!("note: 0 the value of `-C lto` for the crates for `{host}` declared while it is set"));
+    let project = Project::new("target-codegen-errors", &[("Jig", "\
+set codegen/no-such-target/opt-level 3
+set codegen/{host-target}/opt-level [1]
+crate app 'app.rs'
+    target [host-target, 'riscv64gc-unknown-none-elf']
+")]);
+    let output = project.configure().failed();
+    output.stderr("error[unknown-target]: unknown target \"no-such-target\"\n --> Jig:1:5");
+    assert_eq!(output.stderr.matches("error[invalid-operand]").count(), 1, "{}", output.stderr);
+}

@@ -231,6 +231,11 @@ impl Project {
         }
         self.add_crate_tests();
         // in the order the values were set, as the properties are not kept in order
+        // the codegen options of a target which is declared after they are set
+        let names: Vec<_> = self.values_idx.keys().cloned().collect();
+        for name in names {
+            self.declare_target_codegen_option(&name);
+        }
         let mut undeclared = Vec::new();
         for (name, &idx) in &self.values_idx {
             if self.properties[self.values[idx].property].is_none() {
@@ -252,11 +257,15 @@ impl Project {
         }
         undeclared.sort_by_key(|undeclared| undeclared.value);
         for UndeclaredValue { name, value } in undeclared {
-            self.diagnostics.push(Diagnostic {
-                span: self.values[value].span,
-                message: Message::UndeclaredProperty(name),
-                severity: Severity::Error,
-            });
+            // a codegen option of a target which is not known
+            let message = match self.target_of_codegen_option(&name) {
+                Some(target) => {
+                    let suggestion = diagnostic::suggest(target, &self.builtin_targets());
+                    Message::UnknownTarget { target: target.into(), suggestion }
+                },
+                None => Message::UndeclaredProperty(name),
+            };
+            self.diagnostics.push(Diagnostic { span: self.values[value].span, message, severity: Severity::Error });
         }
         let host = self.host();
         for key in &keys {

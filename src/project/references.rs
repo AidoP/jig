@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use super::customs::CustomKind;
-use super::diagnostic::{Diagnostic, Item, Message, Severity};
+use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::install::Install;
 use super::syntax::{Parser, Span};
 use super::targets::{TargetKind, target_option};
@@ -20,7 +20,13 @@ impl Project {
             return Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin });
         }
         let message = match name.split_once('/') {
-            _ if self.properties_idx.contains_key(name) => Message::UnsetProperty(name.into()),
+            _ if self.declare_target_codegen_option(name) || self.properties_idx.contains_key(name) => {
+                Message::UnsetProperty(name.into())
+            },
+            // a codegen option of a target which is not known
+            _ if let Some(target) = self.target_of_codegen_option(name) => {
+                Message::UnknownTarget { suggestion: suggest(target, &self.builtin_targets()), target: target.into() }
+            },
             Some((target, _)) if self.target(target).is_none() => Message::InvalidTarget(target.into()),
             Some((target, crate_name)) => Message::UnknownCrate { name: crate_name.into(), target: target.into() },
             None => Message::UnsetProperty(name.into()),
@@ -38,7 +44,12 @@ impl Project {
         let prefix = format!("{prefix}/");
         let locals = self.files[file].locals.keys();
         let names: BTreeSet<_> = self.values_idx.keys().chain(locals).filter(|name| name.starts_with(&prefix)).cloned().collect();
+        // the codegen options of a target, which are declared when they are first used
+        let target_codegen = prefix.strip_prefix("codegen/").is_some_and(|target| {
+            target.strip_suffix('/').is_some_and(|target| !target.contains('/') && self.target(target).is_some())
+        });
         let known = !names.is_empty()
+            || target_codegen
             || self.properties_idx.keys().any(|name| name.starts_with(&prefix))
             || self.target(&prefix[..prefix.len() - 1]).is_some();
         if !known {
@@ -134,6 +145,7 @@ impl Project {
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, start, parser);
         }
+        self.declare_target_codegen_option(name);
         if let Some(&id) = self.properties_idx.get(name) && let Some(property) = &self.properties[id] {
             let value = match attribute {
                 "default" => AttributeValue::optional(property.default.clone()),

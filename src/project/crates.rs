@@ -168,7 +168,7 @@ impl Project {
             });
             return;
         }
-        let codegen = self.codegen_options(span, &codegen);
+        let codegen = self.codegen_options(span, &codegen, &targets);
         let build_dir = self.build_dir();
         // the targets the crate is declared for, whose outputs are declared after its tests are registered
         let mut declared = Vec::new();
@@ -208,7 +208,7 @@ impl Project {
                         test,
                         uses: uses.clone(),
                         depends: depends.clone(),
-                        codegen: codegen.clone(),
+                        codegen: codegen[i].clone(),
                         install: install.clone(),
                     });
                     declared.push(c.target.clone());

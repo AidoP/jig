@@ -338,7 +338,7 @@ impl Project {
         self.targets.iter().find(|target| target.name == name)
     }
     /// Returns the names of the builtin targets.
-    fn builtin_targets(&self) -> Vec<String> {
+    pub(super) fn builtin_targets(&self) -> Vec<String> {
         let mut names = Vec::new();
         for target in &self.targets {
             if !target.is_custom() {
