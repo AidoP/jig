@@ -52,7 +52,9 @@ directory or its parents, so they can be run from anywhere in the project. They 
 not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
 build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
 such as the targets to build, which are relative to the build directory, or the names `custom/<name>`,
-`check/<label>`, `test` and `test/<name>`. `build.ninja` regenerates itself when the configuration, or `jig`, changes.
+`check/<label>`, `test` and `test/<name>`. Without targets, it builds the crates and custom commands with `default`,
+or if none has it, every crate, test harness and custom command, but not the checks, which are for rust-analyzer.
+`build.ninja` regenerates itself when the configuration, or `jig`, changes.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
 project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is

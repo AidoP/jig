@@ -312,6 +312,8 @@ fn write_build_ninja(
 
     // the targets built by `ninja` without any, which are all targets if there are none
     let mut defaults: Vec<PathBuf> = Vec::new();
+    // what is built without defaults, which is all but the checks, which are for rust-analyzer
+    let mut everything: Vec<PathBuf> = Vec::new();
 
     // the command of an edge is `command-line`, as its `command` would replace the rule's
     build_ninja.rule("custom", &[("command", &format!("{cd} {env}$command-line")), ("description", "CUSTOM $name")])?;
@@ -347,6 +349,7 @@ fn write_build_ninja(
             inputs: &as_paths(&outputs),
             ..Default::default()
         })?;
+        everything.push(phony.clone());
         if *default {
             defaults.push(phony);
         }
@@ -385,7 +388,9 @@ fn write_build_ninja(
             ],
             ..Default::default()
         })?;
+        everything.push(output.clone());
         if c.test {
+            everything.push(at.path(&c.test_harness()));
             let tmpdir = Path::new("tmp").join(&c.target).join("test").join(&c.name);
             build_ninja.build(&ninja::Build {
                 rule: "rustc",
@@ -463,6 +468,8 @@ fn write_build_ninja(
     let installed = at.paths(installed.iter().map(|file| &file.path));
     build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("install")], inputs: &as_paths(&installed), ..Default::default() })?;
 
+    // without a `default` statement, ninja would build every target, including the checks
+    let defaults = if defaults.is_empty() { everything } else { defaults };
     if !defaults.is_empty() {
         build_ninja.default(&as_paths(&defaults))?;
     }

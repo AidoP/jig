@@ -1575,9 +1575,17 @@ custom skipped
     assert_contains(&ninja, &format!("RUSTC {host}/libkept.rlib"));
     assert!(!ninja.contains("skipped") && !ninja.contains("other"), "{ninja}");
 
-    // without defaults, there is no `default` statement, so everything is built
-    let project = Project::new("no-default", &[("Jig", "crate other 'other.rs'\n")]);
-    assert!(!project.configure().ok().ninja.contains("\ndefault "));
+    // without defaults, everything is built but the checks, which are for rust-analyzer
+    let project = Project::new("no-default", &[
+        ("Jig", "crate other 'other.rs'\n    test\ncustom data\n    command 'true'\n"),
+        ("other.rs", ""),
+    ]);
+    let output = project.configure().ok();
+    assert_contains(&output.ninja, &format!("\ndefault custom/data {host}/libother.rlib {host}/test/other\n"));
+    let build = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+    let build = String::from_utf8(build.stdout).unwrap();
+    assert_contains(&build, &format!("RUSTC {host}/libother.rlib"));
+    assert!(!build.contains("CHECK"), "{build}");
 }
 
 #[test]
