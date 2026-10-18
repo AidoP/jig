@@ -4076,3 +4076,34 @@ crate app 'app.rs'
         .stderr("error[invalid-identifier]: invalid character '-' in identifier \"uart-base\"\n --> Jig:3:9")
         .stderr("error[invalid-operand]: str value used where dict is required\n --> Jig:4:9");
 }
+
+#[test]
+fn fatal_diagnostics() {
+    let project = Project::new("fatal", &[
+        ("Jig", "\
+log note 'before'
+use 'sub'
+log note 'after'
+crate app 'app.rs'
+    target 'no-such-target'
+"),
+        ("sub/Jig", "@for x in 1 2 3\nlog fatal 'stop at {x}'\n"),
+    ]);
+    let output = project.configure().failed();
+    // a fatal diagnostic stops the configuration where it is reported, including the loop and the file which used it
+    output.stderr("note: before\n").stderr("fatal: stop at 1\n");
+    for after in ["stop at 2", "after", "unknown-target"] {
+        assert!(!output.stderr.contains(after), "{}", output.stderr);
+    }
+    // so nothing is generated
+    assert!(!project.dir.join("build/build.ninja").exists());
+    // and any diagnostic can be made fatal
+    let project = Project::new("fatal-override", &[("Jig", "\
+set diagnostic/unknown-function 'fatal'
+log note nope()
+log note 'after'
+")]);
+    let output = project.configure().failed();
+    output.stderr("fatal[unknown-function]: unknown function \"nope\"");
+    assert!(!output.stderr.contains("after"), "{}", output.stderr);
+}

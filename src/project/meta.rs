@@ -213,6 +213,10 @@ impl Project {
         let body = parser.offset;
         let previous = self.files[parser.file].locals.get(&for_loop.name).copied();
         for value in &for_loop.values {
+            // a fatal diagnostic stops the loop too
+            if self.fatal {
+                break;
+            }
             parser.offset = body;
             self.set_local(&for_loop.name, value.clone(), parser.file);
             self.parse_statement(parser, &mut None);

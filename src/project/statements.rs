@@ -40,7 +40,8 @@ impl Project {
         let mut chain = None;
         // the statement which used the file is still being processed after it
         let meta_insertion = self.meta_insertion.take();
-        loop {
+        // a fatal diagnostic stops the files being processed, including those which used this one
+        while !self.fatal {
             parser.skip_empty();
             if parser.is_empty() {
                 break;
@@ -53,6 +54,9 @@ impl Project {
     /// Take a statement, with the meta-statements before it, and the statements chained after it with `@then`, which
     /// are processed or skipped with it.
     pub(super) fn parse_statement(&mut self, parser: &mut Parser, chain: &mut Option<bool>) {
+        if self.fatal {
+            return;
+        }
         let process = match self.parse_meta(parser, chain) {
             Meta::Skip => false,
             // `@for` processes the chained statements too
@@ -190,6 +194,7 @@ impl Project {
             "warning" => Severity::Warning,
             "note" => Severity::Note,
             "suggestion" => Severity::Suggestion,
+            "fatal" => Severity::Fatal,
             _ => {
                 self.diagnostics.push(Diagnostic {
                     span: Some(span),

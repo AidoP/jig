@@ -9,6 +9,8 @@ use super::{File, Project};
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Severity {
+    /// An error which stops the configuration where it is reported, so that nothing after it is processed.
+    Fatal,
     Error,
     Warning,
     Note,
@@ -20,7 +22,7 @@ pub enum Severity {
 impl Severity {
     pub const fn accent(&self) -> &'static str {
         match self {
-            Self::Error => "\x1b[91m\x1b[1m",
+            Self::Fatal | Self::Error => "\x1b[91m\x1b[1m",
             Self::Warning => "\x1b[93m\x1b[1m",
             Self::Note => "\x1b[96m\x1b[1m",
             Self::Suggestion => "\x1b[92m\x1b[1m",
@@ -31,6 +33,7 @@ impl Severity {
 impl core::fmt::Display for Severity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Severity::Fatal => write!(f, "fatal"),
             Severity::Error => write!(f, "error"),
             Severity::Warning => write!(f, "warning"),
             Severity::Note => write!(f, "note"),
@@ -669,6 +672,7 @@ impl Message {
 /// Returns the severity a diagnostic can be overridden to, as the value of its `diagnostic/<id>` property.
 pub fn severity_override(name: &str) -> Option<Severity> {
     match name {
+        "fatal" => Some(Severity::Fatal),
         "error" => Some(Severity::Error),
         "warning" => Some(Severity::Warning),
         "note" => Some(Severity::Note),
@@ -691,7 +695,7 @@ impl Project {
         if self.properties_idx.get(&name).is_some_and(|&property| self.properties[property].is_some()) {
             return;
         }
-        let info = "the severity of the diagnostic where it is reported: 'error', 'warning', 'note' or 'allow'";
+        let info = "the severity of the diagnostic where it is reported: 'fatal', 'error', 'warning', 'note' or 'allow'";
         self.declare(name.clone(), Some(Property::new(name, Type::String).info(info)));
     }
     /// Give the diagnostics reported since this was last called the severities of their `diagnostic/<id>` properties.
@@ -707,6 +711,9 @@ impl Project {
             };
             if let Some(severity) = severity {
                 self.diagnostics[index].severity = severity;
+            }
+            if self.diagnostics[index].severity == Severity::Fatal {
+                self.fatal = true;
             }
         }
         self.overridden = self.diagnostics.len();

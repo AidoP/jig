@@ -44,6 +44,9 @@ pub struct Project {
     pub diagnostics: Vec<Diagnostic>,
     /// The number of diagnostics which have been given the severities of their `diagnostic/<id>` properties.
     overridden: usize,
+    /// Whether a fatal diagnostic has been reported, which stops the configuration, so no more statements are
+    /// processed, nor is the project checked or generated.
+    pub fatal: bool,
     /// The directory of what is built, from the `build-dir` property, once it has been used.
     build_dir: Option<PathBuf>,
     /// The values given by `@with` which it has restored, which are no longer the values of their properties, but are
@@ -81,6 +84,7 @@ impl Project {
             values_idx: HashMap::new(),
             diagnostics: Vec::new(),
             overridden: 0,
+            fatal: false,
             reverted: Vec::new(),
             meta_insertion: None,
             build_dir: None,

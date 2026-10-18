@@ -192,7 +192,10 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     project.declare_codegen_options();
     project.declare_diagnostic_overrides();
     project.parse(file);
-    project.check();
+    // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
+    if !project.fatal {
+        project.check();
+    }
 
     report_diagnostics(&project)?;
     generate::write(project, &input, &sysroot)
@@ -211,7 +214,7 @@ fn report_diagnostics(project: &project::Project) -> Result<(), Error> {
     let pretty = stderr.is_terminal();
     for diagnostic in &project.diagnostics {
         match diagnostic.severity {
-            project::Severity::Error => errors += 1,
+            project::Severity::Fatal | project::Severity::Error => errors += 1,
             project::Severity::Warning => warnings += 1,
             project::Severity::Allow => continue,
             _ => (),

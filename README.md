@@ -101,10 +101,11 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `set <name> <value>`: assign a value to a property
 - `crate <name> [<path>]`: introduce a Rust library crate named `<name>`, with its root at `<path>`, or at
   `<name>/lib.rs` relative to the file without one
-- `log <severity> <expression>`: report the value of an expression as an `error`, `warning`, `note` or `suggestion`.
-  With the `quiet` attribute, only the message is shown, without where it was logged. With `id <str>`, the diagnostic
-  has that identifier, which is shown with it and whose property, `diagnostic/<id>`, overrides its severity, as for
-  other diagnostics, and is declared by the first `log` with the identifier
+- `log <severity> <expression>`: report the value of an expression as a `fatal` error, an `error`, a `warning`, a `note`
+  or a `suggestion`, where a fatal error stops the configuration, as described below. With the `quiet` attribute, only
+  the message is shown, without where it was logged. With `id <str>`, the diagnostic has that identifier, which is shown
+  with it and whose property, `diagnostic/<id>`, overrides its severity, as for other diagnostics, and is declared by
+  the first `log` with the identifier
 - `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `target <name>`: a custom target, which crates can be compiled for. See below
@@ -593,11 +594,16 @@ target bluemetal-riscv64
 ### Diagnostics
 
 Each diagnostic has an identifier, shown after its severity, as in `error[unknown-target]`, except for those of `log`
-statements without an `id` attribute, whose identifier is `user`. Its severity is replaced by the value of its property, `diagnostic/<id>`, where
-it is reported: `'error'`, `'warning'`, `'note'`, or `'allow'` to hide it. A note or suggestion attached to a
-diagnostic, such as the list of targets after an unknown target, is hidden with it. Errors within the first argument
-of `try` are still reported as warnings, except for `impure`. Diagnostics found once the files are read, such as unknown targets of crates,
-have the severities set at the end.
+statements without an `id` attribute, whose identifier is `user`. Its severity is replaced by the value of its
+property, `diagnostic/<id>`, where it is reported: `'fatal'`, `'error'`, `'warning'`, `'note'`, or `'allow'` to hide
+it. A note or suggestion attached to a diagnostic, such as the list of targets after an unknown target, is hidden with
+it. Errors within the first argument of `try` are still reported as warnings, except for `impure`. Diagnostics found
+once the files are read, such as unknown targets of crates, have the severities set at the end.
+
+A fatal error stops the configuration once the statement which reported it is done, so the rest of its file, the
+files which used it and any repetitions of a `@for` are not processed, nor is the configuration checked or generated.
+It suits a configuration which cannot go on, such as for an unsupported device, as later diagnostics would only follow
+from it.
 
 ```
 set diagnostic/unknown-target 'warning'
