@@ -6,7 +6,7 @@ use super::customs::leading_reference;
 use super::diagnostic::{Diagnostic, Message, Severity};
 use super::statements::Name;
 use super::syntax::{Parser, Span, argument_end, is_named_entry};
-use super::value::{Coercion, Data, Operand};
+use super::value::{Coercion, Data, Operand, Value};
 use super::{Project, normalize, semver};
 
 /// A function which can be called in an expression.
@@ -38,6 +38,7 @@ const FUNCTIONS: &[Function] = &[
     Function { name: "semver-compatible", arguments: Arguments::Exactly(2) },
     Function { name: "get", arguments: Arguments::Either(2, 3) },
     Function { name: "select", arguments: Arguments::AtLeast(1) },
+    Function { name: "defined", arguments: Arguments::Exactly(1) },
     Function { name: "run", arguments: Arguments::AtLeast(1) },
     Function { name: "min", arguments: Arguments::AtLeast(1) },
     Function { name: "max", arguments: Arguments::AtLeast(1) },
@@ -114,9 +115,21 @@ impl Project {
             let data = self.semver_compatible(arguments, expected, span)?;
             return Some(Operand { data, span, coerce: Coercion::Strict, origin: None });
         }
+        if name == "defined" {
+            let names = self.parse_arguments(parser, ')', |this, parser| {
+                this.parse_name(parser).map(|name| (name.name, name.span))
+            })?;
+            let span = parser.span_from(name_span.offset);
+            let [(name, name_span)] = &names[..] else {
+                self.argument_count("defined", expected, names.len(), span);
+                return None;
+            };
+            let defined = self.defined(name, *name_span)?;
+            return Some(Operand { data: Data::Bool(defined), span, coerce: Coercion::Strict, origin: None });
+        }
         if name == "select" {
             let names = self.parse_arguments(parser, ')', |this, parser| {
-                this.parse_ident(parser).map(|(name, span)| (name.to_string(), span))
+                this.parse_name(parser).map(|name| (name.name, name.span))
             })?;
             let span = parser.span_from(name_span.offset);
             if names.is_empty() {
@@ -731,31 +744,55 @@ impl Project {
     /// Returns the value of the first property which has one.
     ///
     /// Every property must have been declared, or forward declared by a `set`, so that a misspelling is not ignored.
+    /// Returns the value of a property where `span` is, if it has one, which must be declared, or set before it is
+    /// declared, so that a misspelt name is an error rather than not having a value, which is reported.
+    ///
+    /// A crate is a property, which is referred to by its name alone for the `target` property, while one for a target,
+    /// `<target>/<name>`, has no value if it has not been declared, as it may be later.
+    fn named_value(&mut self, name: &str, span: Span) -> Result<Option<&Value>, ()> {
+        self.declare_target_codegen_option(name);
+        if self.properties_idx.contains_key(name) {
+            return Ok(self.value(name, span.file));
+        }
+        let target = self.value("target", span.file).map(|target| target.data.coerce_string());
+        if let Some(target) = target && self.value(&format!("{target}/{name}"), span.file).is_some() {
+            return Ok(self.value(&format!("{target}/{name}"), span.file));
+        }
+        if let Some((target, _)) = name.split_once('/') && self.target(target).is_some() {
+            return Ok(None);
+        }
+        self.diagnostics.push(Diagnostic {
+            span: Some(span),
+            message: Message::UndeclaredProperty(name.into()),
+            severity: Severity::Error,
+        });
+        Err(())
+    }
+    /// Returns whether a property has a value where `span` is, as found by [`Self::named_value`].
+    fn defined(&mut self, name: &str, span: Span) -> Option<bool> {
+        self.named_value(name, span).ok().map(|value| value.is_some())
+    }
+    /// Returns the value of the first of the properties which has one, as found by [`Self::named_value`], reporting
+    /// every name which is not declared.
     pub(super) fn select(&mut self, names: &[(String, Span)], span: Span) -> Option<Operand> {
         let mut undeclared = false;
         for (name, name_span) in names {
-            if !self.properties_idx.contains_key(name) {
-                self.diagnostics.push(Diagnostic {
-                    span: Some(*name_span),
-                    message: Message::UndeclaredProperty(name.clone()),
-                    severity: Severity::Error,
-                });
-                undeclared = true;
-            }
+            undeclared |= self.named_value(name, *name_span).is_err();
         }
         if undeclared {
             return None;
         }
-        let selected = names.iter().find_map(|(name, _)| self.value(name, span.file));
-        let Some(value) = selected else {
-            self.diagnostics.push(Diagnostic {
-                span: Some(span),
-                message: Message::NoneSelected(names.iter().map(|(name, _)| name.clone()).collect()),
-                severity: Severity::Error,
-            });
-            return None;
-        };
-        Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin })
+        for (name, name_span) in names {
+            if let Ok(Some(value)) = self.named_value(name, *name_span) {
+                return Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin });
+            }
+        }
+        self.diagnostics.push(Diagnostic {
+            span: Some(span),
+            message: Message::NoneSelected(names.iter().map(|(name, _)| name.clone()).collect()),
+            severity: Severity::Error,
+        });
+        None
     }
 }
 

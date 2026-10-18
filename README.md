@@ -313,8 +313,12 @@ Functions are called with their arguments in `()`, separated by `, `:
 
 - `upper(str)` and `lower(str)`: convert a `str` to upper or lower case
 - `starts-with(str, prefix)` and `ends-with(str, suffix)`: whether a `str` starts or ends with another, as a `bool`
-- `select(name, ...)`: the value of the first of the named properties which has a value. Each property must be
-  declared, or set before it is declared, so that a misspelt name is an error rather than ignored
+- `select(name, ...)`: the value of the first of the named properties which has a value, whose names are as for a
+  property, which may be computed and have a `/`, such as `codegen/{target}/opt-level`. Each property must be
+  declared, or set before it is declared, so that a misspelt name is an error rather than ignored, while a crate for a
+  target, `<target>/<name>`, which has not been declared has no value, as it may be declared later
+- `defined(name)`: whether a property has a value where the call is, as a `bool`, such as one which may be set in
+  `Jig.local`, whose name is as for `select`
 - `env(name)`: the value of an environment variable, which must be set. The build is not reconfigured when it changes,
   so it is impure, as described below
 - `len(value)`: the number of items in a list or entries in a dict, or of bytes in a `str`, which is UTF-8, as an

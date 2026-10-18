@@ -4107,3 +4107,55 @@ log note 'after'
     output.stderr("fatal[unknown-function]: unknown function \"nope\"");
     assert!(!output.stderr.contains("after"), "{}", output.stderr);
 }
+
+#[test]
+fn defined_function() {
+    let project = Project::new("defined", &[("Jig", "\
+declare board
+declare ram-size
+    default 0x1000
+set early 1
+crate uart 'uart.rs'
+log note '{defined(board)} {defined(ram-size)} {defined(early)} {defined(uart)}'
+log note '{defined({host-target}/uart)} {defined({host-target}/plic)} {defined(codegen/opt-level)} {defined(codegen/{host-target}/opt-level)}'
+set codegen/{host-target}/opt-level 2
+log note defined(codegen/{host-target}/opt-level)
+@if !defined(board)
+log note 'no board'
+declare early
+")]);
+    project.configure().ok()
+        // whether a property has a value, where a crate is one, and one which is not declared for a target is not
+        .stderr("note: false true true true\n")
+        .stderr("note: true false false false\n")
+        .stderr("note: true\n")
+        .stderr("note: no board\n");
+    let project = Project::new("defined-errors", &[("Jig", "log note defined(missing)\nlog note defined(a, b)\n")]);
+    project.configure().failed()
+        // a property which is not declared, nor set, is misspelt
+        .stderr("error[undeclared-property]: property \"missing\" is undeclared\n --> Jig:1:18")
+        .stderr("error[argument-count]: function \"defined\" takes 1 argument, but 2 were given");
+}
+
+#[test]
+fn select_computed_names() {
+    let project = Project::new("select-computed", &[("Jig", "\
+set codegen/{host-target}/opt-level 2
+crate uart 'uart.rs'
+declare board
+declare fallback
+    default 'virt'
+log note select(codegen/{host-target}/debuginfo, codegen/{host-target}/opt-level)
+log note '{select(board, {host-target}/uart)}'
+log note select(board, fall{'back'})
+")]);
+    let host = project.host();
+    // names may be computed, and have a `/`, as for `defined`, such as a codegen option of a target, or a crate
+    project.configure().ok()
+        .stderr("note: 2\n")
+        .stderr(&format!("note: build/{host}/libuart.rlib\n"))
+        .stderr("note: virt\n");
+    let project = Project::new("select-computed-errors", &[("Jig", "log note select(codegen/{host-target}/nope, missing)\n")]);
+    project.configure().failed()
+        .stderr("error[undeclared-property]: property \"missing\" is undeclared");
+}
