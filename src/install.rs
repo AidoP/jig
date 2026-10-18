@@ -29,6 +29,15 @@ pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
         Ok(prefix) => prefix,
         Err(error) => return Err(Error::Create(given, error)),
     };
+    // the wrappers run this `jig`, which is found before any of them replaces it
+    let jig = if proxy {
+        match proxy_jig(&project.root, &prefix, &database.installs) {
+            Ok(jig) => jig,
+            Err(error) => return Err(Error::Create(prefix, error)),
+        }
+    } else {
+        PathBuf::new()
+    };
     let (mut copies, mut wrappers, mut links) = (0, 0, 0);
     for file in &database.installs {
         let source = project.root.join(file.path);
@@ -40,7 +49,7 @@ pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
         let installed = match (proxy, file.program) {
             (false, _) => copy(&source, &destination, file.mode).map(|()| copies += 1),
             (true, true) => {
-                write_proxy(&project.root, &prefix, &destination, &source, file.mode).map(|_| wrappers += 1)
+                write_proxy(&project.root, &jig, &prefix, &destination, &source, file.mode).map(|_| wrappers += 1)
             },
             (true, false) => link(&source, &destination).map(|()| links += 1),
         };
@@ -100,9 +109,9 @@ pub const REINSTALLED: u8 = 75;
 ///
 /// The paths are absolute, and the wrapper is identified by its prefix and its own path, which `jig` finds its program
 /// by. The build's output is written to stderr, so that the program's output is its own.
-fn proxy_script(root: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> std::io::Result<String> {
+fn proxy_script(root: &Path, jig: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> String {
     let quote = |path: &Path| shell_quote(&path.display().to_string());
-    Ok(format!(
+    format!(
         "#!/bin/sh\n\
          # installed by `jig install --proxy`, which builds the program if needed, then runs it,\n\
          # or this wrapper again if it is reinstalled\n\
@@ -113,15 +122,16 @@ fn proxy_script(root: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> st
          \x20   *) exit 1 ;;\n\
          esac\n",
         root = quote(root),
-        jig = quote(&jig()?),
+        jig = quote(jig),
         prefix = quote(prefix),
         wrapper = quote(wrapper),
         source = quote(source),
-    ))
+    )
 }
 
-/// Returns the path of `jig` for a wrapper to run, which is the path it was run by if that is absolute, as a wrapper runs
-/// it, rather than the path of the running executable, which `jig build --proxy` may have replaced by building it.
+/// Returns the path of `jig` for a wrapper to run, which is the path it was run by if that is absolute, as a wrapper
+/// runs it, rather than the path of the running executable, which `jig build --proxy` may have replaced by building
+/// it.
 fn jig() -> std::io::Result<PathBuf> {
     match std::env::args_os().next() {
         Some(path) if Path::new(&path).is_absolute() => Ok(path.into()),
@@ -132,8 +142,15 @@ fn jig() -> std::io::Result<PathBuf> {
 /// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written.
 ///
 /// Returns whether it was written.
-fn write_proxy(root: &Path, prefix: &Path, wrapper: &Path, source: &Path, mode: u32) -> std::io::Result<bool> {
-    let script = proxy_script(&std::path::absolute(root)?, prefix, wrapper, &std::path::absolute(source)?)?;
+fn write_proxy(
+    root: &Path,
+    jig: &Path,
+    prefix: &Path,
+    wrapper: &Path,
+    source: &Path,
+    mode: u32,
+) -> std::io::Result<bool> {
+    let script = proxy_script(&std::path::absolute(root)?, jig, prefix, wrapper, &std::path::absolute(source)?);
     let current = std::fs::read_to_string(wrapper).ok();
     let current_mode = std::fs::symlink_metadata(wrapper).ok().map(|metadata| metadata.permissions().mode() & 0o7777);
     if current.as_ref() == Some(&script) && current_mode == Some(mode) {
@@ -143,6 +160,23 @@ fn write_proxy(root: &Path, prefix: &Path, wrapper: &Path, source: &Path, mode: 
     std::fs::write(wrapper, script)?;
     std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(mode))?;
     Ok(true)
+}
+
+/// Returns the `jig` for the wrappers installed in a prefix to run, which is the one running, as by [`jig`], unless it
+/// is where one of them is installed, as when jig installs itself, which would make that wrapper run itself, so the
+/// program it wraps is run instead.
+fn proxy_jig(root: &Path, prefix: &Path, installs: &[database::Install]) -> std::io::Result<PathBuf> {
+    let jig = jig()?;
+    let same = |lhs: &Path, rhs: &Path| match (std::fs::canonicalize(lhs), std::fs::canonicalize(rhs)) {
+        (Ok(lhs), Ok(rhs)) => lhs == rhs,
+        _ => lhs == rhs,
+    };
+    for file in installs {
+        if file.program && same(&destination(prefix, file), &jig) {
+            return std::path::absolute(root.join(file.path));
+        }
+    }
+    Ok(jig)
 }
 
 /// Returns where a file is installed in a prefix.
@@ -208,7 +242,11 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
         build(&project, &["--quiet", file.target])?;
     }
     let source = project.root.join(file.path);
-    match write_proxy(&project.root, prefix, wrapper, &source, file.mode) {
+    let jig = match proxy_jig(&project.root, prefix, &database.installs) {
+        Ok(jig) => jig,
+        Err(error) => return Err(Error::Install(source, wrapper.into(), error)),
+    };
+    match write_proxy(&project.root, &jig, prefix, wrapper, &source, file.mode) {
         Ok(reinstalled) => Ok(reinstalled),
         Err(error) => Err(Error::Install(source, wrapper.into(), error)),
     }

@@ -3882,3 +3882,32 @@ log note '{({'thumbv8m.main-none-eabihf'}/app)} {({'thumbv8m.main-none-eabihf'}.
     let project = Project::new("dotted-crate-name", &[("Jig", "crate {'a.b'}\n")]);
     project.configure().failed().stderr("error[invalid-crate-name]: invalid character '.' in crate name \"a.b\"");
 }
+
+#[test]
+fn proxy_installed_by_itself() {
+    // a `jig` which installs wrappers over itself, as when jig installs itself, does not make a wrapper run itself
+    let configure = configure_path();
+    let quoted = format!("'{}'", configure.display());
+    let project = Project::new("proxy-itself", &[("Jig", &format!("\
+custom jig
+    input {quoted}
+    command 'sh' '-c' 'cp \"$1\" \"$2.tmp\" && mv \"$2.tmp\" \"$2\"' 'sh' {quoted} output
+    install
+    install-dir 'bin'
+    install-mode 0o755
+"))]);
+    project.configure().ok();
+    let run = |program: &std::path::Path, args: &[&str]| {
+        let output = Command::new(program).args(args).current_dir(&project.dir).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{program:?} {args:?} failed:\n{stderr}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    run(&configure, &["install", "stage"]);
+    let wrapper = project.dir.join("stage/bin/jig");
+    run(&wrapper, &["install", "--proxy", "stage"]);
+    let script = std::fs::read_to_string(&wrapper).unwrap();
+    assert!(!script.contains(&format!("exec '{}' build", wrapper.display())), "{script}");
+    assert_contains(&script, &format!("exec '{}' build", project.dir.join("build/jig").display()));
+    assert_contains(&run(&wrapper, &["help"]), "usage: jig");
+}
