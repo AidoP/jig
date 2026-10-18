@@ -7,9 +7,17 @@ A build system for Rust.
 
 ## Installing
 
-Each release on GitHub has a statically linked `jig` for x86_64 and aarch64 Linux, which is built and tested by
-`.github/workflows/release.yml` when a tag starting with `v` is pushed. A tag with a suffix, such as `v1.0.0-rc.1`, is a
-prerelease.
+Each release on GitHub has a statically linked `jig` for x86_64, aarch64 and riscv64 Linux, which is built and tested
+by `.github/workflows/release.yml` when a tag starting with `v` is pushed. A tag with a suffix, such as `v1.0.0-rc.1`,
+is a prerelease.
+
+`jig` is built for each of the `targets` property's targets whose standard library is installed, such as the musl
+targets added with `rustup target add`. The `release-target` property, which is the host target by default, is the one
+built by default, installed, and run by the integration tests. A release sets it to a musl target in `Jig.local`:
+
+```
+set release-target 'x86_64-unknown-linux-musl'
+```
 
 ## Building
 

@@ -1,20 +1,49 @@
+# MSRV
+@if !semver-compatible(rustc/version, '1.95.0', ignore-pre-release: true)
+log error 'unsupported Rust version {rustc/version}: minimum required is 1.95.0'
+    id 'msrv'
+    quiet
+
 # defaults
 set codegen/opt-level 3
+declare targets
+    type 'list'
+    info 'the targets jig is built for, of which those with their standard library installed are built'
+    default unique(host-target, 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'riscv64gc-unknown-linux-musl')
+declare release-target
+    type 'str'
+    info 'the target of the jig which is built by default, installed, and run by the integration tests'
+    default host-target
 
 # optional development configuration
 @if exists('Jig.local')
 use 'Jig.local'
     file
 
-log note 'opt-level: {codegen/opt-level}'
+log note codegen/
+    id 'codegen-options'
     quiet
 
+# use a cross-linker for non-host targets, whose tests run where the host can run them, such as with binfmt
+@for target in targets
+@if {target}.has-std && get(split(target, '-'), 0) != get(split(host-target, '-'), 0)
+target {target}
+    override
+    linker 'rust-lld'
+
+@for target in targets
+@if {target}.has-std
 crate jig 'src/main.rs'
     crate-type 'bin'
-    install
-    test
+    # statically linked for musl, which `riscv64gc-unknown-linux-musl` is not by default
+    codegen/target-feature get([{host-target}: []], target, ['+crt-static'])
+    # where the tests of the target can run
+    test {target}.test
+    install target == release-target
+    default target == release-target
 
 # the integration tests run jig
 crate integration 'test/main.rs'
+    target release-target
     test
-    depends jig
+    depends {release-target}/jig

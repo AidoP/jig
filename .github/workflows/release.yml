@@ -17,23 +17,35 @@ jobs:
             target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          # a RISE RISC-V runner, which needs its GitHub App installed for the repository
+          - os: ubuntu-24.04-riscv
+            target: riscv64gc-unknown-linux-musl
+    # each target is built where it runs, so that its tests run
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: Install rustup
+        # the RISC-V runners may not have it
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
       - name: Install the toolchains
-        # the tests of custom targets use nightly as well
+        # the tests of custom targets use nightly as well, while jig is built for the target as its standard library is
+        # installed
         run: |
           rustup toolchain install stable nightly --profile minimal
           rustup target add --toolchain stable ${{ matrix.target }}
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Install ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
+        run: command -v ninja >/dev/null || (sudo apt-get update && sudo apt-get install -y ninja-build)
       - name: Configure the release
-        # `Jig` uses `Jig.local` if it exists, which builds jig and its tests for musl, so that it is statically
-        # linked and runs on any Linux, where the tests run as the host can run them
+        # `Jig` uses `Jig.local` if it exists, which makes the musl target the one which is built by default,
+        # installed and run by the integration tests, so that it is statically linked and runs on any Linux
         run: |
           cat > Jig.local <<EOF
-          set target '${{ matrix.target }}'
+          set release-target '${{ matrix.target }}'
           set codegen/strip 'symbols'
           EOF
       - name: Bootstrap
