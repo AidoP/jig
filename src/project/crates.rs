@@ -33,9 +33,9 @@ impl Project {
             parser.skip_statement();
             return;
         };
-        // the name is passed to rustc, which rejects `-` even though it is valid in an identifier, while a `/` would be
-        // part of the name it is referred to by, `<target>/<name>`
-        if let Some((i, character)) = name.char_indices().find(|&(_, c)| c == '-' || c == '/') {
+        // the name is passed to rustc, which rejects `-` even though it is valid in an identifier, and a `.`, which a
+        // computed name may have, while a `/` would be part of the name it is referred to by, `<target>/<name>`
+        if let Some((i, character)) = name.char_indices().find(|&(_, c)| matches!(c, '-' | '/' | '.')) {
             // point at the character if the name was written as an identifier, otherwise its position is unknown
             let span = if literal {
                 Span { file: span.file, offset: span.offset + i, len: character.len_utf8() }

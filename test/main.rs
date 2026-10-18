@@ -3861,3 +3861,24 @@ crate app 'app.rs'
     project.configure().failed()
         .stderr("error[test-target]: tests for target \"powerpc64le-unknown-linux-gnu\" cannot be run");
 }
+
+#[test]
+fn dotted_target_names() {
+    // some targets have a `.`, which a computed name may have, as one written in a name takes an attribute
+    let project = Project::new("dotted-targets", &[("Jig", "\
+@for target in rustc/targets
+@if {target}.has-std
+log note 'std {target}'
+    quiet
+crate app 'app.rs'
+    target 'thumbv8m.main-none-eabihf'
+log note '{({'thumbv8m.main-none-eabihf'}/app)} {({'thumbv8m.main-none-eabihf'}.can-run)}'
+")]);
+    let host = project.host();
+    project.configure().ok()
+        .stderr(&format!("note: std {host}\n"))
+        .stderr("note: build/thumbv8m.main-none-eabihf/libapp.rlib false\n");
+    // while a crate's name is given to rustc, which rejects it
+    let project = Project::new("dotted-crate-name", &[("Jig", "crate {'a.b'}\n")]);
+    project.configure().failed().stderr("error[invalid-crate-name]: invalid character '.' in crate name \"a.b\"");
+}

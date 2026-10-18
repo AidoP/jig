@@ -385,12 +385,17 @@ pub(super) fn is_attribute_access(parser: &Parser) -> bool {
 }
 
 /// Returns the first character of a name which cannot be part of it, with its index, where a name is identifiers joined
-/// by `/`.
+/// by `/`, which may have a `.` where they are computed.
 pub(super) fn invalid_name_char(name: &str) -> Option<(usize, char)> {
     let mut segment_start = 0;
     for (i, c) in name.char_indices() {
         if c == '/' {
             segment_start = i + 1;
+            continue;
+        }
+        // a `.` can only be in a part computed in `{}`, as one written in a name takes an attribute, as some targets
+        // have one, such as `thumbv8m.main-none-eabihf`
+        if c == '.' {
             continue;
         }
         if invalid_ident_char(&(i - segment_start, c)) {

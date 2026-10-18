@@ -142,7 +142,9 @@ custom image
 A `<name>` is identifiers joined by `/`, where an identifier is ASCII letters, digits, `-` and `_`, not starting with a
 digit. Crate and target names cannot contain `/`, and crate names cannot contain `-` either, as rustc does not accept
 it. Names declared by `declare` cannot contain `/` either, as those are left to crates and codegen options. Any part of
-a name can be computed with an expression in `{}`, as long as the whole name is valid.
+a name can be computed with an expression in `{}`, as long as the whole name is valid. A computed part may also contain
+`.`, as some targets do, such as `thumbv8m.main-none-eabihf`, which is referred to as
+`{'thumbv8m.main-none-eabihf'}/core`, as a `.` written in a name takes an attribute, while crate names cannot.
 
 ```
 crate compiler_builtins
