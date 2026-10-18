@@ -1471,12 +1471,12 @@ fn flycheck_replays_diagnostics() {
 #[test]
 fn flycheck_problems() {
     let project = Project::new("flycheck-problems", &[("Jig", "crate app 'app.rs'\n"), ("app.rs", "")]);
-    // without a configuration
-    let (stdout, stderr) = project.check("app");
+    // without a configuration, which it generates first, without writing to stdout, which is for rust-analyzer
+    let (stdout, stderr) = project.check(&format!("app@{}", project.host()));
     assert_eq!(stdout, "");
-    assert_contains(&stderr, "no `.jig` in the working directory or its parents");
+    assert!(!stderr.contains("error"), "{stderr}");
+    assert!(project.dir.join(".jig").is_file());
     // with an unknown label
-    project.configure().ok();
     let (stdout, stderr) = project.check("nope");
     assert_eq!(stdout, "");
     assert_contains(&stderr, "no crate with the label \"nope\"");
@@ -3910,4 +3910,37 @@ custom jig
     assert!(!script.contains(&format!("exec '{}' build", wrapper.display())), "{script}");
     assert_contains(&script, &format!("exec '{}' build", project.dir.join("build/jig").display()));
     assert_contains(&run(&wrapper, &["help"]), "usage: jig");
+}
+
+#[test]
+fn generates_when_needed() {
+    let project = Project::new("generates-when-needed", &[
+        ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n    default\n"),
+        ("app.rs", "fn main() {}\n"),
+        ("sub/file", ""),
+    ]);
+    let host = project.host();
+    let build = |dir: &str| {
+        let output = Command::new(configure_path()).arg("build").current_dir(project.dir.join(dir)).output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    };
+    let app = project.dir.join(format!("build/{host}/app"));
+    // a project which has not been configured is configured from its `Jig`, found from within it
+    build("sub");
+    assert!(app.is_file() && project.dir.join(".jig").is_file());
+    // as it is when its build directory has been removed
+    std::fs::remove_dir_all(project.dir.join("build")).unwrap();
+    build(".");
+    assert!(app.is_file());
+    // or its database is of another version
+    std::fs::write(project.dir.join(".jig"), b"JIGD\x01\x00\x00\x00").unwrap();
+    build(".");
+    assert!(std::fs::read(project.dir.join(".jig")).unwrap() != b"JIGD\x01\x00\x00\x00");
+    // while without a project, there is nothing to configure
+    let outside = std::env::temp_dir();
+    let output = Command::new(configure_path()).arg("build").current_dir(&outside).output().unwrap();
+    if !outside.ancestors().any(|dir| dir.join("Jig").is_file() || dir.join(".jig").is_file()) {
+        assert!(!output.status.success());
+        assert_contains(&String::from_utf8(output.stderr).unwrap(), "no `.jig` or `Jig` in the working directory or its parents");
+    }
 }

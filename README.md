@@ -47,10 +47,12 @@ which runs ninja in the build directory, and tested with `jig test`.
 ```
 
 `jig generate` evaluates `Jig`, writes `build.ninja` to the build directory and records the build directory in
-`.jig`, at the project root. `jig build`, `jig check` and `jig test` find `.jig` in the working directory or its
-parents, so they can be run from anywhere in the project. `jig build` passes its arguments to ninja, such as the
-targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test` and
-`test/<name>`. `build.ninja` regenerates itself when the configuration, or `jig`, changes.
+`.jig`, at the project root. `jig build`, `jig check`, `jig test` and `jig install` find `.jig` in the working
+directory or its parents, so they can be run from anywhere in the project. They configure the project first if it is
+not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
+build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
+such as the targets to build, which are relative to the build directory, or the names `custom/<name>`,
+`check/<label>`, `test` and `test/<name>`. `build.ninja` regenerates itself when the configuration, or `jig`, changes.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
 project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is

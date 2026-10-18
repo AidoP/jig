@@ -54,7 +54,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     let command = command.to_string_lossy();
     // the other commands use the toolchain the project is configured with, which is changed first if another is given
     if let Some(toolchain) = &toolchain && !matches!(command.as_ref(), "generate" | "help") {
-        switch_toolchain(toolchain)?;
+        configured::ensure(Some(toolchain))?;
     }
     match command.as_ref() {
         "generate" => {
@@ -119,25 +119,6 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         },
         command => Err(Error::UnknownCommand(command.into())),
     }
-}
-
-/// Configure the project which contains the working directory again with a toolchain, from the input it was configured
-/// with, unless it is configured with the toolchain already.
-fn switch_toolchain(toolchain: &str) -> Result<(), Error> {
-    let Some(root) = database::root() else {
-        return Err(Error::NotConfigured);
-    };
-    let path = root.join(database::PATH);
-    let bytes = std::fs::read(&path).map_err(|error| Error::Read(path.clone(), error))?;
-    let database = database::read(&bytes).map_err(|error| Error::Read(path, error))?;
-    if database.toolchain == toolchain {
-        return Ok(());
-    }
-    // the configuration is generated from the project root, as by the rule which regenerates `build.ninja`
-    if let Err(error) = std::env::set_current_dir(&root) {
-        return Err(Error::Read(root, error));
-    }
-    generate(PathBuf::from(database.input), Some(toolchain))
 }
 
 /// Evaluate the configuration from its root file, `input`, then generate `build.ninja` and the files beside it, with a
@@ -311,7 +292,7 @@ impl core::fmt::Display for Error {
             },
             Self::NotConfigured => write!(
                 f,
-                "no `{}` in the working directory or its parents, which `generate` writes to the project root",
+                "no `{}` or `Jig` in the working directory or its parents, which the project root has",
                 database::PATH,
             ),
             Self::Toolchain(name, message) => write!(f, "cannot use toolchain {name:?}: {message}"),

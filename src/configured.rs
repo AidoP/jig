@@ -39,9 +39,7 @@ impl Configured {
     /// If a path which the configuration found was missing has been created since, ninja is made to regenerate
     /// `build.ninja` by touching the reconfigure stamp, which it depends on.
     pub fn locate() -> Result<Self, Error> {
-        let Some(root) = database::root() else {
-            return Err(Error::NotConfigured);
-        };
+        let root = ensure(None)?;
         let bytes = read(&root)?;
         let database = parse(&root, &bytes)?;
         let build_dir = root.join(database.build_dir);
@@ -127,4 +125,44 @@ fn parse<'a>(root: &Path, bytes: &'a [u8]) -> Result<database::Database<'a>, Err
 /// Returns the toolchain a project is configured with, from its database, if it is configured with one.
 fn toolchain(database: &database::Database) -> Option<String> {
     (!database.toolchain.is_empty()).then(|| database.toolchain.into())
+}
+
+/// Configure the project which contains the working directory if it has not been, or cannot be built as it was, and
+/// with a toolchain if one is given which it is not configured with, returning its root.
+///
+/// The project root is the closest directory to the working directory, or it itself, with a database, or without one,
+/// with a `Jig` file. It is configured again from the root file it was configured with, and with its toolchain unless
+/// another is given, when its database is of another version, or `build.ninja` is missing, such as when the build
+/// directory has been removed.
+pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
+    let root = match database::root() {
+        Some(root) => root,
+        None => {
+            let dir = std::env::current_dir().map_err(|error| Error::Read(".".into(), error))?;
+            match dir.ancestors().find(|dir| dir.join("Jig").is_file()) {
+                Some(root) => root.to_path_buf(),
+                None => return Err(Error::NotConfigured),
+            }
+        },
+    };
+    let bytes = std::fs::read(root.join(database::PATH)).ok();
+    let database = bytes.as_deref().and_then(|bytes| database::read(bytes).ok());
+    let (input, configured, current) = match &database {
+        Some(database) => {
+            let built = root.join(database.build_dir).join("build.ninja").is_file();
+            let configured = (!database.toolchain.is_empty()).then(|| database.toolchain.to_string());
+            let current = built && toolchain.is_none_or(|toolchain| toolchain == database.toolchain);
+            (database.input.to_string(), configured, current)
+        },
+        None => ("Jig".to_string(), None, false),
+    };
+    if current {
+        return Ok(root);
+    }
+    // the configuration is generated from the project root, as by the rule which regenerates `build.ninja`
+    if let Err(error) = std::env::set_current_dir(&root) {
+        return Err(Error::Read(root, error));
+    }
+    crate::generate(PathBuf::from(input), toolchain.or(configured.as_deref()))?;
+    Ok(root)
 }
