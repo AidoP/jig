@@ -3999,3 +3999,35 @@ fn default_after_set() {
     ]);
     project.configure().failed().stderr("error[mismatched-type]: ").stderr("note: 4096\n");
 }
+
+#[test]
+fn use_lists() {
+    let project = Project::new("use-lists", &[("Jig", "\
+declare drivers
+    type 'list'
+    default ['uart', 'plic']
+crate uart 'uart.rs'
+crate plic 'plic.rs'
+crate kernel 'kernel.rs'
+    use {drivers}
+crate other 'other.rs'
+    use ['virtio']
+    use uart
+crate third 'third.rs'
+    use [plic]
+crate none 'none.rs'
+    use {[]}
+crate virtio 'virtio.rs'
+log note '{kernel.use} | {other.use} | {third.use} | {len(none.use)}'
+")]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // the crates of a list are used, which may be chosen by a property, or be references to crates already declared
+    output.stderr("note: uart plic | virtio uart | plic | 0\n");
+    let externs = |crate_name: &str| output.build(&format!("{host}/lib{crate_name}.rlib")).to_string();
+    assert_contains(&externs("kernel"), &format!("--extern plic={host}/libplic.rlib --extern uart={host}/libuart.rlib"));
+    assert_contains(&externs("other"), &format!("--extern uart={host}/libuart.rlib --extern virtio={host}/libvirtio.rlib"));
+    assert!(!externs("none").contains("--extern"), "{}", externs("none"));
+    let project = Project::new("use-list-errors", &[("Jig", "crate app 'app.rs'\n    use [1]\n")]);
+    project.configure().failed().stderr("error[invalid-operand]: list value used where list of crate names is required");
+}

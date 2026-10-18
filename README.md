@@ -421,7 +421,9 @@ A `crate` statement may be followed by indented attributes:
   statement, or a list of them to declare the crate for each. Without it, the `target` property at the point of the
   declaration is used. A crate can be declared once for each target
 - `use <name>`: a crate for the same target which the crate depends on, passed to rustc with `--extern`. It can be
-  repeated, and the crate can be declared later or in another file
+  repeated, and the crate can be declared later or in another file. It can be a list of them instead, written in `[]` or
+  computed in `{}`, such as a property, `use {drivers}`, whose items are names, or crates which have been declared, so
+  the crates a crate uses can be chosen by the configuration
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated

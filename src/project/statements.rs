@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use super::diagnostic::{Diagnostic, Message, Severity};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
-use super::value::{Coercion, Data, Operand};
+use super::value::{Coercion, Data, Operand, Ref, Referent};
 use super::{File, Project};
 
 pub(super) struct Attribute<'a> {
@@ -398,6 +398,81 @@ impl Project {
         }
         self.bool_operand(operand)
     }
+    /// Take the crates named by an attribute, such as `use`, as a name, which may be computed, as a `str`, or a list of
+    /// them, written as a list or computed in `{}`, as a list of `str`, so that the crates can be chosen by the
+    /// configuration.
+    ///
+    /// The items of a list are names, or references to crates which have been declared.
+    fn parse_crate_names(&mut self, parser: &mut Parser) -> Option<(Data, Span)> {
+        let start = parser.offset;
+        let (names, list) = match parser.peek() {
+            Some('[') => {
+                let operand = self.parse_expression(parser)?;
+                (self.crate_names(operand)?, true)
+            },
+            Some('{') => {
+                let operand = self.parse_braced(parser)?;
+                if matches!(operand.data, Data::List(_)) && matches!(parser.peek(), Some('\n') | None) {
+                    (self.crate_names(operand)?, true)
+                } else {
+                    // part of a name, or the whole of one
+                    let name = self.parse_name_from(parser, start, operand.data.coerce_string(), false)?;
+                    (vec![(name.name, name.span)], false)
+                }
+            },
+            _ => {
+                let name = self.parse_name(parser)?;
+                (vec![(name.name, name.span)], false)
+            },
+        };
+        let span = parser.span_from(start);
+        let mut crates = Vec::new();
+        for (mut name, name_span) in names {
+            // a crate can only use crates for the same target, so it is not given, unlike in a reference to a crate
+            if let Some((target, crate_name)) = name.split_once('/') {
+                let declared = self.crates.get(&(crate_name.into(), target.into())).map(|c| c.name_span);
+                name = crate_name.into();
+                self.diagnostics.push(Diagnostic {
+                    span: Some(name_span),
+                    message: Message::UseWithTarget { declared },
+                    severity: Severity::Error,
+                });
+                self.diagnostics.push(Diagnostic {
+                    span: Some(name_span),
+                    message: Message::Replacement { description: "use the crate by its name", replacement: name.clone() },
+                    severity: Severity::Suggestion,
+                });
+            }
+            crates.push(name);
+        }
+        match crates.pop() {
+            Some(name) if !list => Some((Data::Str(name), span)),
+            name => {
+                crates.extend(name);
+                Some((Data::List(crates.into_iter().map(Data::Str).collect()), span))
+            },
+        }
+    }
+    /// Returns the names of the crates in a list, which are names or references to crates, with the span of the list.
+    fn crate_names(&mut self, operand: Operand) -> Option<Vec<(String, Span)>> {
+        let span = operand.span;
+        let Data::List(items) = &operand.data else {
+            self.invalid_operand(&operand, "list of crate names", false);
+            return None;
+        };
+        let mut names = Vec::new();
+        for item in items {
+            match item {
+                Data::Str(name) => names.push((name.clone(), span)),
+                Data::Ref(Ref { referent: Referent::Crate { name, .. }, .. }) => names.push((name.clone(), span)),
+                _ => {
+                    self.invalid_operand(&operand, "list of crate names", false);
+                    return None;
+                },
+            }
+        }
+        Some(names)
+    }
     /// Take the next indented attribute of a statement, skipping those which are invalid, which have been reported.
     pub(super) fn next_attribute<'a>(&mut self, parser: &mut Parser<'a>, names: &[&str]) -> Option<Attribute<'a>> {
         while parser.indent().is_some() {
@@ -427,23 +502,8 @@ impl Project {
             if !self.parse_space(parser) {
                 return None;
             }
-            let Name { name: mut value, span, .. } = self.parse_name(parser)?;
-            // a crate can only use crates for the same target, so it is not given, unlike in a reference to a crate
-            if let Some((target, crate_name)) = value.split_once('/') {
-                let declared = self.crates.get(&(crate_name.into(), target.into())).map(|c| c.name_span);
-                value = crate_name.into();
-                self.diagnostics.push(Diagnostic {
-                    span: Some(span),
-                    message: Message::UseWithTarget { declared },
-                    severity: Severity::Error,
-                });
-                self.diagnostics.push(Diagnostic {
-                    span: Some(span),
-                    message: Message::Replacement { description: "use the crate by its name", replacement: value.clone() },
-                    severity: Severity::Suggestion,
-                });
-            }
-            (Data::Str(value), span, None, Coercion::Strict)
+            let (data, span) = self.parse_crate_names(parser)?;
+            (data, span, None, Coercion::Strict)
         } else if parser.expect(' ') {
             let operand = self.parse_expression(parser)?;
             (operand.data, operand.span, operand.origin, operand.coerce)

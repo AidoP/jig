@@ -117,10 +117,14 @@ impl Project {
                         depends.extend(paths);
                     }
                 },
+                // a crate, or a list of them
                 "use" => {
                     let span = attribute.data_span;
-                    if let Some(name) = self.str_operand(attribute.operand()) {
-                        uses.push(rust::Use { name, span });
+                    match attribute.data {
+                        Data::List(names) => {
+                            uses.extend(names.iter().map(|name| rust::Use { name: name.coerce_string(), span }));
+                        },
+                        data => uses.push(rust::Use { name: data.coerce_string(), span }),
                     }
                 },
                 name if let Some(option) = name.strip_prefix("codegen/") && is_codegen_option(option) => {
