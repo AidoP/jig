@@ -254,8 +254,10 @@ fn many_files() {
 
 #[test]
 fn deeply_nested_files() {
-    // the path of each file is as long as its depth, which the kernel walks to open it, so only the time is checked
-    assert_within("nested-files", 1000, 3000, nested_files);
+    // the path of each file is as long as its depth, which the kernel walks to open it, so only the time is checked,
+    // at a depth whose paths fit within the 1024 bytes macOS allows
+    let depth = if cfg!(target_os = "macos") { 300 } else { 1000 };
+    assert_within("nested-files", depth, 3000, nested_files);
 }
 
 #[test]
