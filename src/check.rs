@@ -1,25 +1,26 @@
 //! `jig check`, the flycheck of rust-analyzer, which replays saved diagnostics.
 
-use std::path::PathBuf;
-
 use crate::configured::{Configured, Output};
-use crate::generate::Unit;
+use crate::database::Flycheck;
 
-/// Returns the diagnostics to replay for a flycheck of a unit: its own, then those of the units it depends on, directly
-/// or not, which are edited.
-pub fn replayed(unit: &Unit, units: &[Unit]) -> Vec<PathBuf> {
-    let mut seen = vec![false; units.len()];
-    let mut stack: Vec<_> = unit.deps.iter().rev().copied().collect();
-    let mut paths = vec![unit.diagnostics()];
+/// Returns the diagnostics to replay for a flycheck: its own, then those of the flychecks it depends on, directly or
+/// not, which are edited.
+pub fn replayed<'a>(flycheck: &Flycheck<'a>, flychecks: &[Flycheck<'a>]) -> Vec<&'a str> {
+    let mut seen = vec![false; flychecks.len()];
+    let mut stack: Vec<_> = flycheck.deps.iter().rev().copied().collect();
+    let mut paths = vec![flycheck.diagnostics];
     while let Some(index) = stack.pop() {
-        if seen[index] {
+        // an index out of range is a corrupt database, whose flycheck replays what it can
+        let Some(dep) = flychecks.get(index as usize) else {
+            continue;
+        };
+        if std::mem::replace(&mut seen[index as usize], true) {
             continue;
         }
-        seen[index] = true;
-        if units[index].member {
-            paths.push(units[index].diagnostics());
+        if dep.member {
+            paths.push(dep.diagnostics);
         }
-        stack.extend(units[index].deps.iter().rev());
+        stack.extend(dep.deps.iter().rev());
     }
     paths
 }
@@ -66,10 +67,37 @@ pub fn check(label: &str) {
         return;
     };
     let mut stdout = std::io::stdout().lock();
-    for path in &entry.diagnostics {
+    for path in replayed(entry, &database.flychecks) {
         // a check which has not run, as a dependency failed, has no diagnostics
         if let Ok(mut file) = std::fs::File::open(project.root.join(path)) {
             let _ = std::io::copy(&mut file, &mut stdout);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flycheck(diagnostics: &'static str, member: bool, deps: &[u32]) -> Flycheck<'static> {
+        Flycheck { label: diagnostics, diagnostics, member, deps: deps.to_vec() }
+    }
+
+    #[test]
+    fn replays_dependencies_once_in_order() {
+        // app uses lib and util, which both use core, which is not edited, and base
+        let flychecks = [
+            flycheck("app", true, &[1, 2]),
+            flycheck("lib", true, &[3]),
+            flycheck("util", true, &[3, 4]),
+            flycheck("core", false, &[4]),
+            flycheck("base", true, &[]),
+        ];
+        assert_eq!(replayed(&flychecks[0], &flychecks), ["app", "lib", "base", "util"]);
+        // its own diagnostics are replayed, even if it is not edited
+        assert_eq!(replayed(&flychecks[3], &flychecks), ["core", "base"]);
+        // a corrupt index is skipped
+        let corrupt = [flycheck("app", true, &[7, 1]), flycheck("lib", true, &[])];
+        assert_eq!(replayed(&corrupt[0], &corrupt), ["app", "lib"]);
     }
 }
