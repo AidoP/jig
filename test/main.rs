@@ -488,6 +488,7 @@ declare defaulted
     default 'd'
     read-only
 log note 'early is {early}'
+log note 'defaulted is {defaulted}, by default {defaulted.default}'
 ")]);
     let output = project.configure().failed();
     output
@@ -500,10 +501,9 @@ log note 'early is {early}'
         .stderr("error[read-only-property]: cannot set read-only property \"early\"\n --> Jig:7:5")
         .stderr("note: value assigned here\n --> Jig:6:5")
         .stderr("note: early is a")
-        // a default leaves no room for an earlier `set`
-        .stderr("error[read-only-property]: cannot set read-only property \"defaulted\"\n  --> Jig:10:5")
-        .stderr("note: value assigned here\n  --> Jig:12:5")
-        .stderr("configuration failed with 4 errors");
+        // a `set` before the declaration replaces its default, even for a read-only property
+        .stderr("note: defaulted is a, by default d")
+        .stderr("configuration failed with 3 errors");
 }
 
 #[test]
@@ -3983,4 +3983,19 @@ crate app 'app.rs'
     let output = project.configure().failed();
     output.stderr("error[unknown-target]: unknown target \"no-such-target\"\n --> Jig:1:5");
     assert_eq!(output.stderr.matches("error[invalid-operand]").count(), 1, "{}", output.stderr);
+}
+
+#[test]
+fn default_after_set() {
+    // a file used first, such as for local configuration, sets what a later one declares with a default
+    let project = Project::new("default-after-set", &[
+        ("Jig", "set uart-base 0x2000\nuse 'board'\nlog note '{uart-base} {ram-size} {uart-base.default}'\n"),
+        ("board/Jig", "declare uart-base\n    type 'unsigned'\n    default 0x1000\ndeclare ram-size\n    default 0x8000\n"),
+    ]);
+    project.configure().ok().stderr("note: 8192 32768 4096\n");
+    // while the type of a value set before the declaration is checked, and an invalid one leaves the default
+    let project = Project::new("default-after-invalid-set", &[
+        ("Jig", "set uart-base 'x'\ndeclare uart-base\n    type 'unsigned'\n    default 0x1000\nlog note uart-base\n"),
+    ]);
+    project.configure().failed().stderr("error[mismatched-type]: ").stderr("note: 4096\n");
 }

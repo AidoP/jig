@@ -50,7 +50,6 @@ impl Project {
         let set_before: Vec<_> = (0..self.values.len()).filter(|&value| self.values[value].property == idx).collect();
         let mut ty = Type::Any;
         let mut read_only = false;
-        let mut default = None;
         // the default is assigned immediately so that later attributes can use it, but its type is only checked once the
         // whole declaration is known
         let mut default_value = None;
@@ -81,7 +80,6 @@ impl Project {
                     }
                 },
                 "default" => {
-                    default = Some(attribute.name_span);
                     default_value = Some(self.set(ident.into(), Value {
                         property: idx,
                         span: Some(attribute.name_span),
@@ -118,31 +116,25 @@ impl Project {
             }
         }
         let valid_default = default_value.filter(|&value| self.check_type(value, ident));
-        if valid_default.is_none() {
-            default = None;
-        }
         if let Some(value) = valid_default {
             self.properties[idx].as_mut().unwrap().default = Some(self.values[value].data.clone());
         }
-        match valid_default.or(valid_before.last().copied()) {
+        // a value set before the declaration replaces its default, so that a file used first, such as one for local
+        // configuration, can set what a later one declares
+        match valid_before.last().copied().or(valid_default) {
             Some(value) => self.values_idx.insert(ident.into(), value),
             None => self.values_idx.remove(ident),
         };
         if !read_only {
             return;
         }
-        // a default leaves no room for any earlier `set`, otherwise only the first is permitted
-        let (assigned, invalid) = match default {
-            Some(span) => (Some(span), &valid_before[..]),
-            None => match valid_before.split_first() {
-                Some((first, rest)) => {
-                    // the rejected values were set before they were known to be invalid, so restore the first
-                    self.values_idx.insert(ident.into(), *first);
-                    (self.values[*first].span, rest)
-                },
-                None => return,
-            },
+        // only the first `set` before the declaration is permitted, which replaces the default
+        let Some((first, invalid)) = valid_before.split_first() else {
+            return;
         };
+        // the rejected values were set before they were known to be invalid, so restore the first
+        self.values_idx.insert(ident.into(), *first);
+        let assigned = self.values[*first].span;
         for &value in invalid {
             self.diagnostics.push(Diagnostic {
                 span: self.values[value].span,
