@@ -1,6 +1,6 @@
 # MSRV
 @if !semver-compatible(rustc/version, '1.95.0', ignore-pre-release: true)
-log error 'unsupported Rust version {rustc/version}: minimum required is 1.95.0'
+log fatal 'unsupported Rust version {rustc/version}: minimum required is 1.95.0'
     id 'msrv'
     quiet
 
