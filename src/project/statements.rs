@@ -6,7 +6,7 @@ use super::diagnostic::{Diagnostic, Message, Severity};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{File, Project};
+use super::{File, Project, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -159,6 +159,7 @@ impl Project {
         if !file {
             path = path.join("Jig");
         }
+        let path = resolve_parents(&path);
         match File::read(path.clone()) {
             Ok(mut file) => {
                 file.used = Some(span);

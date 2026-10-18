@@ -1352,6 +1352,42 @@ fn use_file() {
 }
 
 #[test]
+fn use_paths() {
+    let mut files = vec![
+        ("Jig".to_string(), "use 'a'\nuse 'b'\nuse 'alias'\nuse 'link/../sib'\nuse 'cycle'\nuse 'f0'\n".to_string()),
+        ("a/Jig".into(), "use '../shared'\n".into()),
+        ("b/Jig".into(), "use '../b/./../shared'\n".into()),
+        ("shared/Jig".into(), "log note 'shared'\n".into()),
+        ("real/inner/.keep".into(), String::new()),
+        ("real/sib/Jig".into(), "log note 'beside the target of the link'\n".into()),
+        ("sib/Jig".into(), "log note 'beside the link'\n".into()),
+        ("cycle/Jig".into(), "use '../cycle'\n".into()),
+    ];
+    // a chain of paths through `..` does not grow
+    for i in 0..1000 {
+        let next = if i < 999 { format!("use '../f{}'\n", i + 1) } else { "log note 'end of the chain'\n".into() };
+        files.push((format!("f{i}/Jig"), next));
+    }
+    let files: Vec<_> = files.iter().map(|(path, contents)| (path.as_str(), contents.as_str())).collect();
+    let project = Project::new("use-paths", &files);
+    std::os::unix::fs::symlink("shared", project.dir.join("alias")).unwrap();
+    std::os::unix::fs::symlink("real/inner", project.dir.join("link")).unwrap();
+    let output = project.configure();
+    output
+        // `..` after a symbolic link leaves the directory it points to
+        .stderr("note: beside the target of the link\n --> link/../sib/Jig:1:10")
+        .stderr("warning[repeated-use]: file \"cycle/Jig\" is already used\n --> cycle/Jig:1:5")
+        .stderr("note: end of the chain\n --> f999/Jig:1:10");
+    assert!(output.success, "{}", output.stderr);
+    assert!(!output.stderr.contains("beside the link\n"), "{}", output.stderr);
+    // the file is used once, however its path is written, even through a symbolic link
+    assert_eq!(output.stderr.matches("note: shared").count(), 1, "{}", output.stderr);
+    let depfile = project.depfile();
+    assert!(depfile.starts_with("build.ninja: Jig a/Jig shared/Jig b/Jig "), "{depfile}");
+    assert!(depfile.contains(" f998/Jig f999/Jig reconfigure.stamp"), "{depfile}");
+}
+
+#[test]
 fn log_expression() {
     let project = Project::new("log-expression", &[("Jig", "\
 declare level
