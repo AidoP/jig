@@ -164,6 +164,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "repeated-keyword-argument",
     "install-conflict",
     "proxy-build",
+    "other-jig",
     "unknown-target",
     "mismatched-type",
 ];
@@ -377,6 +378,12 @@ pub enum Message {
     },
     /// A program which a wrapper installed by `jig install --proxy` builds, as it or the configuration is out of date,
     /// before running it. It is reported by `jig build --proxy`, with the severity recorded when configuring.
+    /// A `jig` was run which did not configure the project, while the one which did regenerates `build.ninja`. It is
+    /// reported by the commands which build the project, with the severity recorded when configuring.
+    OtherJig {
+        running: String,
+        configured: String,
+    },
     ProxyBuild {
         program: String,
         /// Whether the configuration is out of date, which is regenerated first.
@@ -526,6 +533,11 @@ impl core::fmt::Display for Message {
             Self::InvalidInstallMode(mode) => {
                 write!(f, "invalid install mode {mode}, which must be permissions from 0 to 0o7777")
             },
+            Self::OtherJig { running, configured } => write!(
+                f,
+                "the project is configured by {configured:?}, which regenerates `build.ninja`, rather than the running \
+                 {running:?}, which `jig generate` would configure it with",
+            ),
             Self::ProxyBuild { program, configuration: false } => write!(f, "building {program}"),
             Self::ProxyBuild { program, configuration: true } => {
                 write!(f, "regenerating the configuration and building {program}")
@@ -661,6 +673,7 @@ impl Message {
             Self::UnknownKeywordArgument { .. } => "unknown-keyword-argument",
             Self::RepeatedKeywordArgument(_) => "repeated-keyword-argument",
             Self::InstallConflict { .. } => "install-conflict",
+            Self::OtherJig { .. } => "other-jig",
             Self::ProxyBuild { .. } => "proxy-build",
             Self::UnknownTarget { .. } => "unknown-target",
             Self::AvailableTargets { .. } => "available-targets",

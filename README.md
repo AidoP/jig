@@ -54,7 +54,10 @@ build directory has been removed or `.jig` is from another version of jig. `jig 
 such as the targets to build, which are relative to the build directory, or the names `custom/<name>`,
 `check/<label>`, `test` and `test/<name>`. Without targets, it builds the crates and custom commands with `default`,
 or if none has it, every crate, test harness and custom command, but not the checks, which are for rust-analyzer.
-`build.ninja` regenerates itself when the configuration, or `jig`, changes.
+`build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
+the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
+until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
+when it was configured, where `'error'` stops the command before running ninja.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
 project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is

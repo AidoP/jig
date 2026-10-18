@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::project::{self, Diagnostic, Message, Severity};
 use crate::{Error, database, generate, toolchain};
 
 /// Where ninja's output is written while finding a project, as `jig check` keeps it out of stdout.
@@ -30,6 +31,7 @@ impl Configured {
     /// `output`.
     pub fn find(output: Output) -> Result<Self, Error> {
         let mut project = Self::locate()?;
+        project.check_jig()?;
         project.reconfigure(output)?;
         Ok(project)
     }
@@ -57,6 +59,23 @@ impl Configured {
         }
         let toolchain = toolchain(&database);
         Ok(Self { root, build_dir, toolchain })
+    }
+    /// Report `other-jig` if the running `jig` is not the one which configured the project, which regenerates
+    /// `build.ninja`.
+    ///
+    /// The wrappers installed by `jig install --proxy` are not reported, as they run the `jig` they were installed by.
+    fn check_jig(&self) -> Result<(), Error> {
+        let bytes = read(&self.root)?;
+        let database = parse(&self.root, &bytes)?;
+        let Ok(running) = jig() else {
+            return Ok(());
+        };
+        if database.jig.is_empty() || same_file(Path::new(database.jig), &running) {
+            return Ok(());
+        }
+        let severity = project::severity_override(database.other_jig).unwrap_or(Severity::Warning);
+        let message = Message::OtherJig { running: running.display().to_string(), configured: database.jig.into() };
+        report(&self.root, message, severity)
     }
     /// Regenerate `build.ninja` with ninja if it is out of date, then take the build directory from the database again,
     /// as `build-dir` may have changed, which leaves a stub in the previous build directory.
@@ -165,4 +184,44 @@ pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     }
     crate::generate(PathBuf::from(input), toolchain.or(configured.as_deref()))?;
     Ok(root)
+}
+
+/// Returns the path of the running `jig`, which is the path it was run by if that is absolute, as a wrapper installed
+/// by `jig install --proxy` runs it, rather than the path of the running executable, which `jig build --proxy` may
+/// have replaced by building it.
+pub fn jig() -> std::io::Result<PathBuf> {
+    match std::env::args_os().next() {
+        Some(path) if Path::new(&path).is_absolute() => Ok(path.into()),
+        _ => std::env::current_exe(),
+    }
+}
+
+/// Returns whether two paths are of the same file, following symbolic links, or are the same if one is missing.
+pub fn same_file(lhs: &Path, rhs: &Path) -> bool {
+    match (std::fs::canonicalize(lhs), std::fs::canonicalize(rhs)) {
+        (Ok(lhs), Ok(rhs)) => lhs == rhs,
+        _ => lhs == rhs,
+    }
+}
+
+/// Report a diagnostic found once the project is configured, such as while building it, unless it is allowed, with the
+/// severity recorded when configuring, failing if it is an error.
+pub fn report(root: &Path, message: Message, severity: Severity) -> Result<(), Error> {
+    use std::io::IsTerminal;
+    if severity == Severity::Allow {
+        return Ok(());
+    }
+    let id = message.id().to_string();
+    let diagnostic = Diagnostic { span: None, message, severity };
+    // a diagnostic without a span needs nothing from the configuration
+    let empty = project::Project::new(root.to_path_buf(), Vec::new());
+    let mut stderr = std::io::stderr().lock();
+    let pretty = stderr.is_terminal();
+    if let Err(error) = empty.write_diagnostic(&mut stderr, &diagnostic, pretty) {
+        return Err(Error::Stderr(error));
+    }
+    match severity {
+        Severity::Error | Severity::Fatal => Err(Error::Reported(id)),
+        _ => Ok(()),
+    }
 }

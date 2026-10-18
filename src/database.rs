@@ -6,10 +6,10 @@
 //! When read, its contents borrow from its bytes.
 //!
 //! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
-//! paths, the install prefix and the severity of `proxy-build`, followed by each section: the flychecks, the tests,
-//! then the installed files. A section is the number of its records followed by each record. Numbers are
-//! little-endian `u32`, strings are their length followed by their UTF-8 bytes, a list of strings is their number
-//! followed by each string, and a `bool` is a number which is `0` or `1`.
+//! paths, the install prefix, the severities of `proxy-build` and `other-jig`, and the `jig` which configured it,
+//! followed by each section: the flychecks, the tests, then the installed files. A section is the number of its records
+//! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
+//! list of strings is their number followed by each string, and a `bool` is a number which is `0` or `1`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -34,6 +34,11 @@ pub struct Database<'a> {
     pub install_prefix: &'a str,
     /// The severity of the `proxy-build` diagnostic, as the value of its property, which `jig build --proxy` reports.
     pub proxy_build: &'a str,
+    /// The severity of the `other-jig` diagnostic, which is reported when a `jig` other than the one which configured
+    /// the project, and which regenerates `build.ninja`, is run.
+    pub other_jig: &'a str,
+    /// The `jig` which configured the project.
+    pub jig: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub installs: Vec<Install<'a>>,
@@ -79,6 +84,8 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_strs(w, &database.missing)?;
     write_str(w, database.install_prefix)?;
     write_str(w, database.proxy_build)?;
+    write_str(w, database.other_jig)?;
+    write_str(w, database.jig)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -113,6 +120,8 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         missing: r.strs()?,
         install_prefix: r.str()?,
         proxy_build: r.str()?,
+        other_jig: r.str()?,
+        jig: r.str()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -205,6 +214,8 @@ mod tests {
             missing: vec!["Debug"],
             install_prefix: "/usr/local",
             proxy_build: "warning",
+            other_jig: "warning",
+            jig: "/usr/bin/jig",
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: vec!["a.json", "b é.json"] },
                 Flycheck { label: "empty", diagnostics: vec![] },

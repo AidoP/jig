@@ -543,6 +543,9 @@ fn write_database(
     let build_dir = build_dir.display().to_string();
     let install_prefix = project.install_prefix();
     let proxy_build = project.deferred_severity("proxy-build", Severity::Warning).to_string();
+    let other_jig = project.deferred_severity("other-jig", Severity::Warning).to_string();
+    // the `jig` which regenerates `build.ninja`, as its configure rule runs it
+    let jig = std::env::current_exe().map(|jig| jig.display().to_string()).unwrap_or_default();
     let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
     let mut replayed = Vec::new();
@@ -570,6 +573,8 @@ fn write_database(
         missing,
         install_prefix: &install_prefix,
         proxy_build: &proxy_build,
+        other_jig: &other_jig,
+        jig: &jig,
         ..Default::default()
     };
     for (unit, paths) in units.iter().zip(&replayed) {

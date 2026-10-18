@@ -269,6 +269,8 @@ enum Error {
     Toolchain(String, String),
     BuildFailed,
     ProxyOutOfDate,
+    /// A diagnostic reported once the project is configured was an error, as its property set it to be.
+    Reported(String),
     ProxyNotInstalled(PathBuf),
 }
 impl core::fmt::Display for Error {
@@ -321,6 +323,7 @@ impl core::fmt::Display for Error {
                 f,
                 "no program is installed at {wrapper:?}",
             ),
+            Self::Reported(id) => write!(f, "stopped, as `diagnostic/{id}` makes it an error"),
             Self::ProxyOutOfDate => write!(f, "not building or running the program"),
         }
     }

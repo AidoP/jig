@@ -4235,3 +4235,41 @@ fn inherited_spec_needs_nightly() {
         .stderr("as rustc reported:\nerror: the option `Z` is only accepted on the nightly compiler");
     project.configure_with(NIGHTLY).ok();
 }
+
+#[test]
+fn other_jig_warning() {
+    let project = Project::new("other-jig", &[("Jig", "crate app 'app.rs'\n"), ("app.rs", "")]);
+    project.configure().ok();
+    let copy = project.dir.join("other/jig");
+    std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    make_executable(&configure_path(), &copy);
+    let build = |jig: &std::path::Path| {
+        let output = Command::new(jig).arg("build").current_dir(&project.dir).output().unwrap();
+        (output.status.success(), String::from_utf8(output.stderr).unwrap())
+    };
+    // the `jig` which configured the project is not warned about
+    let (success, stderr) = build(&configure_path());
+    assert!(success && !stderr.contains("other-jig"), "{stderr}");
+    // while another is, as the one which configured it regenerates `build.ninja`
+    let (success, stderr) = build(&copy);
+    assert!(success, "{stderr}");
+    assert_contains(&stderr, &format!(
+        "warning[other-jig]: the project is configured by {:?}, which regenerates `build.ninja`, rather than the running {:?}",
+        configure_path().display().to_string(),
+        copy.display().to_string(),
+    ));
+    // unless it is allowed, or as an error, the build stops
+    for (severity, expected) in [("allow", None), ("error", Some("error[other-jig]: "))] {
+        std::fs::write(project.dir.join("Jig"), format!("set diagnostic/other-jig '{severity}'\ncrate app 'app.rs'\n")).unwrap();
+        project.configure().ok();
+        let (success, stderr) = build(&copy);
+        match expected {
+            None => assert!(success && !stderr.contains("other-jig"), "{stderr}"),
+            Some(expected) => {
+                assert!(!success);
+                assert_contains(&stderr, expected);
+                assert_contains(&stderr, "stopped, as `diagnostic/other-jig` makes it an error");
+            },
+        }
+    }
+}

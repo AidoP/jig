@@ -1,13 +1,12 @@
 //! `jig install`, which installs the files recorded in the database, and `jig build --proxy`, which the wrappers it
 //! installs with `--proxy` build with.
 
-use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::configured::{Configured, Output};
 use crate::generate::shell_quote;
-use crate::project::{self, Diagnostic, Message, Severity};
+use crate::project::{self, Message, Severity};
 use crate::{Error, database};
 
 /// Install the files of the crates and custom commands with `install` in a prefix, or the `install-prefix` property if
@@ -129,15 +128,6 @@ fn proxy_script(root: &Path, jig: &Path, prefix: &Path, wrapper: &Path, source: 
     )
 }
 
-/// Returns the path of `jig` for a wrapper to run, which is the path it was run by if that is absolute, as a wrapper
-/// runs it, rather than the path of the running executable, which `jig build --proxy` may have replaced by building
-/// it.
-fn jig() -> std::io::Result<PathBuf> {
-    match std::env::args_os().next() {
-        Some(path) if Path::new(&path).is_absolute() => Ok(path.into()),
-        _ => std::env::current_exe(),
-    }
-}
 
 /// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written.
 ///
@@ -166,13 +156,9 @@ fn write_proxy(
 /// is where one of them is installed, as when jig installs itself, which would make that wrapper run itself, so the
 /// program it wraps is run instead.
 fn proxy_jig(root: &Path, prefix: &Path, installs: &[database::Install]) -> std::io::Result<PathBuf> {
-    let jig = jig()?;
-    let same = |lhs: &Path, rhs: &Path| match (std::fs::canonicalize(lhs), std::fs::canonicalize(rhs)) {
-        (Ok(lhs), Ok(rhs)) => lhs == rhs,
-        _ => lhs == rhs,
-    };
+    let jig = crate::configured::jig()?;
     for file in installs {
-        if file.program && same(&destination(prefix, file), &jig) {
+        if file.program && crate::configured::same_file(&destination(prefix, file), &jig) {
             return std::path::absolute(root.join(file.path));
         }
     }
@@ -214,18 +200,12 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
             None
         };
         let stale = message.is_some();
-        if let Some(message) = message && severity != Severity::Allow {
-            let diagnostic = Diagnostic { span: None, message, severity };
-            // a diagnostic without a span needs nothing from the configuration
-            let empty = project::Project::new(project.root.clone(), Vec::new());
-            let mut stderr = std::io::stderr().lock();
-            let pretty = stderr.is_terminal();
-            if let Err(error) = empty.write_diagnostic(&mut stderr, &diagnostic, pretty) {
-                return Err(Error::Stderr(error));
-            }
-            if severity == Severity::Error {
-                return Err(Error::ProxyOutOfDate);
-            }
+        if let Some(message) = message {
+            // as an error, the program is neither built nor run
+            crate::configured::report(&project.root, message, severity).map_err(|error| match error {
+                Error::Reported(_) => Error::ProxyOutOfDate,
+                error => error,
+            })?;
         }
         stale
     };
