@@ -1,5 +1,7 @@
 //! The targets crates are compiled for, which are builtin or declared by `target` statements.
 
+use std::path::PathBuf;
+
 use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::statements::{Attribute, Name};
 use super::syntax::{Parser, Span};
@@ -47,8 +49,6 @@ const TARGET_OPTIONS: &[TargetOption] = &[
     TargetOption { attribute: "linker-flavor", field: "linker-flavor", ty: OptionType::Str },
     TargetOption { attribute: "panic", field: "panic-strategy", ty: OptionType::Str },
     TargetOption { attribute: "no-redzone", field: "disable-redzone", ty: OptionType::Bool },
-    // the linker script, rather than its path
-    TargetOption { attribute: "link-script", field: "link-script", ty: OptionType::Str },
 ];
 
 /// Returns the option set by an attribute of a `target` statement, if it sets one.
@@ -77,6 +77,9 @@ pub struct Target {
     /// The index of the runner of a test harness for the target, which is its last argument, or none to run it
     /// directly.
     pub runner: Option<usize>,
+    /// The linker script of the crates for the target, from its `link-script` attribute, which is passed to the linker
+    /// with `-T` unless a crate has its own.
+    pub link_script: Option<PathBuf>,
 }
 
 /// Whether a [`Target`] is builtin or has its own specification.
@@ -102,7 +105,8 @@ pub enum TargetKind {
 impl Target {
     /// A builtin target, before any `target` statement overrides it.
     pub fn builtin(name: String) -> Self {
-        Self { name, kind: TargetKind::Builtin { overridden: None, fields: Vec::new() }, test: None, runner: None }
+        let kind = TargetKind::Builtin { overridden: None, fields: Vec::new() };
+        Self { name, kind, test: None, runner: None, link_script: None }
     }
     pub fn is_custom(&self) -> bool {
         matches!(self.kind, TargetKind::Custom { .. })
@@ -169,12 +173,14 @@ impl Project {
         let mut fields: Vec<Field> = Vec::new();
         let mut test = None;
         let mut runner = None;
+        let mut link_script = None;
         let mut overrides = false;
         // the attributes which describe the specification, which a builtin target has already, are reported if it turns
         // out to be overridden
         let mut override_errors = Vec::new();
         while let Some(attribute) = self.next_attribute(parser, &[]) {
-            if !matches!(attribute.name, "override" | "test" | "runner") && !OVERRIDE_FIELDS.contains(&attribute.name) {
+            let overridable = matches!(attribute.name, "override" | "test" | "runner" | "link-script");
+            if !overridable && !OVERRIDE_FIELDS.contains(&attribute.name) {
                 override_errors.push(Diagnostic {
                     span: Some(attribute.name_span),
                     message: Message::OverrideAttribute(attribute.name.into()),
@@ -203,6 +209,13 @@ impl Project {
                 ("runner", Data::Str(program)) => runner = Some(self.add_runner(vec![program], parser.file)),
                 ("runner", Data::List(items)) if !items.is_empty() && items.iter().all(|item| matches!(item, Data::Str(_))) => {
                     runner = Some(self.add_runner(items.iter().map(Data::coerce_string).collect(), parser.file));
+                },
+                // a path relative to the file, or a reference, so that the script can be generated
+                ("link-script", data) => {
+                    let base = self.file(parser.file).path.parent().unwrap().to_path_buf();
+                    if let Some(path) = self.operand_path(Attribute { data, ..attribute }.operand(), &base) {
+                        link_script = Some(path);
+                    }
                 },
                 (name @ ("inherit" | "test" | "runner" | "override"), data) => {
                     let expected = match name {
@@ -257,7 +270,7 @@ impl Project {
             },
             None => {
                 let kind = TargetKind::Custom { span, inherit, fields };
-                self.targets.push(Target { name, kind, test, runner });
+                self.targets.push(Target { name, kind, test, runner, link_script });
                 return;
             },
             Some((index, TargetKind::Builtin { overridden: None, .. })) if overrides => {
@@ -274,6 +287,7 @@ impl Project {
                 target.kind = TargetKind::Builtin { overridden: Some(span), fields };
                 target.test = test;
                 target.runner = runner;
+                target.link_script = link_script;
                 return;
             },
             Some((_, TargetKind::Builtin { .. })) if !overrides => Message::BuiltinTargetName(name),
@@ -293,7 +307,7 @@ impl Project {
         let Some(&value) = self.values_idx.get("rustc/sysroot") else {
             return false;
         };
-        let sysroot = std::path::PathBuf::from(self.values[value].data.coerce_string());
+        let sysroot = PathBuf::from(self.values[value].data.coerce_string());
         let dir = sysroot.join("lib/rustlib").join(target).join("lib");
         self.depend_on_path(&dir);
         let Ok(entries) = std::fs::read_dir(&dir) else {

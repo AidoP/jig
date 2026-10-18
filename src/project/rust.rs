@@ -27,6 +27,8 @@ pub struct Crate {
     pub env: Vec<(String, String)>,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
+    /// The linker script passed to the linker with `-T`, which replaces that of the target.
+    pub link_script: Option<PathBuf>,
     /// Where `jig install` installs the output, if it does.
     pub install: Install,
 }

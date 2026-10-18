@@ -68,6 +68,7 @@ impl Project {
         let mut cfg = Vec::new();
         let mut env = Vec::new();
         let mut kind = rust::Kind::Lib;
+        let mut link_script = None;
         let mut codegen = Vec::new();
         // the defaults of the install attributes depend on the crate type, so they are applied once it is known
         let mut install_attributes = Vec::new();
@@ -127,6 +128,12 @@ impl Project {
                     let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
                     if let Some(paths) = self.operand_paths(attribute.operand(), &base) {
                         depends.extend(paths);
+                    }
+                },
+                "link-script" => {
+                    let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
+                    if let Some(path) = self.operand_path(attribute.operand(), &base) {
+                        link_script = Some(path);
                     }
                 },
                 // a crate, or a list of them
@@ -227,6 +234,7 @@ impl Project {
                         cfg: cfg.clone(),
                         env: env.clone(),
                         codegen: codegen[i].clone(),
+                        link_script: link_script.clone(),
                         install: install.clone(),
                     });
                     declared.push(c.target.clone());

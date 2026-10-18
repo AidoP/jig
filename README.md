@@ -275,9 +275,9 @@ attributes of a property whose value is a reference are those of the crate or cu
 property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`, `depends` and
 `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
 after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
-`builtin`, `default`, `test`, `use`, `depends`, `cfg`, `env`, `install`, `install-dir` and `install-mode`, and those of
-a target, builtin or declared, are `inherit`, `test`, `runner`, `override`, `has-std`, `can-run` and its options, such
-as `code-model`. An attribute which is not set is an error.
+`builtin`, `default`, `test`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and
+`install-mode`, and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`,
+`has-std`, `can-run` and its options, such as `code-model`. An attribute which is not set is an error.
 
 `has-std` is whether the toolchain has the standard library of a builtin target, as installed by `rustup target add`,
 which is `false` for a custom target. The configuration is generated again when the target's libraries change, so it
@@ -468,6 +468,8 @@ A `crate` statement may be followed by indented attributes:
 - `default <bool>`: build the crate when `jig build` is run without targets, which is `false` by default. Without a
   value, it is `true`
 - `codegen/<option> <value>`: a codegen option for the crate, which replaces the property of the option. See below
+- `link-script <path>`: the linker script of the crate, which replaces that of its target, and is passed to the linker
+  in the same way
 - `test`: build the crate's tests with `--test` as `<build-dir>/<target>/test/<name>`, and register a test which runs
   them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for a target
   whose `test` is `true` can be tested, which it is by default for the host target and a builtin target which the host
@@ -550,7 +552,7 @@ A `target` statement is followed by indented attributes, which describe the targ
 
 - `inherit <target>`: the builtin target whose specification it is based on
 - `override`: set the attributes of the builtin target with the name, rather than declaring a target. Only `test`,
-  `runner`, `linker` and `linker-flavor` can be used with it, as the builtin target keeps its specification. The linker
+  `runner`, `link-script`, `linker` and `linker-flavor` can be used with it, as the builtin target keeps its specification. The linker
   and its flavor are passed to rustc as codegen options of each crate for the target, unless the crate has its own
   `codegen/linker` or `codegen/linker-flavor`, and a linker which is a path is relative to the file, as a runner is.
   `rust-lld`, which rustup installs with the toolchain, cross-links a musl target, such as
@@ -561,7 +563,10 @@ A `target` statement is followed by indented attributes, which describe the targ
   specification for the codegen option
 - `target-feature <features>`: the features of the target, as a `str` separated by `,`, or a list of them
 - `no-redzone`: disable the red zone
-- `link-script <str>`: the linker script, which is usually a multi-line string, where braces must be doubled
+- `link-script <path>`: the linker script of the crates for the target, as a path relative to the file, or a reference
+  to a crate or custom command with one output, such as one which generates it. It is passed to the linker with
+  `-C link-arg=-T<path>`, rather than written to the specification, when a binary, procedural macro or test harness is
+  built, which depends on it, unless the crate has its own `link-script`
 - `test <bool>`: whether crates for the target can be tested, which by default is its `can-run` for a builtin target,
   and `false` for a custom target. Without a value, it is `true`
 - `runner <program>`: the program which runs a test harness for the target, given as its last argument, or a list of the
@@ -582,12 +587,7 @@ target bluemetal-riscv64
     inherit 'riscv64gc-unknown-none-elf'
     os 'bluemetal'
     code-model 'medium'
-    link-script '''
-        ENTRY(_start)
-        SECTIONS {{
-            . = 0x80000000;
-        }}
-    '''
+    link-script 'link.x'
 ```
 
 ### Builtin properties

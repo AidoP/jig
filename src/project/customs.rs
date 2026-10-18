@@ -312,6 +312,18 @@ impl Project {
         }
         Some(paths)
     }
+    /// Returns the path of a value which is one file, a path relative to `base` or a reference to a crate or custom
+    /// command with one output.
+    pub(super) fn operand_path(&mut self, operand: Operand, base: &Path) -> Option<PathBuf> {
+        match &operand.data {
+            Data::Ref(reference) if reference.paths.len() == 1 => Some(reference.paths[0].clone()),
+            Data::Ref(_) | Data::List(_) => {
+                self.invalid_operand(&operand, "str, or a reference to one file", false);
+                None
+            },
+            _ => Some(normalize(&base.join(self.str_operand(operand)?))),
+        }
+    }
     /// Take the arguments of a `command` attribute, which are expressions separated by spaces, returning the command
     /// with its program resolved as by [`Self::resolve_command`], unless it is a reference, whose path is resolved.
     ///

@@ -2046,15 +2046,13 @@ fn multi_line_strings() {
     let project = Project::new("multi-line-strings", &[("Jig", "\
 declare base
     default '0x80000000'
-target kernel
-    inherit 'riscv64gc-unknown-none-elf'
-    link-script '''
-        ENTRY(_start)
+log note '''
+    ENTRY(_start)
 
-        SECTIONS {{
-            . = {base};
-        }}
-    '''
+    SECTIONS {{
+        . = {base};
+    }}
+'''
 log note '''
     first
 # a comment, which is skipped
@@ -2068,8 +2066,8 @@ log note '''
     let output = project.configure_with(NIGHTLY).ok();
     // the indentation of the lines is removed, except for any beyond it, and the lines are templates
     output.stderr("note: first\n        indented X\n      # not a comment\n").stderr("note: true\n");
-    let spec = std::fs::read_to_string(project.dir.join("build/targets/kernel.json")).unwrap();
-    assert_contains(&spec, "\"link-script\": \"ENTRY(_start)\\n\\nSECTIONS {\\n    . = 0x80000000;\\n}\"");
+    // where braces are doubled
+    output.stderr("note: ENTRY(_start)\n\n      SECTIONS {\n          . = 0x80000000;\n      }\n");
 }
 
 #[test]
@@ -2223,6 +2221,93 @@ target riscv64gc-unknown-none-elf
     assert_contains(&output.ninja, "\nbuild test/app@riscv64gc-unknown-none-elf: phony riscv64gc-unknown-none-elf/test/app\n");
     assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app\n"));
     assert!(!project.dir.join("build/targets").exists());
+}
+
+#[test]
+fn link_scripts() {
+    let project = Project::new("link-scripts", &[("Jig", "\
+custom generated
+    output 'generated.x'
+    command 'gen' output
+crate kernel 'kernel.rs'
+    target 'my-kernel'
+    crate-type 'bin'
+crate util 'util.rs'
+    target 'my-kernel'
+    test
+crate other 'other.rs'
+    target 'my-kernel'
+    crate-type 'bin'
+    link-script 'other.x'
+crate app 'app.rs'
+    target 'riscv64gc-unknown-none-elf'
+    crate-type 'bin'
+target my-kernel
+    inherit 'riscv64gc-unknown-none-elf'
+    test
+    link-script 'kernel/link.x'
+target riscv64gc-unknown-none-elf
+    override
+    link-script generated
+log note '{my-kernel.link-script} {riscv64gc-unknown-none-elf.link-script} {my-kernel/other.link-script}'
+")]);
+    let output = project.configure_with(NIGHTLY).ok();
+    // a path is relative to the file, and a reference is to what is built
+    output.stderr("note: kernel/link.x build/generated.x other.x\n");
+    // the script is passed to the linker, rather than written to the specification, and what is linked depends on it
+    assert_contains(output.build("my-kernel/kernel"), "\
+build my-kernel/kernel: rustc kernel.rs | targets/my-kernel.json kernel/link.x
+    crate-name = kernel
+    crate-type = bin
+    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-Tkernel/link.x\n");
+    let spec = std::fs::read_to_string(project.dir.join("build/targets/my-kernel.json")).unwrap();
+    assert!(!spec.contains("link.x"), "{spec}");
+    // a library is not linked, but its test harness is
+    assert_contains(output.build("my-kernel/libutil.rlib"), "\
+build my-kernel/libutil.rlib: rustc util.rs | targets/my-kernel.json
+    crate-name = util
+    crate-type = lib
+    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel\n");
+    assert_contains(output.build("my-kernel/test/util"), "\
+build my-kernel/test/util: rustc util.rs | targets/my-kernel.json kernel/link.x
+    crate-name = util
+    crate-type = lib
+    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-Tkernel/link.x --test\n");
+    // nor is a check
+    assert_eq!(output.ninja.matches("-C link-arg=-Tkernel/link.x").count(), 2, "{}", output.ninja);
+    // a crate's own replaces its target's
+    assert_contains(output.build("my-kernel/other"), "\
+build my-kernel/other: rustc other.rs | targets/my-kernel.json other.x
+    crate-name = other
+    crate-type = bin
+    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-Tother.x\n");
+    // a builtin target can have one with `override`, which is built first when it is generated
+    assert_contains(output.build("riscv64gc-unknown-none-elf/app"), "\
+build riscv64gc-unknown-none-elf/app: rustc app.rs | generated.x
+    crate-name = app
+    crate-type = bin
+    flags = --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x\n");
+}
+
+#[test]
+fn link_script_errors() {
+    let project = Project::new("link-script-errors", &[("Jig", "\
+custom two
+    output 'a.x' 'b.x'
+    command 'gen'
+target my-kernel
+    inherit 'riscv64gc-unknown-none-elf'
+    link-script ['a.x']
+crate kernel 'kernel.rs'
+    link-script two
+    link-script 1
+log note my-kernel.link-script
+")]);
+    project.configure_with(NIGHTLY).failed()
+        .stderr("error[invalid-operand]: list value used where str, or a reference to one file is required\n --> Jig:6:17")
+        .stderr("error[invalid-operand]: ref value used where str, or a reference to one file is required\n --> Jig:8:17")
+        .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:9:17")
+        .stderr("error[attribute-not-set]: attribute \"link-script\" of target \"my-kernel\" is not set");
 }
 
 #[test]

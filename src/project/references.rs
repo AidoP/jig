@@ -1,7 +1,7 @@
 //! References to crates, and to the attributes of what has been declared.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::customs::CustomKind;
 use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
@@ -181,6 +181,7 @@ impl Project {
                     Some(runner) => AttributeValue::Set(strings(&self.runners[runner].command)),
                     None => AttributeValue::Unset,
                 },
+                ("link-script", _) => AttributeValue::optional(target.link_script.as_deref().map(path)),
                 // a field of the specification, which is named after its option
                 (option, _) => match target_option(option) {
                     Some(option) => AttributeValue::optional(target.field(option.field).cloned()),
@@ -232,6 +233,7 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
         },
         "depends" => AttributeValue::Set(paths(&c.depends)),
         "cfg" => AttributeValue::Set(strings(&c.cfg)),
+        "link-script" => AttributeValue::optional(c.link_script.as_deref().map(path)),
         "env" => {
             let entries = c.env.iter().map(|(name, value)| (name.clone(), Data::Str(value.clone()))).collect();
             AttributeValue::Set(Data::Dict(entries))
@@ -266,6 +268,11 @@ impl AttributeValue {
             None => Self::Unset,
         }
     }
+}
+
+/// Returns a path as a string.
+fn path(path: &Path) -> Data {
+    Data::Str(path.display().to_string())
 }
 
 /// Returns paths as a list of strings.

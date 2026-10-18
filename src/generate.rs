@@ -378,21 +378,31 @@ fn write_build_ninja(
         flags.push_str(&cfg_flags(&c.cfg));
         let crate_env = crate_env(&c.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
+        // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
+        // test harness and any crate but a library, which then depends on it
+        let link_script = c.link_script.as_ref().or_else(|| project.target(&c.target)?.link_script.as_ref());
+        let link_script = link_script.map(|path| at.path(path));
+        let link_flags = match &link_script {
+            Some(path) => codegen_flag(&format!("link-arg=-T{}", path.display())),
+            None => String::new(),
+        };
+        let link_deps: Vec<_> = deps.iter().copied().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
         let input = at.path(&c.path);
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
+        let links = c.kind != Kind::Lib;
         build_ninja.build(&ninja::Build {
             rule: "rustc",
             outputs: &[&output],
             inputs: &[&input],
-            implicit: &deps,
+            implicit: if links { &link_deps } else { &deps },
             order_only: &as_paths(&depends),
             variables: &[
                 ("crate-name", &c.name),
                 ("crate-type", crate_type),
-                ("flags", &flags),
+                ("flags", &if links { format!("{flags}{link_flags}") } else { flags.clone() }),
                 ("tmpdir", &tmpdir.display().to_string()),
                 ("crate-env", &crate_env),
             ],
@@ -406,12 +416,12 @@ fn write_build_ninja(
                 rule: "rustc",
                 outputs: &[&at.path(&c.test_harness())],
                 inputs: &[&input],
-                implicit: &deps,
+                implicit: &link_deps,
                 order_only: &as_paths(&depends),
                 variables: &[
                     ("crate-name", &c.name),
                     ("crate-type", crate_type),
-                    ("flags", &format!("{flags} --test")),
+                    ("flags", &format!("{flags}{link_flags} --test")),
                     ("tmpdir", &tmpdir.display().to_string()),
                     ("crate-env", &crate_env),
                 ],
@@ -614,13 +624,7 @@ fn rustc_flags(target: &str, search: &Path, kind: Kind, deps: &[Extern], codegen
             Some(linker) if linker.contains('/') => format!("linker={}", at.path(Path::new(linker)).display()),
             _ => option.clone(),
         };
-        // a value, such as of `llvm-args`, may have spaces, and ninja would take a `$` as a variable
-        let option = option.replace('$', "$$");
-        if option.contains(|c: char| !c.is_ascii_alphanumeric() && !"-_=.,/+$".contains(c)) {
-            flags.push_str(&format!(" -C {}", shell_quote(&option)));
-        } else {
-            flags.push_str(&format!(" -C {option}"));
-        }
+        flags.push_str(&codegen_flag(&option));
     }
     // the toolchain's `proc_macro` crate is not in the extern prelude otherwise
     if kind == Kind::ProcMacro {
@@ -630,6 +634,17 @@ fn rustc_flags(target: &str, search: &Path, kind: Kind, deps: &[Extern], codegen
         flags.push_str(&format!(" --extern {}={}", dep.name, dep.path.display()));
     }
     flags
+}
+
+/// Returns the flag of a codegen option, `<option>=<value>`, after a space.
+fn codegen_flag(option: &str) -> String {
+    // a value, such as of `llvm-args`, may have spaces, and ninja would take a `$` as a variable
+    let option = option.replace('$', "$$");
+    if option.contains(|c: char| !c.is_ascii_alphanumeric() && !"-_=.,/+$".contains(c)) {
+        format!(" -C {}", shell_quote(&option))
+    } else {
+        format!(" -C {option}")
+    }
 }
 
 /// Returns the `--cfg` flags of configuration options, each quoted for `sh`, with `$` escaped for ninja.
