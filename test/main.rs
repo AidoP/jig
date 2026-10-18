@@ -4213,3 +4213,17 @@ log note 'c'
         .stderr("error[unknown-reference]: no property, custom command, target or test named \"nope\"\n --> Jig:4:14")
         .stderr("error[invalid-operand]: list value used where name is required\n --> Jig:6:14");
 }
+
+#[test]
+fn inherited_spec_needs_nightly() {
+    let project = Project::new("inherited-spec", &[("Jig", "target rv64\n    inherit 'riscv64gc-unknown-none-elf'\n")]);
+    let version = Command::new("rustc").arg("-vV").current_dir(&project.dir).output().unwrap();
+    if String::from_utf8(version.stdout).unwrap().contains("-nightly") {
+        return;
+    }
+    // the specification of the target it inherits is unstable, so a stable toolchain cannot read it
+    project.configure().failed()
+        .stderr("custom target \"rv64\" needs a nightly toolchain to read the specification of \"riscv64gc-unknown-none-elf\"")
+        .stderr("as rustc reported:\nerror: the option `Z` is only accepted on the nightly compiler");
+    project.configure_with(NIGHTLY).ok();
+}

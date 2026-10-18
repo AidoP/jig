@@ -159,7 +159,7 @@ fn write_target_specs(targets: &[Target], build_dir: &Path, toolchain: Option<&s
             continue;
         };
         let inherited = match inherit {
-            Some(base) => Some(target_spec_json(base, toolchain)?),
+            Some(base) => Some(target_spec_json(&target.name, base, toolchain)?),
             None => None,
         };
         let path = target_spec::path(build_dir, &target.name);
@@ -665,17 +665,26 @@ fn externs(c: &Crate, crates: &[Crate]) -> Vec<usize> {
     externs
 }
 
-/// Returns the specification of a builtin target, which is unstable.
-fn target_spec_json(target: &str, toolchain: Option<&str>) -> Result<String, Error> {
+/// Returns the specification of a builtin target, `base`, which a custom target inherits, which is unstable, so it
+/// needs a nightly toolchain.
+///
+/// It fails if rustc does, or prints no specification, as it may not exit unsuccessfully, with what rustc reported.
+fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result<String, Error> {
     let mut cmd = std::process::Command::new("rustc");
-    cmd.args(["-Zunstable-options", "--print=target-spec-json", &format!("--target={target}")]);
+    cmd.args(["-Zunstable-options", "--print=target-spec-json", &format!("--target={base}")]);
     toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Ok(output) => output,
         Err(error) => return Err(Error::Exec(cmd, error)),
     };
+    let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
     match String::from_utf8(output.stdout) {
-        Ok(json) if output.status.success() => Ok(json),
-        _ => Err(Error::InvalidOutput(cmd)),
+        Ok(json) if output.status.success() && !json.trim().is_empty() => Ok(json),
+        _ => Err(Error::InheritedSpec {
+            target: target.into(),
+            base: base.into(),
+            nightly: stderr.contains("only accepted on the nightly compiler"),
+            stderr,
+        }),
     }
 }

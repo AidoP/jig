@@ -254,6 +254,13 @@ enum Error {
     InvalidOutput(std::process::Command),
     TestBuild,
     TargetSpec(String, &'static str),
+    /// The specification of a builtin target which a custom target inherits could not be read, as rustc reported.
+    InheritedSpec {
+        target: String,
+        base: String,
+        nightly: bool,
+        stderr: String,
+    },
     UnknownTest(String),
     TestsFailed(usize),
     Exec(std::process::Command, std::io::Error),
@@ -286,6 +293,16 @@ impl core::fmt::Display for Error {
             Self::InvalidOutput(cmd) => write!(f, "invalid output from command {cmd:?}"),
             Self::TestBuild => write!(f, "failed to build the tests"),
             Self::TargetSpec(name, error) => write!(f, "failed to generate the specification of target {name:?}: {error}"),
+            Self::InheritedSpec { target, base, nightly: true, stderr } => write!(
+                f,
+                "custom target {target:?} needs a nightly toolchain to read the specification of {base:?}, which it \
+                 inherits, such as with `jig +nightly` or a `rust-toolchain.toml`, as rustc reported:\n{stderr}",
+            ),
+            Self::InheritedSpec { target, base, nightly: false, stderr } => write!(
+                f,
+                "failed to read the specification of {base:?}, which custom target {target:?} inherits, as rustc \
+                 reported:\n{stderr}",
+            ),
             Self::UnknownTest(name) => write!(f, "no test named {name:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
