@@ -3804,3 +3804,27 @@ log note semver-compatible('1.0.0', ignore-pre-release: 1)
         .stderr("error[repeated-keyword-argument]: keyword argument \"ignore-pre-release\" cannot be repeated\n --> Jig:2:68")
         .stderr("error[argument-count]: function \"semver-compatible\" takes 2 arguments, but 1 was given\n --> Jig:3:10");
 }
+
+#[test]
+fn target_has_std() {
+    let project = Project::new("target-has-std", &[("Jig", "\
+target custom
+    inherit 'x86_64-unknown-none'
+log note '{({host-target}.has-std)} {riscv64gc-unknown-none-elf.has-std} {custom.has-std}'
+log note '{riscv64gc-unknown-none-elf.override} {riscv64gc-unknown-none-elf.test} {({host-target}.test)}'
+@for target in host-target 'riscv64gc-unknown-none-elf'
+log note {target}.has-std
+")]);
+    let host = project.host();
+    let output = project.configure_with(NIGHTLY).ok();
+    // the standard library of the toolchain's host is installed with it, while a target without an operating system
+    // has none, and rustup has none for a custom target
+    output.stderr("note: true false false\n");
+    // the attributes of a builtin target without a `target` statement are its defaults
+    output.stderr("note: false false true\n");
+    // of a target computed from a property, as for those of `targets`
+    output.stderr("note: true\n --> Jig:6:10").stderr("note: false\n --> Jig:6:10");
+    // the configuration is generated again when the libraries of a target change, such as when its standard library
+    // is installed
+    assert_contains(&project.depfile(), &format!("/lib/rustlib/{host}/lib "));
+}

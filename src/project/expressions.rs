@@ -95,8 +95,9 @@ impl Project {
             },
             Some('{') => {
                 let operand = self.parse_braced(parser)?;
-                // part of a name, which may be computed, as in `{target}/core` or the namespace `{target}/`
-                if !is_name_continuation(parser) && parser.peek() != Some('/') {
+                // part of a name, which may be computed, as in `{target}/core` or the namespace `{target}/`, or the
+                // whole of one whose attribute is taken, as in `{target}.has-std`
+                if !is_name_continuation(parser) && parser.peek() != Some('/') && !is_attribute_access(parser) {
                     return Some(operand);
                 }
                 let name = self.parse_name_from(parser, start, operand.data.coerce_string(), false)?;

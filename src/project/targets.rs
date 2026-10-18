@@ -293,6 +293,27 @@ impl Project {
         };
         self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
     }
+    /// Returns whether the sysroot of the toolchain has the standard library for a builtin target, as its `rlib`, which
+    /// rustup installs with `rustup target add`.
+    ///
+    /// The configuration depends on the directory of the target's libraries, so that it is generated again once the
+    /// standard library is installed.
+    pub(super) fn has_std(&mut self, target: &str) -> bool {
+        let Some(&value) = self.values_idx.get("rustc/sysroot") else {
+            return false;
+        };
+        let sysroot = std::path::PathBuf::from(self.values[value].data.coerce_string());
+        let dir = sysroot.join("lib/rustlib").join(target).join("lib");
+        self.depend_on_path(&dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("libstd-") && name.ends_with(".rlib")
+        })
+    }
     /// Returns a target which is builtin or has been declared.
     pub fn target(&self, name: &str) -> Option<&Target> {
         self.targets.iter().find(|target| target.name == name)

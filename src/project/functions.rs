@@ -681,7 +681,7 @@ impl Project {
     ///
     /// A missing dependency is always out of date, which would regenerate the configuration endlessly, so a path which
     /// does not exist is recorded as missing instead, which is checked before ninja runs.
-    fn depend_on_path(&mut self, path: &Path) {
+    pub(super) fn depend_on_path(&mut self, path: &Path) {
         if path.exists() {
             self.depend(path.to_path_buf());
         } else if !self.missing.iter().any(|missing| missing == path) {

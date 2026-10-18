@@ -144,13 +144,21 @@ impl Project {
             };
             return self.attribute_value(Item::Property, name, attribute, attribute_span, value, start, parser);
         }
-        // only a target with a `target` statement, as the others have no attributes to take
-        if let Some(target) = self.target(name) && target.declaration().is_some() {
+        // a builtin target, or one declared by a `target` statement
+        if let Some(target) = self.target(name) {
+            let custom = target.is_custom();
+            if attribute == "has-std" {
+                let value = AttributeValue::Set(Data::Bool(!custom && self.has_std(name)));
+                return self.attribute_value(Item::Target, name, attribute, attribute_span, value, start, parser);
+            }
+            let target = self.target(name).unwrap();
             let value = match (attribute, &target.kind) {
                 ("inherit", TargetKind::Custom { inherit, .. }) => AttributeValue::optional(inherit.clone().map(Data::Str)),
                 ("inherit", TargetKind::Builtin { .. }) => AttributeValue::Unset,
                 ("test", _) => AttributeValue::Set(Data::Bool(target.can_test(&self.host()))),
-                ("override", kind) => AttributeValue::Set(Data::Bool(matches!(kind, TargetKind::Builtin { .. }))),
+                ("override", kind) => {
+                    AttributeValue::Set(Data::Bool(matches!(kind, TargetKind::Builtin { overridden: Some(_), .. })))
+                },
                 ("runner", _) => match target.runner {
                     Some(runner) => AttributeValue::Set(strings(&self.runners[runner].command)),
                     None => AttributeValue::Unset,
