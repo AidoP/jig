@@ -123,14 +123,14 @@ impl Project {
         {
             let value = crate_attribute(c, attribute);
             // the test of a crate has its name, so an attribute the crate does not have may be the test's
-            let tested = self.customs.iter().any(|test| test.is_test() && test.name == name);
+            let tested = self.custom(name, true).is_some();
             if !matches!(value, AttributeValue::Unknown) || !tested {
                 let crate_name = crate_name.clone();
                 return self.attribute_value(Item::Crate, &crate_name, attribute, attribute_span, value, start, parser);
             }
         }
         let custom = match &referent {
-            Some(Referent::Custom(name)) => self.customs.iter().find(|custom| !custom.is_test() && custom.name == *name),
+            Some(Referent::Custom(name)) => self.custom(name, false),
             _ => None,
         };
         if let Some(custom) = custom && let CustomKind::Command { outputs, default, install } = &custom.kind {
@@ -190,7 +190,7 @@ impl Project {
             return self.attribute_value(Item::Target, name, attribute, attribute_span, value, start, parser);
         }
         // a test has its own name, which is looked for last
-        if let Some(test) = self.customs.iter().find(|test| test.is_test() && test.name == name) {
+        if let Some(test) = self.custom(name, true) {
             let value = match attribute {
                 "input" => AttributeValue::Set(paths(&test.inputs(&self.runners))),
                 "depends" => AttributeValue::Set(paths(&test.depends)),
