@@ -39,7 +39,9 @@ commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
                          directory
     build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
-    test [<name> ...]    build and run the tests, or only those named
+    test [-v] [<name> ...]
+                         build and run the tests, or only those named, where `-v` or `--verbose` shows the output of
+                         each test, such as the tests of a crate's test harness, rather than only those which fail
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -98,8 +100,10 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             Ok(ExitCode::SUCCESS)
         },
         "test" => {
+            let mut args = args.peekable();
+            let verbose = args.next_if(|arg| arg == "-v" || arg == "--verbose").is_some();
             let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
-            test_runner::test(&names).map(|()| ExitCode::SUCCESS)
+            test_runner::test(&names, verbose).map(|()| ExitCode::SUCCESS)
         },
         "install" => {
             let mut proxy = false;

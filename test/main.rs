@@ -1798,6 +1798,20 @@ test result: FAILED. 2 passed; 1 failed
         &without_durations(&stdout),
         "\nrunning 2 tests\ntest passes    ... ok\ntest generated ... ok\n\ntest result: ok. 2 passed; 0 failed\n",
     );
+    // with `-v`, the output of each test is shown below its result, rather than that of the failures at the end
+    let (success, stdout, _) = run(&["-v", "fails", "passes"]);
+    assert!(!success);
+    assert_contains(&without_durations(&stdout), "\
+test fails  ... FAILED
+    exit status: 3
+    some output
+    an error
+test passes ... ok
+
+failures:
+    fails
+");
+    assert!(!stdout.contains("---- fails ----"), "{stdout}");
     let (success, _, stderr) = run(&["nope"]);
     assert!(!success);
     assert_contains(&stderr, "no test named \"nope\"");
@@ -1861,6 +1875,12 @@ mod tests {
     assert_contains(&stdout, "test tests::works ... ok\n");
     assert_contains(&stdout, "test tests::broken ... FAILED\n");
     assert_contains(&stdout, "\ntest result: FAILED. 0 passed; 1 failed\n");
+    // the results of the harness's tests are shown below its own with `-v`
+    let run = Command::new(configure_path()).args(["test", "--verbose"]).current_dir(&project.dir).output().unwrap();
+    let stdout = without_durations(&String::from_utf8(run.stdout).unwrap());
+    assert_contains(&stdout, "\ntest app ... FAILED\n    exit status: 101\n\n    running 2 tests\n");
+    assert_contains(&stdout, "\n    test tests::works ... ok\n");
+    assert_contains(&stdout, "\n    test result: FAILED. 1 passed; 1 failed;");
 }
 
 #[test]

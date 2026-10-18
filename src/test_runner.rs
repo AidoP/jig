@@ -9,8 +9,9 @@ use crate::configured::{Configured, Output};
 /// Run tests, or all of them if no names are given, without evaluating the configuration.
 ///
 /// What the tests need is built by ninja first, then each is run in turn from the project root with its output captured,
-/// which is shown if it fails, with how long each took.
-pub fn test(names: &[String]) -> Result<(), Error> {
+/// which is shown if it fails, with how long each took. With `verbose`, the output of every test is shown below its
+/// result, such as the results of the tests in a crate's test harness, rather than only those which fail at the end.
+pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
     let targets: Vec<_> = if names.is_empty() {
         vec!["test".to_string()]
@@ -63,24 +64,31 @@ pub fn test(names: &[String]) -> Result<(), Error> {
             .stdin(std::process::Stdio::null())
             .output();
         let elapsed = test_started.elapsed();
-        let failure = match output {
-            Ok(output) if output.status.success() => None,
+        // what the test printed, and for a failure, how it ended first
+        let (passed, report) = match output {
             Ok(output) => {
-                let mut report = format!("{}\n", output.status);
+                let mut report = String::new();
+                if !output.status.success() {
+                    report.push_str(&format!("{}\n", output.status));
+                }
                 report.push_str(&String::from_utf8_lossy(&output.stdout));
                 report.push_str(&String::from_utf8_lossy(&output.stderr));
-                Some(report)
+                (output.status.success(), report)
             },
-            Err(error) => Some(format!("failed to run {:?}: {error}\n", test.command[0])),
+            Err(error) => (false, format!("failed to run {:?}: {error}\n", test.command[0])),
         };
-        let result = if failure.is_some() { style.failed("FAILED") } else { style.ok("ok") };
+        let result = if passed { style.ok("ok") } else { style.failed("FAILED") };
         println!("{result} {}", style.dim(&format!("({})", duration(elapsed))));
-        if let Some(report) = failure {
+        if verbose {
+            print!("{}", indent(&report));
+        }
+        if !passed {
             failures.push((test.name, report));
         }
     }
     let elapsed = started.elapsed();
-    for (name, report) in &failures {
+    // the output of each failure, unless it was shown already
+    for (name, report) in failures.iter().filter(|_| !verbose) {
         println!("\n{}\n{}", style.bold(&format!("---- {name} ----")), report.trim_end());
     }
     if !failures.is_empty() {
@@ -93,6 +101,19 @@ pub fn test(names: &[String]) -> Result<(), Error> {
     let passed = tests.len() - failures.len();
     println!("\ntest result: {result}. {passed} passed; {} failed; finished in {}", failures.len(), duration(elapsed));
     if failures.is_empty() { Ok(()) } else { Err(Error::TestsFailed(failures.len())) }
+}
+
+/// Returns the output of a test indented below its result, without the blank lines around it.
+fn indent(output: &str) -> String {
+    let mut indented = String::new();
+    for line in output.trim_matches('\n').lines() {
+        if line.trim().is_empty() {
+            indented.push('\n');
+        } else {
+            indented.push_str(&format!("    {line}\n"));
+        }
+    }
+    indented
 }
 
 /// Returns a duration as seconds, as libtest shows it.
