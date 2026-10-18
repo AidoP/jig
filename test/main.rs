@@ -160,6 +160,27 @@ fn assert_contains(haystack: &str, needle: &str) {
     assert!(haystack.contains(needle), "{needle:?} not found in:\n{haystack}");
 }
 
+/// Returns the output of `jig test` without how long the tests took, which varies, asserting that each result has it.
+#[track_caller]
+fn without_durations(stdout: &str) -> String {
+    let mut lines = Vec::new();
+    for line in stdout.lines() {
+        let line = if line.starts_with("test result: ") {
+            let Some((result, elapsed)) = line.split_once("; finished in ") else {
+                panic!("no duration in {line:?}");
+            };
+            assert!(elapsed.ends_with('s'), "{line:?}");
+            result
+        } else if line.starts_with("test ") && line.ends_with("s)") && let Some(start) = line.rfind(" (") {
+            &line[..start]
+        } else {
+            line
+        };
+        lines.push(line);
+    }
+    lines.join("\n") + "\n"
+}
+
 #[test]
 fn log_evaluates_expressions() {
     let project = Project::new("log", &[("Jig", "\
@@ -1749,23 +1770,34 @@ test passes
     // the inputs are built before the tests run, and the output of a failed test is shown
     let (success, stdout, stderr) = run(&[]);
     assert!(!success);
-    assert_contains(&stdout, "\
+    // the results line up, with how long each test took
+    assert_contains(&without_durations(&stdout), "
+running 3 tests
 test generated ... ok
-test fails ... FAILED
-test passes ... ok
+test fails     ... FAILED
+test passes    ... ok
 
 ---- fails ----
 exit status: 3
 some output
 an error
 
+failures:
+    fails
+
 test result: FAILED. 2 passed; 1 failed
 ");
+    // without colours, as stdout is not a terminal
+    assert!(!stdout.contains('\x1b'), "{stdout}");
+    assert_contains(&stdout, "\ntest passes    ... ok (0.");
     assert_contains(&stderr, "1 test failed");
     // tests can be chosen by name
     let (success, stdout, _) = run(&["passes", "generated"]);
     assert!(success);
-    assert_contains(&stdout, "test passes ... ok\ntest generated ... ok\n\ntest result: ok. 2 passed; 0 failed\n");
+    assert_contains(
+        &without_durations(&stdout),
+        "\nrunning 2 tests\ntest passes    ... ok\ntest generated ... ok\n\ntest result: ok. 2 passed; 0 failed\n",
+    );
     let (success, _, stderr) = run(&["nope"]);
     assert!(!success);
     assert_contains(&stderr, "no test named \"nope\"");
@@ -1823,7 +1855,8 @@ mod tests {
     let run = Command::new(configure_path()).arg("test").current_dir(&project.dir).output().unwrap();
     let stdout = String::from_utf8(run.stdout).unwrap();
     assert!(!run.status.success());
-    assert_contains(&stdout, "test app ... FAILED\n");
+    let stdout = without_durations(&stdout);
+    assert_contains(&stdout, "\nrunning 1 test\ntest app ... FAILED\n");
     // the harness's own output is shown, where its tests run in any order
     assert_contains(&stdout, "test tests::works ... ok\n");
     assert_contains(&stdout, "test tests::broken ... FAILED\n");
