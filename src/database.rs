@@ -9,7 +9,7 @@
 //! paths, the install prefix, the severities of `proxy-build` and `other-jig`, and the `jig` which configured it,
 //! followed by each section: the flychecks, the tests, then the installed files. A section is the number of its records
 //! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
-//! list of strings is their number followed by each string, and a `bool` is a number which is `0` or `1`.
+//! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -44,12 +44,19 @@ pub struct Database<'a> {
     pub installs: Vec<Install<'a>>,
 }
 
-/// The diagnostics to replay for a flycheck label.
+/// A flycheck label, whose diagnostics are replayed with those of the flychecks it depends on.
+///
+/// The dependencies are kept rather than every file to replay, which would grow with the square of the length of a chain
+/// of crates.
 #[derive(Debug, PartialEq)]
 pub struct Flycheck<'a> {
     pub label: &'a str,
-    /// The files of JSON diagnostics to replay, in order.
-    pub diagnostics: Vec<&'a str>,
+    /// The file of the JSON diagnostics saved by its check.
+    pub diagnostics: &'a str,
+    /// Whether the crate is edited, so that its diagnostics are replayed for the flychecks which depend on it.
+    pub member: bool,
+    /// The indices of the flychecks of the crates it depends on directly.
+    pub deps: Vec<u32>,
 }
 
 /// A test, which passes if its command succeeds.
@@ -89,7 +96,9 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
-        write_strs(w, &flycheck.diagnostics)?;
+        write_str(w, flycheck.diagnostics)?;
+        write_u32(w, flycheck.member as u32)?;
+        write_u32s(w, &flycheck.deps)?;
     }
     write_u32(w, database.tests.len())?;
     for test in &database.tests {
@@ -125,7 +134,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         ..Default::default()
     };
     for _ in 0..r.u32()? {
-        database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.strs()? });
+        database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: r.bool()?, deps: r.u32s()? });
     }
     for _ in 0..r.u32()? {
         database.tests.push(Test { name: r.str()?, command: r.strs()? });
@@ -171,6 +180,14 @@ fn write_strs(w: &mut dyn Write, strs: &[&str]) -> std::io::Result<()> {
     Ok(())
 }
 
+fn write_u32s(w: &mut dyn Write, values: &[u32]) -> std::io::Result<()> {
+    write_u32(w, values.len())?;
+    for &value in values {
+        write_u32(w, value)?;
+    }
+    Ok(())
+}
+
 /// The remaining bytes of a database being parsed.
 struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
@@ -199,6 +216,10 @@ impl<'a> Reader<'a> {
         let len = self.u32()?;
         (0..len).map(|_| self.str()).collect()
     }
+    fn u32s(&mut self) -> std::io::Result<Vec<u32>> {
+        let len = self.u32()?;
+        (0..len).map(|_| self.u32()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -217,8 +238,8 @@ mod tests {
             other_jig: "warning",
             jig: "/usr/bin/jig",
             flychecks: vec![
-                Flycheck { label: "app@x86_64", diagnostics: vec!["a.json", "b é.json"] },
-                Flycheck { label: "empty", diagnostics: vec![] },
+                Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
+                Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
             ],
             tests: vec![Test { name: "unit", command: vec!["./run", "a b"] }],
             installs: vec![

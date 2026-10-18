@@ -5,12 +5,13 @@
 //! Ninja runs in the build directory, so the paths in `build.ninja` are relative to it, while the project's paths are
 //! relative to the project root.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, Installed, Project, Severity, Target, TargetKind};
-use crate::{Error, check, database, rust_analyzer, target_spec, toolchain};
+use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
 ///
@@ -223,7 +224,7 @@ fn write_dependencies(w: &mut dyn std::io::Write, project: &Project, at: &Rebase
 /// Returns the crates as units for rust-analyzer, in the same order.
 fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -> Vec<Unit> {
     let mut units = Vec::new();
-    for c in crates {
+    for (c, deps) in crates.iter().zip(externs(crates)) {
         units.push(Unit {
             label: format!("{}@{}", c.name, c.target),
             name: c.name.clone(),
@@ -234,7 +235,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             test: c.test && !matches!(c.kind, Kind::Lib | Kind::ProcMacro),
             kind: c.kind,
             output: c.output(),
-            deps: externs(c, crates),
+            deps,
             // crates from the toolchain, such as `core`, are not edited
             member: !rust_analyzer::absolute(&c.path).starts_with(sysroot),
             build_file: project.files[c.name_span.file].path.clone(),
@@ -355,10 +356,10 @@ fn write_build_ninja(
         }
     }
 
-    for c in crates {
+    for (c, unit) in crates.iter().zip(units) {
         // a dependency is a library, so it has an output
         let mut deps = Vec::new();
-        for index in externs(c, crates) {
+        for &index in &unit.deps {
             let d = &crates[index];
             deps.push(Extern { name: &d.name, path: at.path(&d.output()) });
         }
@@ -548,14 +549,7 @@ fn write_database(
     let jig = std::env::current_exe().map(|jig| jig.display().to_string()).unwrap_or_default();
     let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
-    let mut replayed = Vec::new();
-    for unit in units {
-        let mut paths = Vec::new();
-        for path in check::replayed(unit, units) {
-            paths.push(path.display().to_string());
-        }
-        replayed.push(paths);
-    }
+    let diagnostics: Vec<_> = units.iter().map(|unit| unit.diagnostics().display().to_string()).collect();
     let mut commands = Vec::new();
     for custom in &project.customs {
         if custom.is_test() {
@@ -577,9 +571,10 @@ fn write_database(
         jig: &jig,
         ..Default::default()
     };
-    for (unit, paths) in units.iter().zip(&replayed) {
-        let diagnostics = paths.iter().map(String::as_str).collect();
-        database.flychecks.push(database::Flycheck { label: &unit.label, diagnostics });
+    for (unit, diagnostics) in units.iter().zip(&diagnostics) {
+        let deps = unit.deps.iter().map(|&index| index as u32).collect();
+        let (label, member) = (&unit.label, unit.member);
+        database.flychecks.push(database::Flycheck { label, diagnostics, member, deps });
     }
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
@@ -660,21 +655,43 @@ fn codegen(c: &Crate, project: &Project) -> Vec<String> {
     codegen
 }
 
-/// Returns the indices in `crates` of the crates passed to a crate with `--extern`.
+/// Returns, for each crate, the indices in `crates` of the crates passed to it with `--extern`, in the order of
+/// `crates`.
 ///
 /// Builtin crates are passed to every other crate for the same target, but not to each other as that would be a cycle,
 /// so a builtin crate must `use` the others it depends on.
-fn externs(c: &Crate, crates: &[Crate]) -> Vec<usize> {
-    let mut externs = Vec::new();
+///
+/// The crates are looked up by name, and the builtin crates by target, rather than each crate being compared with every
+/// other, which would grow with the square of their number.
+fn externs(crates: &[Crate]) -> Vec<Vec<usize>> {
+    let mut named: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut builtins: HashMap<&str, Vec<usize>> = HashMap::new();
     for (index, d) in crates.iter().enumerate() {
-        let builtin = d.target == c.target && d.builtin && !c.builtin;
-        // a procedural macro is for the host target, but can be used by a crate for any target
-        let target = d.target == c.target || d.kind == Kind::ProcMacro;
-        if builtin || target && d.kind != Kind::Bin && c.uses.iter().any(|used| used.name == d.name) {
-            externs.push(index);
+        named.entry(&d.name).or_default().push(index);
+        if d.builtin {
+            builtins.entry(&d.target).or_default().push(index);
         }
     }
-    externs
+    let mut all = Vec::new();
+    for c in crates {
+        let mut externs = Vec::new();
+        if !c.builtin {
+            externs.extend(builtins.get(c.target.as_str()).into_iter().flatten());
+        }
+        for used in &c.uses {
+            for &index in named.get(used.name.as_str()).into_iter().flatten() {
+                let d = &crates[index];
+                // a procedural macro is for the host target, but can be used by a crate for any target
+                if (d.target == c.target || d.kind == Kind::ProcMacro) && d.kind != Kind::Bin {
+                    externs.push(index);
+                }
+            }
+        }
+        externs.sort_unstable();
+        externs.dedup();
+        all.push(externs);
+    }
+    all
 }
 
 /// Returns the specification of a builtin target, `base`, which a custom target inherits, which is unstable, so it
