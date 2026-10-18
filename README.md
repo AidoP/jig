@@ -7,9 +7,9 @@ A build system for Rust.
 
 ## Installing
 
-Each release on GitHub has a statically linked `jig` for x86_64, aarch64 and riscv64 Linux, which is built and tested
-by `.github/workflows/release.yml` when a tag starting with `v` is pushed. A tag with a suffix, such as `v1.0.0-rc.1`,
-is a prerelease.
+Each release on GitHub has a statically linked `jig` for x86_64, aarch64 and riscv64 Linux, and a `jig` for macOS on
+Apple silicon, which are built and tested by `.github/workflows/release.yml` when a tag starting with `v` is pushed. A
+tag with a suffix, such as `v1.0.0-rc.1`, is a prerelease.
 
 `jig` is built for each of the `targets` property's targets whose standard library is installed, such as the musl
 targets added with `rustup target add`. The `release-target` property, which is the host target by default, is the one
@@ -272,7 +272,8 @@ runs a probe, a tiny program for the target's architecture which exits successfu
 has one, so it is `true` where the kernel runs the architecture, or an emulator does, such as one registered with
 binfmt or given as the runner, or Wine for a Windows target. Probes are for Linux targets of x86_64, x86, the x32 ABI,
 AArch64, 32-bit ARM, RISC-V, little-endian 64-bit PowerPC and s390x, and Windows targets of x86_64, x86 and AArch64, so
-another target can only be run if it is the host target. The probe is run when the project is configured, so an
+another target can only be run if it is the host target. A macOS target is probed on macOS by running `/usr/bin/true`
+as its architecture with `arch`, so x86_64 runs on Apple silicon with Rosetta, while it cannot run on another host. The probe is run when the project is configured, so an
 emulator which is installed later is found once it is configured again.
 
 A list is written as expressions in `[]`, separated by `, `, such as `['-O', 'dtb']`, and its items can have any type.

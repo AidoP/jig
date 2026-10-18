@@ -5,6 +5,10 @@
 //! `0`, and for Windows, a PE executable without imports whose entry point returns `0`, which is its exit status. So it
 //! runs where the kernel runs the architecture, or an emulator does, such as one registered with binfmt or given as the
 //! target's runner, or Wine for Windows.
+//!
+//! macOS needs a code signature for arm64 and does not support static executables, so a macOS target is probed by
+//! running `/usr/bin/true`, which is a universal program of macOS, as the target's architecture with `arch`, which runs
+//! where macOS does, such as x86_64 with Rosetta.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -304,16 +308,37 @@ const WINE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Returns whether the host can run what is built for a target, by running its probe, with the runner of the target
 /// if it has one, as a program and its first arguments.
 ///
-/// A target which is not for Linux or Windows, or whose architecture has no probe, cannot be found to run.
+/// A target which is not for Linux, Windows or macOS, or whose architecture has no probe, cannot be found to run, nor
+/// can a macOS target where the host is not macOS.
 pub(super) fn can_run(target: &str, runner: &[String], toolchain: Option<&str>) -> bool {
+    if let Some(command) = macos_probe(target) {
+        return std::env::consts::OS == "macos" && run(command, toolchain, TIMEOUT);
+    }
     let Some(probe) = executable(target) else {
         return false;
     };
     let name = format!("jig-probe-{}-{target}{}", std::process::id(), probe.extension);
     let path = std::env::temp_dir().join(name);
-    let ran = write(&path, &probe.bytes) && run(&path, runner, toolchain, probe.timeout);
+    let ran = write(&path, &probe.bytes) && run(command(&path, runner), toolchain, probe.timeout);
     let _ = std::fs::remove_file(&path);
     ran
+}
+
+/// Returns the command which probes a macOS target, which runs `/usr/bin/true` as its architecture.
+fn macos_probe(target: &str) -> Option<Command> {
+    let (arch, rest) = target.split_once('-')?;
+    if rest != "apple-darwin" {
+        return None;
+    }
+    // as `arch` names them
+    let arch = match arch {
+        "aarch64" => "arm64",
+        arch @ ("x86_64" | "x86_64h" | "arm64e") => arch,
+        _ => return None,
+    };
+    let mut command = Command::new("/usr/bin/arch");
+    command.args([&format!("-{arch}"), "/usr/bin/true"]);
+    Some(command)
 }
 
 /// Write an executable file.
@@ -325,16 +350,20 @@ fn write(path: &Path, contents: &[u8]) -> bool {
     file.and_then(|mut file| file.write_all(contents)).is_ok()
 }
 
-/// Run an executable, with a runner if one is given, returning whether it exited successfully within the timeout.
-fn run(path: &Path, runner: &[String], toolchain: Option<&str>, timeout: Duration) -> bool {
-    let mut command = match runner.split_first() {
+/// Returns the command which runs an executable, with a runner if one is given.
+fn command(path: &Path, runner: &[String]) -> Command {
+    match runner.split_first() {
         Some((program, arguments)) => {
             let mut command = Command::new(program);
             command.args(arguments).arg(path);
             command
         },
         None => Command::new(PathBuf::from(path)),
-    };
+    }
+}
+
+/// Run a command, returning whether it exited successfully within the timeout.
+fn run(mut command: Command, toolchain: Option<&str>, timeout: Duration) -> bool {
     crate::toolchain::apply(&mut command, toolchain);
     use std::process::Stdio;
     let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
@@ -356,7 +385,7 @@ fn run(path: &Path, runner: &[String], toolchain: Option<&str>, timeout: Duratio
 
 #[cfg(test)]
 mod tests {
-    use super::{can_run, executable};
+    use super::{can_run, executable, macos_probe};
 
     #[test]
     fn probes() {
@@ -377,12 +406,29 @@ mod tests {
 
     #[test]
     fn runners() {
-        // the probe for the host's architecture runs, as does any with a runner which succeeds
-        let host = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
-        assert!(can_run(&host, &[], None));
+        // the probe for the host's architecture runs on Linux, as does any with a runner which succeeds
+        if cfg!(target_os = "linux") {
+            let host = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+            assert!(can_run(&host, &[], None));
+        }
         assert!(can_run("s390x-unknown-linux-gnu", &["true".into()], None));
         assert!(can_run("x86_64-pc-windows-msvc", &["true".into()], None));
         assert!(!can_run("s390x-unknown-linux-gnu", &["false".into()], None));
         assert!(!can_run("riscv64gc-unknown-none-elf", &["true".into()], None));
+    }
+
+    #[test]
+    fn macos() {
+        let probe = |target| macos_probe(target).map(|command| {
+            let arguments: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            (command.get_program().to_string_lossy().into_owned(), arguments)
+        });
+        let arguments = |arch: &str| Some(("/usr/bin/arch".into(), vec![format!("-{arch}"), "/usr/bin/true".into()]));
+        assert_eq!(probe("aarch64-apple-darwin"), arguments("arm64"));
+        assert_eq!(probe("x86_64-apple-darwin"), arguments("x86_64"));
+        assert_eq!(probe("aarch64-apple-ios"), None);
+        // which only runs on macOS, where the host's own architecture runs
+        let host = format!("{}-apple-darwin", std::env::consts::ARCH);
+        assert_eq!(can_run(&host, &[], None), cfg!(target_os = "macos"));
     }
 }

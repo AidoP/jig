@@ -20,6 +20,9 @@ jobs:
           # a RISE RISC-V runner, which needs its GitHub App installed for the repository
           - os: ubuntu-24.04-riscv
             target: riscv64gc-unknown-linux-musl
+          # Apple silicon, where macOS links programs dynamically, as it has no static executables
+          - os: macos-latest
+            target: aarch64-apple-darwin
     # each target is built where it runs, so that its tests run
     runs-on: ${{ matrix.os }}
     steps:
@@ -39,10 +42,17 @@ jobs:
           rustup target add --toolchain stable ${{ matrix.target }}
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Install ninja
-        run: command -v ninja >/dev/null || (sudo apt-get update && sudo apt-get install -y ninja-build)
+        run: |
+          if ! command -v ninja >/dev/null; then
+            if [ "$RUNNER_OS" = macOS ]; then
+              brew install ninja
+            else
+              sudo apt-get update && sudo apt-get install -y ninja-build
+            fi
+          fi
       - name: Configure the release
-        # `Jig` uses `Jig.local` if it exists, which makes the musl target the one which is built by default,
-        # installed and run by the integration tests, so that it is statically linked and runs on any Linux
+        # `Jig` uses `Jig.local` if it exists, which makes the target the one which is built by default, installed and
+        # run by the integration tests, where a musl target is statically linked, so that it runs on any Linux
         run: |
           cat > Jig.local <<EOF
           set release-target '${{ matrix.target }}'
@@ -62,7 +72,12 @@ jobs:
           mkdir "$name"
           cp dist/bin/jig README.md "$name"
           tar -czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          # macOS has `shasum` rather than `sha256sum`
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
