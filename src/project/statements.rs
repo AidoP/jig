@@ -219,11 +219,20 @@ impl Project {
         let mut quiet = false;
         // the identifier of the diagnostic, which is shown with it and whose property overrides its severity
         let mut id = None;
-        while let Some(attribute) = self.next_attribute(parser, &[]) {
+        // the statement the diagnostic is shown at, rather than where it was logged
+        let mut location = None;
+        while let Some(attribute) = self.next_attribute(parser, &["location"]) {
             match attribute.name {
                 "quiet" => {
                     if let Some(value) = self.flag(attribute.operand()) {
                         quiet = value;
+                    }
+                },
+                "location" => {
+                    let span = attribute.data_span;
+                    match attribute.data {
+                        Data::Str(name) => location = self.location(&name, span).or(location),
+                        data => self.invalid_operand(&Attribute { data, ..attribute }.operand(), "name", false),
                     }
                 },
                 "id" => {
@@ -242,7 +251,33 @@ impl Project {
             Some(id) => Message::Logged { id, message },
             None => Message::User(message),
         };
-        self.diagnostics.push(Diagnostic { span: (!quiet).then_some(operand.span), message, severity });
+        let span = location.or((!quiet).then_some(operand.span));
+        self.diagnostics.push(Diagnostic { span, message, severity });
+    }
+    /// Returns where a statement which a name refers to is: the one which gave a property its value, or declared it,
+    /// as for a crate or a custom command, or the declaration of a target or a test, reporting a name which refers to
+    /// none of them, or to one without a location, as it is builtin.
+    fn location(&mut self, name: &str, span: Span) -> Option<Span> {
+        let value = self.referenced_value(name, span.file).map(|value| (value.span, value.property));
+        let declared = |this: &Self, property: usize| this.properties.get(property)?.as_ref()?.span;
+        let location = match value {
+            Some((Some(location), _)) => Some(location),
+            Some((None, property)) => declared(self, property),
+            None => self.properties_idx.get(name).and_then(|&property| declared(self, property)),
+        };
+        let location = location
+            .or_else(|| self.target(name).and_then(|target| target.declaration()))
+            .or_else(|| {
+                let test = self.customs.iter().find(|test| test.is_test() && test.name == name);
+                test.map(|test| test.name_span)
+            });
+        if location.is_some() {
+            return location;
+        }
+        let known = value.is_some() || self.properties_idx.contains_key(name) || self.target(name).is_some();
+        let message = if known { Message::NoLocation(name.into()) } else { Message::UnknownReference(name.into()) };
+        self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
+        None
     }
     /// Returns whether a diagnostic's identifier is valid, which is an identifier, as it is part of the name of its
     /// property, `diagnostic/<id>`, or reports why not.

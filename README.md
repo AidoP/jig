@@ -105,7 +105,9 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
   or a `suggestion`, where a fatal error stops the configuration, as described below. With the `quiet` attribute, only
   the message is shown, without where it was logged. With `id <str>`, the diagnostic has that identifier, which is shown
   with it and whose property, `diagnostic/<id>`, overrides its severity, as for other diagnostics, and is declared by
-  the first `log` with the identifier
+  the first `log` with the identifier. With `location <name>`, it is shown at another statement, rather than where it
+  was logged: the one which gave a property its value, or declared it, or which declared a crate, custom command,
+  target or test, whose name may be computed, such as `location {target}` in a `@for`
 - `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `target <name>`: a custom target, which crates can be compiled for. See below
@@ -122,6 +124,10 @@ log note 'configured'
 
 log warning 'the `legacy` feature is deprecated'
     id 'deprecated'
+
+@if uart-base % 0x1000 != 0
+log error 'the UART base must be aligned to 4 KiB'
+    location uart-base
 ```
 
 A crate is a read-only property, `<target>/<name>`, for each target it is declared for, whose value is a reference to

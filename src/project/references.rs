@@ -70,7 +70,7 @@ impl Project {
     }
     /// Returns the value of a property, or of the property of a crate for the `target` in effect, which is aliased by
     /// the crate's name.
-    fn referenced_value(&self, name: &str, file: usize) -> Option<&Value> {
+    pub(super) fn referenced_value(&self, name: &str, file: usize) -> Option<&Value> {
         if let Some(value) = self.value(name, file) {
             return Some(value);
         }

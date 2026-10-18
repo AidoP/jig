@@ -159,6 +159,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "invalid-crate-name",
     "invalid-install-mode",
     "invalid-version",
+    "no-location",
     "unknown-keyword-argument",
     "repeated-keyword-argument",
     "install-conflict",
@@ -360,6 +361,8 @@ pub enum Message {
     },
     /// The value of an `install-mode` attribute, which is not a permission.
     InvalidInstallMode(String),
+    /// The `location` of a `log` statement which is builtin, so it is not in a file.
+    NoLocation(String),
     /// A keyword argument, `<name>: <value>`, which a function does not take.
     UnknownKeywordArgument {
         function: &'static str,
@@ -511,6 +514,7 @@ impl core::fmt::Display for Message {
                 write!(f, "output {path:?} of the custom command overlaps {other:?}, the output of the {item} {name:?}")
             },
             Self::InvalidCrateName { name, character } => write!(f, "invalid character {character:?} in crate name {name:?}"),
+            Self::NoLocation(name) => write!(f, "{name:?} is builtin, so it has no location"),
             Self::UnknownKeywordArgument { function, name } => {
                 write!(f, "function {function:?} has no keyword argument {name:?}")
             },
@@ -653,6 +657,7 @@ impl Message {
             Self::InvalidCrateName { .. } => "invalid-crate-name",
             Self::InvalidInstallMode(_) => "invalid-install-mode",
             Self::InvalidVersion { .. } => "invalid-version",
+            Self::NoLocation(_) => "no-location",
             Self::UnknownKeywordArgument { .. } => "unknown-keyword-argument",
             Self::RepeatedKeywordArgument(_) => "repeated-keyword-argument",
             Self::InstallConflict { .. } => "install-conflict",

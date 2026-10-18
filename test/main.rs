@@ -4159,3 +4159,57 @@ log note select(board, fall{'back'})
     project.configure().failed()
         .stderr("error[undeclared-property]: property \"missing\" is undeclared");
 }
+
+#[test]
+fn log_location() {
+    let project = Project::new("log-location", &[("Jig", "\
+declare uart-base
+    default 0x1000
+set uart-base 0x1001
+crate kernel 'kernel.rs'
+target custom
+    inherit 'x86_64-unknown-none'
+test check
+    command 'true'
+declare unset
+log warning 'misaligned'
+    location uart-base
+log note 'the kernel'
+    location kernel
+log note 'the target'
+    location custom
+log note 'the test'
+    location check
+log note 'not set'
+    location unset
+@for name in 'custom'
+log note 'in a loop'
+    location {name}
+log note 'quietly'
+    location kernel
+    quiet
+")]);
+    let output = project.configure_with(NIGHTLY).ok();
+    // where a property was given its value, or declared, or where a crate, target or test was declared
+    output
+        .stderr("warning: misaligned\n --> Jig:3:5")
+        .stderr("note: the kernel\n --> Jig:4:7")
+        .stderr("note: the target\n --> Jig:5:8")
+        .stderr("note: the test\n --> Jig:7:6")
+        .stderr("note: not set\n --> Jig:9:9")
+        .stderr("note: in a loop\n --> Jig:5:8")
+        // which is not where it was logged, so it is shown without it
+        .stderr("note: quietly\n --> Jig:4:7");
+    let project = Project::new("log-location-errors", &[("Jig", "\
+log note 'a'
+    location host-target
+log note 'b'
+    location nope
+log note 'c'
+    location ['a']
+")]);
+    project.configure().failed()
+        .stderr("error[no-location]: \"host-target\" is builtin, so it has no location\n --> Jig:2:14")
+        .stderr("error[unknown-reference]: no property, custom command, target or test named \"nope\"\n --> Jig:4:14")
+        .stderr("error[invalid-operand]: list value used where name is required\n --> Jig:6:14");
+}
