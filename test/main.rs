@@ -450,6 +450,23 @@ fn writes_depfile() {
 }
 
 #[test]
+fn paths_through_symbolic_links() {
+    let project = Project::new("symbolic-links", &[
+        ("Jig", "use 'link/../sib'\nuse 'plain/../other'\n"),
+        ("real/inner/.keep", ""),
+        ("real/sib/Jig", "log note 'beside the target of the link'\n"),
+        ("sib/Jig", "log note 'beside the link'\n"),
+        ("other/Jig", ""),
+        ("plain/.keep", ""),
+    ]);
+    std::os::unix::fs::symlink("real/inner", project.dir.join("link")).unwrap();
+    let output = project.configure().ok();
+    output.stderr("note: beside the target of the link\n");
+    // ninja removes `..` with the component before it, so a symbolic link before `..` is resolved for it
+    assert_eq!(project.depfile(), "build.ninja: Jig real/sib/Jig other/Jig reconfigure.stamp\n");
+}
+
+#[test]
 fn read_only_property() {
     let project = Project::new("read-only", &[("Jig", "\
 declare version
