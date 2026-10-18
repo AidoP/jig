@@ -47,3 +47,9 @@ crate integration 'test/main.rs'
     target release-target
     test
     depends {release-target}/jig
+
+# the performance tests time jig on large projects
+crate perf 'test/perf.rs'
+    target release-target
+    test
+    depends {release-target}/jig

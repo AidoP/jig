@@ -24,6 +24,10 @@ set release-target 'x86_64-unknown-linux-musl'
 Building `jig` needs Rust 1.95 or later, and ninja 1.11 or later. Its tests need a nightly toolchain as well, for those
 of custom targets.
 
+The `perf` test times `jig` on large generated projects, failing if one takes far longer than expected, or grows much
+faster than its size where it should be linear. Its time budgets are multiplied by the `JIG_PERF_SCALE` environment
+variable, such as `JIG_PERF_SCALE=4 jig test perf` on a slow machine.
+
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
 
 ```
