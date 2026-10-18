@@ -1,5 +1,7 @@
 //! Custom build commands and tests, which run a command.
 
+use std::collections::{BTreeMap, HashSet};
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
@@ -235,8 +237,7 @@ impl Project {
     }
     /// Add a custom build command or a test, unless one of the same kind has the same name.
     pub(super) fn add_custom(&mut self, custom: Custom) -> bool {
-        let previous = self.customs.iter().find(|previous| previous.name == custom.name && previous.is_test() == custom.is_test());
-        if let Some(previous) = previous {
+        if let Some(previous) = self.custom(&custom.name, custom.is_test()) {
             let previous = previous.name_span;
             self.diagnostics.push(Diagnostic {
                 span: Some(custom.name_span),
@@ -249,8 +250,30 @@ impl Project {
             });
             return false;
         }
+        let index = if custom.is_test() { &mut self.tests_idx } else { &mut self.commands_idx };
+        index.insert(custom.name.clone(), self.customs.len());
         self.customs.push(custom);
         true
+    }
+    /// Returns the custom command, or the test if `test`, with a name.
+    pub(super) fn custom(&self, name: &str, test: bool) -> Option<&Custom> {
+        let index = if test { &self.tests_idx } else { &self.commands_idx };
+        index.get(name).map(|&index| &self.customs[index])
+    }
+    /// Remove custom commands and tests, given by their indices in `customs`.
+    pub(super) fn remove_customs(&mut self, removed: &[usize]) {
+        let removed: HashSet<_> = removed.iter().copied().collect();
+        let mut index = 0;
+        self.customs.retain(|_| {
+            index += 1;
+            !removed.contains(&(index - 1))
+        });
+        self.commands_idx.clear();
+        self.tests_idx.clear();
+        for (index, custom) in self.customs.iter().enumerate() {
+            let indices = if custom.is_test() { &mut self.tests_idx } else { &mut self.commands_idx };
+            indices.insert(custom.name.clone(), index);
+        }
     }
     /// Take the paths of an `input` or `output` attribute, which are expressions separated by spaces, each a path or a
     /// list of them.
@@ -327,6 +350,9 @@ impl Project {
     }
     /// Report the outputs of custom commands which are, or are within or contain, the output of a crate or of another
     /// custom command, which ninja would build twice, or in place of a directory.
+    ///
+    /// The outputs are kept in order of their paths as well, in which the paths within a path come directly after it, so
+    /// that each is compared with its ancestors and the paths after it, rather than with every other output.
     pub(super) fn check_outputs(&mut self) {
         let mut owned = Vec::new();
         for key in self.crate_keys() {
@@ -340,13 +366,23 @@ impl Project {
                 owned.push(Output { path, item: Item::Crate, name: name.clone(), span: c.name_span });
             }
         }
+        // the first output with each path, by index in `owned`
+        let mut sorted = BTreeMap::new();
+        for (index, output) in owned.iter().enumerate() {
+            sorted.entry(output.path.clone()).or_insert(index);
+        }
         for custom in &self.customs {
             let CustomKind::Command { outputs, .. } = &custom.kind else {
                 continue;
             };
             for path in outputs {
-                let other = owned.iter().find(|other| path.starts_with(&other.path) || other.path.starts_with(path));
-                if let Some(other) = other {
+                // of the outputs it overlaps, the one which was owned first is reported
+                let within = path.ancestors().filter_map(|ancestor| sorted.get(ancestor));
+                let containing = sorted.range::<Path, _>((Bound::Excluded(path.as_path()), Bound::Unbounded))
+                    .take_while(|(other, _)| other.starts_with(path))
+                    .map(|(_, index)| index);
+                if let Some(&index) = within.chain(containing).min() {
+                    let other = &owned[index];
                     self.diagnostics.push(Diagnostic {
                         span: Some(custom.name_span),
                         message: Message::OverlappingOutput {
@@ -360,6 +396,7 @@ impl Project {
                     });
                     continue;
                 }
+                sorted.insert(path.clone(), owned.len());
                 owned.push(Output { path: path.clone(), item: Item::CustomCommand, name: custom.name.clone(), span: custom.name_span });
             }
         }

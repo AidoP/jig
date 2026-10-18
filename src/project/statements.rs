@@ -267,10 +267,7 @@ impl Project {
         };
         let location = location
             .or_else(|| self.target(name).and_then(|target| target.declaration()))
-            .or_else(|| {
-                let test = self.customs.iter().find(|test| test.is_test() && test.name == name);
-                test.map(|test| test.name_span)
-            });
+            .or_else(|| self.custom(name, true).map(|test| test.name_span));
         if location.is_some() {
             return location;
         }

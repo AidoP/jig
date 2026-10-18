@@ -65,6 +65,10 @@ pub struct Project {
     pub crates: HashMap<(String, String), rust::Crate>,
     /// Custom build commands, in the order they were declared.
     pub customs: Vec<Custom>,
+    /// The indices in `customs` of the custom commands, by name.
+    commands_idx: HashMap<String, usize>,
+    /// The indices in `customs` of the tests, by name, which are separate from those of the custom commands.
+    tests_idx: HashMap<String, usize>,
     /// The runners of targets, which targets and tests refer to by index.
     pub runners: Vec<Runner>,
     /// Whether the host can run what is built for each target which has been probed.
@@ -92,6 +96,8 @@ impl Project {
             targets_listed: false,
             crates: HashMap::new(),
             customs: Vec::new(),
+            commands_idx: HashMap::new(),
+            tests_idx: HashMap::new(),
             runners: Vec::new(),
             toolchain: None,
             can_run: HashMap::new(),

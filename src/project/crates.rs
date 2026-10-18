@@ -333,6 +333,8 @@ impl Project {
     /// what is built for it, and the others are removed.
     pub(super) fn add_crate_tests(&mut self) {
         let host = self.host();
+        // removed once the others are complete, so that the indices of the others stay the same until then
+        let mut removed = Vec::new();
         for key in self.crate_keys() {
             let c = &self.crates[&key];
             if !c.test {
@@ -342,8 +344,9 @@ impl Project {
             let span = c.name_span;
             let target_span = c.target_span;
             // the test which was forward declared, unless another had its name
-            let declared = self.customs.iter().position(|test| {
-                test.is_test() && test.name == name && (test.name_span.file, test.name_span.offset) == (span.file, span.offset)
+            let declared = self.tests_idx.get(&name).copied().filter(|&index| {
+                let test = &self.customs[index];
+                (test.name_span.file, test.name_span.offset) == (span.file, span.offset)
             });
             let target = c.target.clone();
             let runner = match self.target(&target).map(|target| target.runner) {
@@ -359,15 +362,16 @@ impl Project {
                     });
                     // nor is its harness built
                     self.crates.get_mut(&key).unwrap().test = false;
-                    if let Some(declared) = declared {
-                        self.customs.remove(declared);
-                    }
+                    removed.extend(declared);
                     continue;
                 },
             };
             if let Some(declared) = declared {
                 self.customs[declared].kind = CustomKind::Test { runner };
             }
+        }
+        if !removed.is_empty() {
+            self.remove_customs(&removed);
         }
     }
 }
