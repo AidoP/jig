@@ -36,7 +36,7 @@ pub struct Project {
     pub dependencies: Vec<PathBuf>,
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
-    files_idx: HashMap<PathBuf, usize>,
+    files_idx: HashMap<FileId, usize>,
     properties: Vec<Option<Property>>,
     properties_idx: HashMap<String, usize>,
     values: Vec<Value>,
@@ -111,9 +111,14 @@ impl Project {
     /// Returns the index of the file if it has already been processed.
     pub fn parse(&mut self, file: File) -> Option<usize> {
         let idx = self.files.len();
-        // a file can be referred to by many paths, so identify it by its canonical path
-        let path = std::fs::canonicalize(&file.path).unwrap_or_else(|_| file.path.clone());
-        match self.files_idx.entry(path) {
+        // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
+        // rather than reading every symbolic link in its path, as finding its canonical path would
+        use std::os::unix::fs::MetadataExt;
+        let id = match std::fs::metadata(&file.path) {
+            Ok(metadata) => FileId::Inode { dev: metadata.dev(), ino: metadata.ino() },
+            Err(_) => FileId::Path(file.path.clone()),
+        };
+        match self.files_idx.entry(id) {
             Entry::Occupied(entry) => return Some(*entry.get()),
             Entry::Vacant(entry) => entry.insert(idx),
         };
@@ -334,6 +339,40 @@ fn normalize(path: &Path) -> PathBuf {
         normal.push(".");
     }
     normal
+}
+
+/// What identifies a file which has been used, however its path was written.
+#[derive(PartialEq, Eq, Hash)]
+enum FileId {
+    Inode { dev: u64, ino: u64 },
+    /// The path of a file whose metadata could not be read.
+    Path(PathBuf),
+}
+
+/// Returns a path with its `.` components removed, and each `..` resolved where it follows a directory which is not a
+/// symbolic link, so that it still names the same file, and does not grow with each `..` in a chain of paths.
+///
+/// A `..` after a symbolic link leaves the directory the link points to, rather than the one containing the link, so it
+/// is kept, as is one after a path which does not exist, which would fail to be read.
+fn resolve_parents(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => (),
+            Component::ParentDir
+                if matches!(resolved.components().next_back(), Some(Component::Normal(_)))
+                    && resolved.symlink_metadata().is_ok_and(|metadata| metadata.is_dir()) =>
+            {
+                resolved.pop();
+            },
+            component => resolved.push(component),
+        }
+    }
+    if resolved.as_os_str().is_empty() {
+        resolved.push(".");
+    }
+    resolved
 }
 
 pub struct File {
