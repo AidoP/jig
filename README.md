@@ -110,9 +110,13 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `use <path>`: start processing the `Jig` file in the directory at `<path>`, unless it has already been processed.
   With the `file` attribute, `<path>` is the file itself, of any name. A file which uses itself, directly or through
   other files, raises a warning
-- `use profile/<name>`: set the codegen options of a builtin profile, `release` or `debug`, each time it is used, unlike
-  a file. Like any other `set`, the options apply to the crates declared after it, and can be set again after it. The
-  name can be computed, as in `use profile/{profile}`. See below
+- `use <name>`: process a builtin file, which is part of jig, written as a name rather than a path, each time it is
+  used, unlike a file. The name can be computed, as in `use profile/{profile}`. The builtin files are:
+  - `profile/<name>`: set the codegen options of a builtin profile, `release` or `debug`. Like any other `set`, the
+    options apply to the crates declared after it, and can be set again after it. See below
+  - `msrv`: report a fatal error, `msrv`, if rustc is older than the minimum supported Rust version, the
+    `rust-version` property, which must be set before it. A version is compared as by `semver-compatible`, ignoring
+    pre-releases, so a nightly toolchain meets the version of its release
 - `declare <name>`: define a property that can be used for substitution
 - `set <name> <value>`: assign a value to a property
 - `crate <name> [<path>]`: introduce a Rust library crate named `<name>`, with its root at `<path>`, or at
@@ -132,6 +136,9 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
   of every test with `jig build test`
 
 ```
+set rust-version '1.95.0'
+use msrv
+
 use 'local.jig'
     file
 
@@ -622,6 +629,8 @@ target bluemetal-riscv64
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
+- `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no
+  value until it is set
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set

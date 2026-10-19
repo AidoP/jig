@@ -216,6 +216,10 @@ fn declare_builtins(
         let id = project.declare(name.clone(), Some(property));
         project.set(name, project::Value::new(id, value));
     }
+    // the minimum supported Rust version has no value unless the project sets it
+    let rust_version = project::Property::new("rust-version".into(), project::Type::String)
+        .info("the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc");
+    project.declare("rust-version".into(), Some(rust_version));
     project.declare_codegen_options();
     project.declare_diagnostic_overrides();
 }

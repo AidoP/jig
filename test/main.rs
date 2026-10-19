@@ -3039,8 +3039,8 @@ log note codegen/
 }
 
 #[test]
-fn profile_errors() {
-    let project = Project::new("profile-errors", &[("Jig", "\
+fn builtin_errors() {
+    let project = Project::new("builtin-errors", &[("Jig", "\
 use profile/relase
 use profile/fast
 use other/release
@@ -3048,11 +3048,40 @@ use profile/debug
     file
 ")]);
     project.configure().failed()
-        .stderr("error[unknown-profile]: unknown profile \"relase\", did you mean \"release\"?\n --> Jig:1:5")
-        .stderr("error[unknown-profile]: unknown profile \"fast\"\n --> Jig:2:5")
-        .stderr("error[expected-path]: expected path\n --> Jig:3:5")
+        .stderr("error[unknown-builtin]: unknown builtin file \"profile/relase\", did you mean \"profile/release\"?\n --> Jig:1:5")
+        .stderr("error[unknown-builtin]: unknown builtin file \"profile/fast\"\n --> Jig:2:5")
+        .stderr("error[unknown-builtin]: unknown builtin file \"other/release\"\n --> Jig:3:5")
         .stderr("error[unknown-attribute]: unknown use attribute \"file\"\n --> Jig:5:5")
         .stderr("configuration failed with 4 errors");
+}
+
+#[test]
+fn msrv() {
+    let project = Project::new("msrv", &[("Jig", "\
+set rust-version '1.0'
+use msrv
+log note 'supported'
+    quiet
+")]);
+    project.configure().ok().stderr("note: supported\n");
+
+    // a later version is fatal, so nothing after it is processed
+    let project = Project::new("msrv-unsupported", &[("Jig", "\
+set rust-version '1000.0.0'
+use msrv
+log note 'unreachable'
+")]);
+    let output = project.configure().failed();
+    let version = output.stderr.split("Rust version ").nth(1).unwrap().split(':').next().unwrap().to_string();
+    output
+        .stderr(&format!("fatal[msrv]: unsupported Rust version {version}: minimum required is 1000.0.0\n"))
+        .stderr("configuration failed with 1 error");
+    assert!(!output.stderr.contains("unreachable"), "{}", output.stderr);
+
+    let project = Project::new("msrv-unset", &[("Jig", "use msrv\n")]);
+    project.configure().failed()
+        .stderr("error[msrv]: `use msrv` needs `rust-version` to be set before it\n")
+        .stderr("configuration failed with 1 error");
 }
 
 #[test]

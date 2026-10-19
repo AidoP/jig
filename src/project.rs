@@ -399,7 +399,7 @@ pub struct File {
     active: bool,
     /// The `use` statement which caused the file to be processed.
     used: Option<Span>,
-    /// Whether the file is part of jig, as a profile is, rather than on disk.
+    /// Whether the file is part of jig, as `msrv` and the profiles are, rather than on disk.
     pub builtin: bool,
 }
 impl File {
@@ -411,17 +411,18 @@ impl File {
     pub fn new(path: PathBuf, data: String) -> Self {
         Self { data, path, locals: HashMap::new(), active: false, used: None, builtin: false }
     }
-    /// The builtin profile with the name, `profile/<name>`, if there is one.
-    pub fn profile(name: &str) -> Option<Self> {
-        let data = PROFILES.iter().find(|(profile, _)| *profile == name)?.1;
-        Some(Self { builtin: true, ..Self::new(format!("profile/{name}").into(), data.into()) })
+    /// The builtin file with the name, such as `msrv` or `profile/<name>`, if there is one.
+    pub fn builtin(name: &str) -> Option<Self> {
+        let data = BUILTINS.iter().find(|(builtin, _)| *builtin == name)?.1;
+        Some(Self { builtin: true, ..Self::new(name.into(), data.into()) })
     }
 }
 
-/// The builtin profiles, which are used as `profile/<name>`, by name.
-pub const PROFILES: &[(&str, &str)] = &[
-    ("debug", include_str!("project/profile/debug.jig")),
-    ("release", include_str!("project/profile/release.jig")),
+/// The builtin files, which are used by name, as `use <name>`, rather than by path.
+pub const BUILTINS: &[(&str, &str)] = &[
+    ("msrv", include_str!("project/builtin/msrv.jig")),
+    ("profile/debug", include_str!("project/builtin/profile/debug.jig")),
+    ("profile/release", include_str!("project/builtin/profile/release.jig")),
 ];
 
 impl File {

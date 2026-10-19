@@ -6,7 +6,7 @@ use super::diagnostic::{Diagnostic, Message, Severity, suggest};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{File, PROFILES, Project, resolve_parents};
+use super::{BUILTINS, File, Project, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -141,9 +141,9 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        // a builtin profile is a name, rather than a path
+        // a builtin file is a name, rather than a path
         if parser.peek() != Some('\'') {
-            self.parse_use_profile(parser);
+            self.parse_use_builtin(parser);
             return;
         }
         let Some((mut path, span)) = self.parse_path(parser) else {
@@ -186,8 +186,8 @@ impl Project {
             },
         };
     }
-    /// Take a `use` of a builtin profile, `profile/<name>`, after the keyword.
-    fn parse_use_profile(&mut self, parser: &mut Parser) {
+    /// Take a `use` of a builtin file, such as `msrv` or `profile/<name>`, after the keyword.
+    fn parse_use_builtin(&mut self, parser: &mut Parser) {
         let Some(Name { name, span, .. }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
@@ -198,21 +198,17 @@ impl Project {
         while let Some(attribute) = self.next_attribute(parser, &[]) {
             self.unknown_attribute("use", attribute.name, attribute.name_span);
         }
-        let Some(profile) = name.strip_prefix("profile/") else {
-            self.diagnostics.push(Diagnostic { span: Some(span), message: Message::ExpectedPath, severity: Severity::Error });
-            return;
-        };
-        let Some(mut file) = File::profile(profile) else {
-            let names: Vec<String> = PROFILES.iter().map(|(name, _)| (*name).into()).collect();
+        let Some(mut file) = File::builtin(&name) else {
+            let names: Vec<String> = BUILTINS.iter().map(|(name, _)| (*name).into()).collect();
             self.diagnostics.push(Diagnostic {
                 span: Some(span),
-                message: Message::UnknownProfile { profile: profile.into(), suggestion: suggest(profile, &names) },
+                message: Message::UnknownBuiltin { suggestion: suggest(&name, &names), name },
                 severity: Severity::Error,
             });
             return;
         };
         file.used = Some(span);
-        // a profile is applied again each time it is used, replacing what was set since
+        // a builtin file is processed again each time it is used, so a profile replaces what was set since
         self.parse(file);
     }
     fn parse_log(&mut self, parser: &mut Parser) {

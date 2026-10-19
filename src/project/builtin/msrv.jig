@@ -1,0 +1,9 @@
+# the minimum supported Rust version, `rust-version`, which rustc must meet
+@if !defined(rust-version)
+log error '`use msrv` needs `rust-version` to be set before it'
+    id 'msrv'
+    quiet
+@else-if !semver-compatible(rustc/version, rust-version, ignore-pre-release: true)
+log fatal 'unsupported Rust version {rustc/version}: minimum required is {rust-version}'
+    id 'msrv'
+    quiet

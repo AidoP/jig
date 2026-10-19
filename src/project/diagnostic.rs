@@ -167,7 +167,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "other-jig",
     "unknown-target",
     "mismatched-type",
-    "unknown-profile",
+    "unknown-builtin",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -408,9 +408,9 @@ pub enum Message {
         value: usize,
         name: String,
     },
-    /// The profile of a `use` statement, `profile/<name>`, which is not builtin.
-    UnknownProfile {
-        profile: String,
+    /// The name of a builtin file used by a `use` statement, which there is none of.
+    UnknownBuiltin {
+        name: String,
         suggestion: Option<String>,
     },
 }
@@ -565,9 +565,9 @@ impl core::fmt::Display for Message {
                 Ok(())
             },
             Self::MismatchedType { name, .. } => write!(f, "invalid data type for property {name:?}"),
-            Self::UnknownProfile { profile, suggestion: None } => write!(f, "unknown profile {profile:?}"),
-            Self::UnknownProfile { profile, suggestion: Some(suggestion) } => {
-                write!(f, "unknown profile {profile:?}, did you mean {suggestion:?}?")
+            Self::UnknownBuiltin { name, suggestion: None } => write!(f, "unknown builtin file {name:?}"),
+            Self::UnknownBuiltin { name, suggestion: Some(suggestion) } => {
+                write!(f, "unknown builtin file {name:?}, did you mean {suggestion:?}?")
             },
         }
     }
@@ -688,7 +688,7 @@ impl Message {
             Self::UnknownTarget { .. } => "unknown-target",
             Self::AvailableTargets { .. } => "available-targets",
             Self::MismatchedType { .. } => "mismatched-type",
-            Self::UnknownProfile { .. } => "unknown-profile",
+            Self::UnknownBuiltin { .. } => "unknown-builtin",
         }
     }
     /// Whether the message is part of the diagnostic before it, as a suggestion or note about it, so that it has the
