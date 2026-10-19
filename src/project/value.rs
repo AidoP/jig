@@ -35,6 +35,8 @@ pub(super) enum Referent {
     Custom(String),
     /// Only paths, such as the inputs and outputs of a custom command while it is read.
     Paths,
+    /// A builtin file, such as `msrv`, by its name, which `use` processes.
+    Builtin(String),
 }
 impl Data {
     /// Returns the name of the type as used by `declare`.
@@ -148,8 +150,11 @@ impl Data {
 }
 
 impl Ref {
-    /// The paths, as strings.
+    /// The paths, as strings, or the name of a builtin file, which has no path.
     fn strings(&self) -> Vec<String> {
+        if let Referent::Builtin(name) = &self.referent {
+            return vec![name.clone()];
+        }
         let mut strings = Vec::new();
         for path in &self.paths {
             strings.push(path.display().to_string());

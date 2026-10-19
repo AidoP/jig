@@ -107,16 +107,19 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 
 ### Statements
 
-- `use <path>`: start processing the `Jig` file in the directory at `<path>`, unless it has already been processed.
-  With the `file` attribute, `<path>` is the file itself, of any name. A file which uses itself, directly or through
-  other files, raises a warning
-- `use <name>`: process a builtin file, which is part of jig, written as a name rather than a path, each time it is
-  used, unlike a file. The name can be computed, as in `use profile/{profile}`. The builtin files are:
-  - `profile/<name>`: set the codegen options of a builtin profile, `release` or `debug`. Like any other `set`, the
-    options apply to the crates declared after it, and can be set again after it. See below
-  - `msrv`: report a fatal error, `msrv`, if rustc is older than the minimum supported Rust version, the
-    `rust-version` property, which must be set before it. A version is compared as by `semver-compatible`, ignoring
-    pre-releases, so a nightly toolchain meets the version of its release
+- `use <expression>`: start processing a file, which is one of:
+  - a path, as a `str`, to the `Jig` file in the directory at the path, unless it has already been processed. The path
+    is relative to the file, or to the project root if it starts with `/`. With the `file` attribute, the path is to
+    the file itself, of any name. A file which uses itself, directly or through other files, raises a warning
+  - a builtin file, which is part of jig, and is processed each time it is used. Each is a read-only builtin property
+    with its name, whose value is a reference to it, of type `'ref'`, which is its name where a string is needed. So
+    `profile/` is a dict of the profiles, and a profile can be chosen as `use profile/{name}` or
+    `use get(profile/, name)`. The builtin files are:
+    - `profile/<name>`: set the codegen options of a builtin profile, `release` or `debug`. Like any other `set`, the
+      options apply to the crates declared after it, and can be set again after it. See below
+    - `msrv`: report a fatal error, `msrv`, if rustc is older than the minimum supported Rust version, the
+      `rust-version` property, which must be set before it. A version is compared as by `semver-compatible`, ignoring
+      pre-releases, so a nightly toolchain meets the version of its release
 - `declare <name>`: define a property that can be used for substitution
 - `set <name> <value>`: assign a value to a property
 - `crate <name> [<path>]`: introduce a Rust library crate named `<name>`, with its root at `<path>`, or at
@@ -629,6 +632,7 @@ target bluemetal-riscv64
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
+- `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no
   value until it is set
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only

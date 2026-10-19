@@ -3039,20 +3039,49 @@ log note codegen/
 }
 
 #[test]
+fn use_expressions() {
+    let project = Project::new("use-expressions", &[
+        ("Jig", "\
+declare dir
+    default 'sub'
+declare profile
+    default 'debug'
+use dir
+use '/{dir}/other.jig'
+    file
+use get(profile/, profile)
+log note codegen/opt-level
+use profile/{'release'}
+log note codegen/opt-level
+log note '{msrv} {keys(profile/)} {msrv.type} {msrv.read-only}'
+"),
+        ("sub/Jig", "log note 'sub'\n    quiet\n"),
+        ("sub/other.jig", "log note 'other'\n    quiet\n"),
+    ]);
+    project.configure().ok()
+        .stderr("note: sub\nnote: other\n")
+        .stderr("note: 0\n")
+        .stderr("note: 3\n")
+        .stderr("note: msrv debug release ref true\n");
+}
+
+#[test]
 fn builtin_errors() {
     let project = Project::new("builtin-errors", &[("Jig", "\
 use profile/relase
-use profile/fast
 use other/release
+use 3
 use profile/debug
     file
+set msrv 'msrv'
 ")]);
     project.configure().failed()
-        .stderr("error[unknown-builtin]: unknown builtin file \"profile/relase\", did you mean \"profile/release\"?\n --> Jig:1:5")
-        .stderr("error[unknown-builtin]: unknown builtin file \"profile/fast\"\n --> Jig:2:5")
-        .stderr("error[unknown-builtin]: unknown builtin file \"other/release\"\n --> Jig:3:5")
-        .stderr("error[unknown-attribute]: unknown use attribute \"file\"\n --> Jig:5:5")
-        .stderr("configuration failed with 4 errors");
+        .stderr("error[undeclared-property]: property \"profile/relase\" is undeclared\n --> Jig:1:5")
+        .stderr("error[invalid-target]: `other` is not a valid target\n --> Jig:2:5")
+        .stderr("error[invalid-operand]: unsigned value used where str or builtin file is required\n --> Jig:3:5")
+        .stderr("error[builtin-file]: the builtin file \"profile/debug\" is not a path, so it cannot have `file`\n --> Jig:4:5")
+        .stderr("error[read-only-property]: cannot set read-only builtin property \"msrv\"\n --> Jig:6:5")
+        .stderr("configuration failed with 5 errors");
 }
 
 #[test]

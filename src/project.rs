@@ -25,6 +25,8 @@ pub use syntax::Span;
 pub use targets::{Field, Target, TargetKind};
 pub use value::{Data, Property, Type, Value};
 
+use value::Ref;
+
 use customs::{Custom, Runner};
 
 pub struct Project {
@@ -133,6 +135,17 @@ impl Project {
         self.parse_file(idx);
         self.files[idx].active = false;
         None
+    }
+    /// Declare the read-only property of each builtin file, such as `msrv` or `profile/release`, whose value is a
+    /// reference to it, which `use` processes.
+    pub fn declare_builtin_files(&mut self) {
+        for (name, _) in BUILTINS {
+            let info = format!("the builtin file `{name}`, which `use {name}` processes");
+            let property = Property::new((*name).into(), Type::Ref).info(&info).read_only();
+            let id = self.declare((*name).into(), Some(property));
+            let reference = Ref { referent: value::Referent::Builtin((*name).into()), paths: Vec::new() };
+            self.set((*name).into(), Value::new(id, Data::Ref(reference)));
+        }
     }
     /// Declare a property, returning its ID.
     ///

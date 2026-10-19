@@ -27,12 +27,20 @@ impl Project {
             _ if let Some(target) = self.target_of_codegen_option(name) => {
                 Message::UnknownTarget { suggestion: suggest(target, &self.builtin_targets()), target: target.into() }
             },
+            // a property in a namespace of properties, such as `profile/<name>`, rather than of crates
+            Some((prefix, _)) if self.target(prefix).is_none() && self.is_property_namespace(prefix) => {
+                Message::UndeclaredProperty(name.into())
+            },
             Some((target, _)) if self.target(target).is_none() => Message::InvalidTarget(target.into()),
             Some((target, crate_name)) => Message::UnknownCrate { name: crate_name.into(), target: target.into() },
             None => Message::UnsetProperty(name.into()),
         };
         self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
         None
+    }
+    /// Whether a property named `<prefix>/<name>` has been declared.
+    fn is_property_namespace(&self, prefix: &str) -> bool {
+        self.properties_idx.keys().any(|name| name.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/')))
     }
     /// Returns the properties named `<prefix>/<name>` which are set where `span` is, as a dict of their values by
     /// `<name>`, which may itself contain `/`.

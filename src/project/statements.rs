@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use super::diagnostic::{Diagnostic, Message, Severity, suggest};
+use super::diagnostic::{Diagnostic, Message, Severity};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{BUILTINS, File, Project, resolve_parents};
+use super::{File, Project, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -141,12 +141,7 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        // a builtin file is a name, rather than a path
-        if parser.peek() != Some('\'') {
-            self.parse_use_builtin(parser);
-            return;
-        }
-        let Some((mut path, span)) = self.parse_path(parser) else {
+        let Some(operand) = self.parse_expression(parser) else {
             parser.skip_statement();
             return;
         };
@@ -161,6 +156,32 @@ impl Project {
                 name => self.unknown_attribute("use", name, attribute.name_span),
             }
         }
+        let span = operand.span;
+        let mut path = match &operand.data {
+            Data::Str(path) => match path.strip_prefix('/') {
+                Some(path) => self.root.join(path),
+                None => self.file(parser.file).relative_path(path),
+            },
+            // a builtin file, such as `msrv` or `profile/<name>`, is processed again each time it is used, so a
+            // profile replaces what was set since
+            Data::Ref(Ref { referent: Referent::Builtin(name), .. }) => {
+                if file {
+                    self.diagnostics.push(Diagnostic {
+                        span: Some(span),
+                        message: Message::BuiltinFile(name.clone()),
+                        severity: Severity::Error,
+                    });
+                }
+                let mut builtin = File::builtin(name).expect("a builtin property refers to a builtin file");
+                builtin.used = Some(span);
+                self.parse(builtin);
+                return;
+            },
+            _ => {
+                self.invalid_operand(&operand, "str or builtin file", false);
+                return;
+            },
+        };
         if !file {
             path = path.join("Jig");
         }
@@ -185,31 +206,6 @@ impl Project {
                 });
             },
         };
-    }
-    /// Take a `use` of a builtin file, such as `msrv` or `profile/<name>`, after the keyword.
-    fn parse_use_builtin(&mut self, parser: &mut Parser) {
-        let Some(Name { name, span, .. }) = self.parse_name(parser) else {
-            parser.skip_statement();
-            return;
-        };
-        if !self.parse_line_end(parser) {
-            parser.skip_statement();
-        }
-        while let Some(attribute) = self.next_attribute(parser, &[]) {
-            self.unknown_attribute("use", attribute.name, attribute.name_span);
-        }
-        let Some(mut file) = File::builtin(&name) else {
-            let names: Vec<String> = BUILTINS.iter().map(|(name, _)| (*name).into()).collect();
-            self.diagnostics.push(Diagnostic {
-                span: Some(span),
-                message: Message::UnknownBuiltin { suggestion: suggest(&name, &names), name },
-                severity: Severity::Error,
-            });
-            return;
-        };
-        file.used = Some(span);
-        // a builtin file is processed again each time it is used, so a profile replaces what was set since
-        self.parse(file);
     }
     fn parse_log(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
