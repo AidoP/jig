@@ -1,6 +1,6 @@
 //! Declaring properties and giving them values.
 
-use super::diagnostic::{Diagnostic, Item, Message, Severity, severity_override};
+use super::diagnostic::{Diagnostic, Item, Message, Severity, severity_override, suggest};
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Coercion, Data, Operand, Property, Ref, Type, Value};
@@ -281,6 +281,24 @@ impl Project {
         // the value is not a property's, so it has no declaration
         let id = self.push_value(Value { property: usize::MAX, span: None, data, data_span: None, origin: None, local: true });
         self.files[file].locals.insert(name.into(), id);
+    }
+    /// The diagnostic message of a property which is undeclared, suggesting the declared property in the same
+    /// namespace whose name after it is closest, so that a long namespace does not make any name close enough.
+    pub(super) fn undeclared_property(&self, name: &str) -> Message {
+        let (namespace, rest) = name.rsplit_once('/').map_or(("", name), |(namespace, rest)| (namespace, rest));
+        let declared: Vec<String> = self.properties.iter()
+            .flatten()
+            .filter_map(|property| match property.name.rsplit_once('/') {
+                Some((other, rest)) if other == namespace => Some(rest.into()),
+                None if namespace.is_empty() => Some(property.name.clone()),
+                _ => None,
+            })
+            .collect();
+        let suggestion = suggest(rest, &declared).map(|rest| match namespace {
+            "" => rest,
+            namespace => format!("{namespace}/{rest}"),
+        });
+        Message::UndeclaredProperty { suggestion, name: name.into() }
     }
     /// Returns the value of a property referenced by an expression, and where the value was set.
     pub(super) fn property(&mut self, name: &str, span: Span) -> Option<Operand> {

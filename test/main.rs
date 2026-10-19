@@ -3066,6 +3066,25 @@ log note '{msrv} {keys(profile/)} {msrv.type} {msrv.read-only}'
 }
 
 #[test]
+fn undeclared_property_suggestions() {
+    let project = Project::new("undeclared-property-suggestions", &[("Jig", "\
+declare release-target
+    default 'x'
+set relase-target 'y'
+log note select(release-targte)
+log note profile/debg
+log note diagnostic/no-such-thing
+")]);
+    project.configure().failed()
+        // in the same namespace, comparing only the rest of the name
+        .stderr("error[undeclared-property]: property \"profile/debg\" is undeclared, did you mean \"profile/debug\"?\n --> Jig:5:10")
+        .stderr("error[undeclared-property]: property \"diagnostic/no-such-thing\" is undeclared\n --> Jig:6:10")
+        .stderr("error[undeclared-property]: property \"release-targte\" is undeclared, did you mean \"release-target\"?\n --> Jig:4:17")
+        // a value set but never declared, which is reported at the end
+        .stderr("error[undeclared-property]: property \"relase-target\" is undeclared, did you mean \"release-target\"?\n --> Jig:3:5");
+}
+
+#[test]
 fn builtin_errors() {
     let project = Project::new("builtin-errors", &[("Jig", "\
 use profile/relase
@@ -3076,7 +3095,7 @@ use profile/debug
 set msrv 'msrv'
 ")]);
     project.configure().failed()
-        .stderr("error[undeclared-property]: property \"profile/relase\" is undeclared\n --> Jig:1:5")
+        .stderr("error[undeclared-property]: property \"profile/relase\" is undeclared, did you mean \"profile/release\"?\n --> Jig:1:5")
         .stderr("error[invalid-target]: `other` is not a valid target\n --> Jig:2:5")
         .stderr("error[invalid-operand]: unsigned value used where str or builtin file is required\n --> Jig:3:5")
         .stderr("error[builtin-file]: the builtin file \"profile/debug\" is not a path, so it cannot have `file`\n --> Jig:4:5")
@@ -3133,7 +3152,7 @@ crate other 'other.rs'
         .stderr("error[unset-property]: no value for property \"codegen/debuginfo\"\n --> Jig:5:10")
         .stderr("error[unknown-crate-attribute]: unknown crate attribute \"codegen/opt-levl\"\n --> Jig:7:5")
         .stderr("error[invalid-operand]: list value used where str is required\n --> Jig:8:23")
-        .stderr("error[undeclared-property]: property \"codegen/opt-levl\" is undeclared\n --> Jig:4:5")
+        .stderr("error[undeclared-property]: property \"codegen/opt-levl\" is undeclared, did you mean \"codegen/opt-level\"?\n --> Jig:4:5")
         // the properties are in effect for the second crate too
         .stderr("configuration failed with 8 errors");
 }

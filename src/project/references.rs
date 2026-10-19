@@ -29,7 +29,7 @@ impl Project {
             },
             // a property in a namespace of properties, such as `profile/<name>`, rather than of crates
             Some((prefix, _)) if self.target(prefix).is_none() && self.is_property_namespace(prefix) => {
-                Message::UndeclaredProperty(name.into())
+                self.undeclared_property(name)
             },
             Some((target, _)) if self.target(target).is_none() => Message::InvalidTarget(target.into()),
             Some((target, crate_name)) => Message::UnknownCrate { name: crate_name.into(), target: target.into() },

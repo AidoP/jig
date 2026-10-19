@@ -307,7 +307,7 @@ impl Project {
                     let suggestion = diagnostic::suggest(target, &self.builtin_targets());
                     Message::UnknownTarget { target: target.into(), suggestion }
                 },
-                None => Message::UndeclaredProperty(name),
+                None => self.undeclared_property(&name),
             };
             self.diagnostics.push(Diagnostic { span: self.values[value].span, message, severity: Severity::Error });
         }

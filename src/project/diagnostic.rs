@@ -254,7 +254,11 @@ pub enum Message {
         file: usize,
     },
     ExpectedExact(&'static str),
-    UndeclaredProperty(String),
+    UndeclaredProperty {
+        name: String,
+        /// The declared property with the closest name, if any is close enough.
+        suggestion: Option<String>,
+    },
     RedeclareProperty {
         id: usize,
         name: String,
@@ -469,7 +473,10 @@ impl core::fmt::Display for Message {
             Self::ExpectedExact(s) => write!(f, "expected {s:?}"),
             Self::RepeatedUse { path, .. } => write!(f, "file {path:?} is already used"),
             Self::ReadFailure(path, error) => write!(f, "failed to read {path:?}: {error}"),
-            Self::UndeclaredProperty(name) => write!(f, "property {name:?} is undeclared"),
+            Self::UndeclaredProperty { name, suggestion: None } => write!(f, "property {name:?} is undeclared"),
+            Self::UndeclaredProperty { name, suggestion: Some(suggestion) } => {
+                write!(f, "property {name:?} is undeclared, did you mean {suggestion:?}?")
+            },
             Self::RedeclareProperty { name, builtin: false, .. } => write!(f, "redeclaration of property {name:?}"),
             Self::RedeclareProperty { name, builtin: true, .. } => write!(f, "redeclaration of builtin property {name:?}"),
             Self::ReadOnlyProperty { name, builtin: false, .. } => write!(f, "cannot set read-only property {name:?}"),

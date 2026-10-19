@@ -763,7 +763,7 @@ impl Project {
         }
         self.diagnostics.push(Diagnostic {
             span: Some(span),
-            message: Message::UndeclaredProperty(name.into()),
+            message: self.undeclared_property(name),
             severity: Severity::Error,
         });
         Err(())
