@@ -212,7 +212,7 @@ impl Project {
             return;
         };
         file.used = Some(span);
-        // a profile cannot use itself, so using it again does nothing
+        // a profile is applied again each time it is used, replacing what was set since
         self.parse(file);
     }
     fn parse_log(&mut self, parser: &mut Parser) {

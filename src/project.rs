@@ -117,15 +117,17 @@ impl Project {
         // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
         // rather than reading every symbolic link in its path, as finding its canonical path would
         use std::os::unix::fs::MetadataExt;
-        let id = match std::fs::metadata(&file.path) {
-            _ if file.builtin => FileId::Builtin(file.path.clone()),
-            Ok(metadata) => FileId::Inode { dev: metadata.dev(), ino: metadata.ino() },
-            Err(_) => FileId::Path(file.path.clone()),
-        };
-        match self.files_idx.entry(id) {
-            Entry::Occupied(entry) => return Some(*entry.get()),
-            Entry::Vacant(entry) => entry.insert(idx),
-        };
+        // a builtin file, such as a profile, is processed each time it is used
+        if !file.builtin {
+            let id = match std::fs::metadata(&file.path) {
+                Ok(metadata) => FileId::Inode { dev: metadata.dev(), ino: metadata.ino() },
+                Err(_) => FileId::Path(file.path.clone()),
+            };
+            match self.files_idx.entry(id) {
+                Entry::Occupied(entry) => return Some(*entry.get()),
+                Entry::Vacant(entry) => entry.insert(idx),
+            };
+        }
         self.files.push(file);
         self.files[idx].active = true;
         self.parse_file(idx);
@@ -361,8 +363,6 @@ enum FileId {
     Inode { dev: u64, ino: u64 },
     /// The path of a file whose metadata could not be read.
     Path(PathBuf),
-    /// The path of a file which is part of jig, rather than on disk.
-    Builtin(PathBuf),
 }
 
 /// Returns a path with its `.` components removed, and each `..` resolved where it follows a directory which is not a

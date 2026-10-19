@@ -3027,9 +3027,12 @@ log note codegen/
         output.build(&format!("{host}/libslow.rlib")),
         "-C debug-assertions=true -C debuginfo=2 -C opt-level=0 -C overflow-checks=true",
     );
-    // a profile which has already been used is not used again, so what was set after it is kept
-    assert_contains(output.build(&format!("{host}/libother.rlib")), "-C opt-level=1");
-    output.stderr("note: debug-assertions: true, debuginfo: 2, opt-level: 1, overflow-checks: true");
+    // a profile which has already been used is applied again, replacing what was set since
+    assert_contains(
+        output.build(&format!("{host}/libother.rlib")),
+        "-C debug-assertions=false -C debuginfo=0 -C opt-level=3 -C overflow-checks=false",
+    );
+    output.stderr("note: debug-assertions: false, debuginfo: 0, opt-level: 3, overflow-checks: false");
     // the profiles are part of jig, so the configuration does not depend on them as files
     let depfile = project.depfile();
     assert!(depfile.starts_with("build.ninja: Jig reconfigure.stamp"), "{depfile}");
