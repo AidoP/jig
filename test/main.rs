@@ -3005,6 +3005,54 @@ log note '{codegen/opt-level} {codegen/opt-level.info}'
 }
 
 #[test]
+fn profiles() {
+    let project = Project::new("profiles", &[("Jig", "\
+use profile/release
+crate fast 'fast.rs'
+use profile/debug
+crate slow 'slow.rs'
+set codegen/opt-level 1
+@for profile in ['release']
+use profile/{profile}
+crate other 'other.rs'
+log note codegen/
+")]);
+    let host = project.host();
+    let output = project.configure().ok();
+    assert_contains(
+        output.build(&format!("{host}/libfast.rlib")),
+        "-C debug-assertions=false -C debuginfo=0 -C opt-level=3 -C overflow-checks=false",
+    );
+    assert_contains(
+        output.build(&format!("{host}/libslow.rlib")),
+        "-C debug-assertions=true -C debuginfo=2 -C opt-level=0 -C overflow-checks=true",
+    );
+    // a profile which has already been used is not used again, so what was set after it is kept
+    assert_contains(output.build(&format!("{host}/libother.rlib")), "-C opt-level=1");
+    output.stderr("note: debug-assertions: true, debuginfo: 2, opt-level: 1, overflow-checks: true");
+    // the profiles are part of jig, so the configuration does not depend on them as files
+    let depfile = project.depfile();
+    assert!(depfile.starts_with("build.ninja: Jig reconfigure.stamp"), "{depfile}");
+}
+
+#[test]
+fn profile_errors() {
+    let project = Project::new("profile-errors", &[("Jig", "\
+use profile/relase
+use profile/fast
+use other/release
+use profile/debug
+    file
+")]);
+    project.configure().failed()
+        .stderr("error[unknown-profile]: unknown profile \"relase\", did you mean \"release\"?\n --> Jig:1:5")
+        .stderr("error[unknown-profile]: unknown profile \"fast\"\n --> Jig:2:5")
+        .stderr("error[expected-path]: expected path\n --> Jig:3:5")
+        .stderr("error[unknown-attribute]: unknown use attribute \"file\"\n --> Jig:5:5")
+        .stderr("configuration failed with 4 errors");
+}
+
+#[test]
 fn codegen_option_errors() {
     let project = Project::new("codegen-option-errors", &[("Jig", "\
 set codegen/opt-level ['3']

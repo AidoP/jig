@@ -220,7 +220,9 @@ fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(),
 fn write_dependencies(w: &mut dyn std::io::Write, project: &Project, at: &Rebase, stamp: &Path) -> Result<(), std::io::Error> {
     write!(w, "build.ninja:")?;
     let stamp = stamp.to_path_buf();
-    let paths = project.files.iter().map(|file| &file.path).chain(&project.dependencies).chain([&stamp]);
+    // builtin files change with jig, which the configuration already depends on
+    let files = project.files.iter().filter(|file| !file.builtin).map(|file| &file.path);
+    let paths = files.chain(&project.dependencies).chain([&stamp]);
     for path in at.paths(paths) {
         // escape the characters which are special in a depfile
         let path = path.display().to_string().replace(' ', "\\ ").replace('#', "\\#").replace('$', "$$");

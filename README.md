@@ -110,6 +110,9 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `use <path>`: start processing the `Jig` file in the directory at `<path>`, unless it has already been processed.
   With the `file` attribute, `<path>` is the file itself, of any name. A file which uses itself, directly or through
   other files, raises a warning
+- `use profile/<name>`: set the codegen options of a builtin profile, `release` or `debug`, unless it has already been
+  used. Like any other `set`, the options apply to the crates declared after it, and can be set again after it. The name
+  can be computed, as in `use profile/{profile}`. See below
 - `declare <name>`: define a property that can be used for substitution
 - `set <name> <value>`: assign a value to a property
 - `crate <name> [<path>]`: introduce a Rust library crate named `<name>`, with its root at `<path>`, or at
@@ -516,6 +519,18 @@ set codegen/{host-target}/opt-level 3
 crate kernel 'kernel.rs'
 crate boot 'boot.rs'
     codegen/opt-level 'z'
+```
+
+The builtin profiles set the codegen options which are usually wanted together, as cargo's profiles do:
+
+- `profile/release`: `opt-level` 3, `debuginfo` 0, and `debug-assertions` and `overflow-checks` off
+- `profile/debug`: `opt-level` 0, `debuginfo` 2, and `debug-assertions` and `overflow-checks` on
+
+```
+use profile/release
+set codegen/debuginfo 1
+crate app 'main.rs'
+    crate-type 'bin'
 ```
 
 A `custom` statement is followed by indented attributes:

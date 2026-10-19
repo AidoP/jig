@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use super::diagnostic::{Diagnostic, Message, Severity};
+use super::diagnostic::{Diagnostic, Message, Severity, suggest};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{File, Project, resolve_parents};
+use super::{File, PROFILES, Project, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -141,6 +141,11 @@ impl Project {
             parser.skip_statement();
             return;
         }
+        // a builtin profile is a name, rather than a path
+        if parser.peek() != Some('\'') {
+            self.parse_use_profile(parser);
+            return;
+        }
         let Some((mut path, span)) = self.parse_path(parser) else {
             parser.skip_statement();
             return;
@@ -180,6 +185,35 @@ impl Project {
                 });
             },
         };
+    }
+    /// Take a `use` of a builtin profile, `profile/<name>`, after the keyword.
+    fn parse_use_profile(&mut self, parser: &mut Parser) {
+        let Some(Name { name, span, .. }) = self.parse_name(parser) else {
+            parser.skip_statement();
+            return;
+        };
+        if !self.parse_line_end(parser) {
+            parser.skip_statement();
+        }
+        while let Some(attribute) = self.next_attribute(parser, &[]) {
+            self.unknown_attribute("use", attribute.name, attribute.name_span);
+        }
+        let Some(profile) = name.strip_prefix("profile/") else {
+            self.diagnostics.push(Diagnostic { span: Some(span), message: Message::ExpectedPath, severity: Severity::Error });
+            return;
+        };
+        let Some(mut file) = File::profile(profile) else {
+            let names: Vec<String> = PROFILES.iter().map(|(name, _)| (*name).into()).collect();
+            self.diagnostics.push(Diagnostic {
+                span: Some(span),
+                message: Message::UnknownProfile { profile: profile.into(), suggestion: suggest(profile, &names) },
+                severity: Severity::Error,
+            });
+            return;
+        };
+        file.used = Some(span);
+        // a profile cannot use itself, so using it again does nothing
+        self.parse(file);
     }
     fn parse_log(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {

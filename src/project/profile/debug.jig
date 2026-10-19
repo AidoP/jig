@@ -1,0 +1,5 @@
+# unoptimised, with debug assertions, overflow checks and full debug information
+set codegen/opt-level 0
+set codegen/debug-assertions true
+set codegen/overflow-checks true
+set codegen/debuginfo 2

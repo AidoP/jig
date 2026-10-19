@@ -118,6 +118,7 @@ impl Project {
         // rather than reading every symbolic link in its path, as finding its canonical path would
         use std::os::unix::fs::MetadataExt;
         let id = match std::fs::metadata(&file.path) {
+            _ if file.builtin => FileId::Builtin(file.path.clone()),
             Ok(metadata) => FileId::Inode { dev: metadata.dev(), ino: metadata.ino() },
             Err(_) => FileId::Path(file.path.clone()),
         };
@@ -360,6 +361,8 @@ enum FileId {
     Inode { dev: u64, ino: u64 },
     /// The path of a file whose metadata could not be read.
     Path(PathBuf),
+    /// The path of a file which is part of jig, rather than on disk.
+    Builtin(PathBuf),
 }
 
 /// Returns a path with its `.` components removed, and each `..` resolved where it follows a directory which is not a
@@ -396,6 +399,8 @@ pub struct File {
     active: bool,
     /// The `use` statement which caused the file to be processed.
     used: Option<Span>,
+    /// Whether the file is part of jig, as a profile is, rather than on disk.
+    pub builtin: bool,
 }
 impl File {
     pub fn read(path: std::path::PathBuf) -> std::io::Result<Self> {
@@ -404,8 +409,22 @@ impl File {
     }
     /// A file with its contents, which need not exist.
     pub fn new(path: PathBuf, data: String) -> Self {
-        Self { data, path, locals: HashMap::new(), active: false, used: None }
+        Self { data, path, locals: HashMap::new(), active: false, used: None, builtin: false }
     }
+    /// The builtin profile with the name, `profile/<name>`, if there is one.
+    pub fn profile(name: &str) -> Option<Self> {
+        let data = PROFILES.iter().find(|(profile, _)| *profile == name)?.1;
+        Some(Self { builtin: true, ..Self::new(format!("profile/{name}").into(), data.into()) })
+    }
+}
+
+/// The builtin profiles, which are used as `profile/<name>`, by name.
+pub const PROFILES: &[(&str, &str)] = &[
+    ("debug", include_str!("project/profile/debug.jig")),
+    ("release", include_str!("project/profile/release.jig")),
+];
+
+impl File {
     /// Returns the path relative to the file.
     pub fn relative_path<P: AsRef<Path>>(&self, path: P) -> PathBuf {
         self.path.parent().unwrap().join(path)
