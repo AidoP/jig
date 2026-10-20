@@ -24,7 +24,7 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        let Some(Name { name, span, literal }) = self.parse_name(parser) else {
+        let Some(Name { text: name, span, literal }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
         };
@@ -71,22 +71,22 @@ impl Project {
         while let Some(attribute) = self.next_attribute(parser, &["use"]) {
             match attribute.name {
                 "builtin" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         builtin = value;
                     }
                 },
                 "default" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         default = value;
                     }
                 },
                 "test" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         test = value;
                     }
                 },
                 "doc" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         doc = value;
                     }
                 },
@@ -116,12 +116,12 @@ impl Project {
                     _ => self.invalid_operand(&attribute.operand(), "str", false),
                 },
                 "cfg" => {
-                    if let Some(options) = self.cfg_options(attribute.operand()) {
+                    if let Some(options) = self.cfg_options(&attribute.operand()) {
                         cfg.extend(options);
                     }
                 },
                 "env" => {
-                    if let Some(variables) = self.env_variables(attribute.operand()) {
+                    if let Some(variables) = self.env_variables(&attribute.operand()) {
                         env.extend(variables);
                     }
                 },
@@ -173,15 +173,11 @@ impl Project {
         // a procedural macro is loaded by rustc, so it is compiled for the host target, which is otherwise the `target`
         // property in effect at its declaration
         let host = self.property("host-target", span).map(|host| host.data.coerce_string()).unwrap_or_default();
-        let targets = match targets {
-            Some(targets) => targets,
-            None => {
-                let property = if kind == rust::Kind::ProcMacro { "host-target" } else { "target" };
-                let target = self.property(property, span).map(|target| target.data.coerce_string());
-                let target = target.unwrap_or_default();
-                CrateTargets { names: vec![target], span }
-            },
-        };
+        let targets = targets.unwrap_or_else(|| {
+            let property = if kind == rust::Kind::ProcMacro { "host-target" } else { "target" };
+            let target = self.property(property, span).map(|target| target.data.coerce_string());
+            CrateTargets { names: vec![target.unwrap_or_default()], span }
+        });
         let target_span = targets.span;
         let targets = targets.names;
         if kind == rust::Kind::ProcMacro && let Some(target) = targets.iter().find(|target| **target != host) {
@@ -263,7 +259,7 @@ impl Project {
     }
     /// Returns the configuration options of a `cfg` attribute, which is a name, a list of them, or a dict of names to
     /// values, or lists of them, as `<name>="<value>"`, reporting a value which is none of these.
-    fn cfg_options(&mut self, operand: Operand) -> Option<Vec<String>> {
+    fn cfg_options(&mut self, operand: &Operand) -> Option<Vec<String>> {
         let mut options = Vec::new();
         let valid = match &operand.data {
             Data::Str(name) => {
@@ -294,16 +290,16 @@ impl Project {
             _ => false,
         };
         if !valid {
-            self.invalid_operand(&operand, "str, list of str, or dict", false);
+            self.invalid_operand(operand, "str, list of str, or dict", false);
             return None;
         }
         Some(options)
     }
     /// Returns the environment variables of an `env` attribute, which is a dict of their names to their values,
     /// reporting a value which is not, or a name which cannot be an environment variable's.
-    fn env_variables(&mut self, operand: Operand) -> Option<Vec<(String, String)>> {
+    fn env_variables(&mut self, operand: &Operand) -> Option<Vec<(String, String)>> {
         let Data::Dict(entries) = &operand.data else {
-            self.invalid_operand(&operand, "dict", false);
+            self.invalid_operand(operand, "dict", false);
             return None;
         };
         let mut variables = Vec::new();
@@ -318,7 +314,7 @@ impl Project {
                 return None;
             }
             if matches!(value, Data::List(_) | Data::Dict(_) | Data::None) {
-                self.invalid_operand(&operand, "dict of str", false);
+                self.invalid_operand(operand, "dict of str", false);
                 return None;
             }
             variables.push((name.clone(), value.coerce_string()));

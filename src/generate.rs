@@ -6,6 +6,7 @@
 //! relative to the project root.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::ninja::{self, NinjaFile};
@@ -450,17 +451,17 @@ fn write_build_ninja(
         let output = at.path(&c.output());
         let input = at.path(&c.path);
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
-        let links = c.kind != Kind::Lib;
+        let linked = c.kind != Kind::Lib;
         build_ninja.build(&ninja::Build {
             rule: "rustc",
             outputs: &[&output],
             inputs: &[&input],
-            implicit: if links { &link_deps } else { &deps },
+            implicit: if linked { &link_deps } else { &deps },
             order_only: &as_paths(&depends),
             variables: &[
                 ("crate-name", &c.name),
                 ("crate-type", crate_type),
-                ("flags", &if links { format!("{flags}{link_flags}") } else { flags.clone() }),
+                ("flags", &if linked { format!("{flags}{link_flags}") } else { flags.clone() }),
                 ("tmpdir", &tmpdir.display().to_string()),
                 ("crate-env", &crate_env),
             ],
@@ -544,7 +545,10 @@ fn write_build_ninja(
             let output = at.path(&unit.lint_rmeta());
             let diagnostics = at.path(&unit.lint_diagnostics());
             let outdir = at.path(&unit.lint_dir());
-            let mut lint_flags: String = unit.lints.iter().map(|flag| format!(" {flag}")).collect();
+            let mut lint_flags = unit.lints.iter().fold(String::new(), |mut flags, flag| {
+                let _ = write!(flags, " {flag}");
+                flags
+            });
             if unit.harness && !unit.test {
                 lint_flags.push_str(" --test");
             }
@@ -754,7 +758,7 @@ fn rustc_flags(target: &str, search: &Path, kind: Kind, deps: &[Extern], codegen
         flags.push_str(" --extern proc_macro");
     }
     for dep in deps {
-        flags.push_str(&format!(" --extern {}={}", dep.name, dep.path.display()));
+        let _ = write!(flags, " --extern {}={}", dep.name, dep.path.display());
     }
     flags
 }
@@ -772,13 +776,19 @@ fn codegen_flag(option: &str) -> String {
 
 /// Returns the `--cfg` flags of configuration options, each quoted for `sh`, with `$` escaped for ninja.
 fn cfg_flags(cfg: &[String]) -> String {
-    cfg.iter().map(|option| format!(" --cfg {}", ninja_quote(option))).collect()
+    cfg.iter().fold(String::new(), |mut flags, option| {
+        let _ = write!(flags, " --cfg {}", ninja_quote(option));
+        flags
+    })
 }
 
 /// Returns environment variables as the assignments which `sh` takes before a command, quoted for it, with `$` escaped
 /// for ninja.
 fn crate_env(env: &[(String, String)]) -> String {
-    env.iter().map(|(name, value)| format!("{name}={} ", ninja_quote(value))).collect()
+    env.iter().fold(String::new(), |mut assignments, (name, value)| {
+        let _ = write!(assignments, "{name}={} ", ninja_quote(value));
+        assignments
+    })
 }
 
 /// Quote a string as a single argument for `sh`, in a ninja command.
@@ -851,7 +861,7 @@ fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result
     toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Ok(output) => output,
-        Err(error) => return Err(Error::Exec(cmd, error)),
+        Err(error) => return Err(Error::Exec(Box::new(cmd), error)),
     };
     let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
     match String::from_utf8(output.stdout) {
@@ -882,7 +892,7 @@ mod benches {
         let chain = |n: usize| {
             let mut source = String::from("crate c0 'c.rs'\n");
             for i in 1..n {
-                source += &format!("crate c{i} 'c.rs'\n    use c{}\n", i - 1);
+                let _ = writeln!(source, "crate c{i} 'c.rs'\n    use c{}", i - 1);
             }
             crates(&source)
         };
@@ -897,7 +907,7 @@ mod benches {
         let with_builtins = |n: usize| {
             let mut source = String::from("crate core 'c.rs'\n    builtin\ncrate alloc 'c.rs'\n    builtin\n    use core\n");
             for i in 0..n {
-                source += &format!("crate c{i} 'c.rs'\n");
+                let _ = writeln!(source, "crate c{i} 'c.rs'");
             }
             crates(&source)
         };

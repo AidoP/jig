@@ -247,7 +247,7 @@ fn up_to_date(project: &Configured, target: &str) -> Result<bool, Error> {
     dry_run.args(["-n", target]);
     let output = match dry_run.output() {
         Ok(output) => output,
-        Err(error) => return Err(Error::Exec(dry_run, error)),
+        Err(error) => return Err(Error::Exec(Box::new(dry_run), error)),
     };
     Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("ninja: no work to do."))
 }
@@ -259,6 +259,6 @@ fn build(project: &Configured, args: &[&str]) -> Result<(), Error> {
     match ninja.status() {
         Ok(status) if status.success() => Ok(()),
         Ok(_) => Err(Error::BuildFailed),
-        Err(error) => Err(Error::Exec(ninja, error)),
+        Err(error) => Err(Error::Exec(Box::new(ninja), error)),
     }
 }

@@ -8,6 +8,7 @@
 //! As with the integration tests, the `jig` binary is found with the `CONFIGURE` environment variable, or as the `jig`
 //! crate's output, in the target directory which contains the directory of this test harness.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -85,7 +86,7 @@ fn baseline() -> Duration {
 /// Generate the project which `files` gives for `size`, failing if it takes longer than the budget.
 #[track_caller]
 fn assert_within(name: &str, size: usize, millis: u64, files: impl Fn(usize) -> Vec<(String, String)>) {
-    let _timing = TIMING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let elapsed = Project::new(name, &files(size)).generate();
     println!("{name} {size}: {elapsed:?}");
     assert!(elapsed <= budget(millis), "{name} with {size} took {elapsed:?}, more than {:?}", budget(millis));
@@ -99,7 +100,7 @@ fn assert_within(name: &str, size: usize, millis: u64, files: impl Fn(usize) -> 
 /// enough to take some time.
 #[track_caller]
 fn assert_linear(name: &str, size: usize, files: impl Fn(usize) -> Vec<(String, String)>) {
-    let _timing = TIMING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let small_files = files(size);
     let large_files = files(size * 4);
     let mut ratio = 0.0;
@@ -126,9 +127,9 @@ fn root(contents: String) -> Vec<(String, String)> {
 fn properties(n: usize) -> Vec<(String, String)> {
     let mut jig = String::new();
     for i in 0..n {
-        jig += &format!("declare p{i}\n    default {i}\n");
+        let _ = writeln!(jig, "declare p{i}\n    default {i}");
         if i > 0 {
-            jig += &format!("set p{i} p{} + 1\n", i - 1);
+            let _ = writeln!(jig, "set p{i} p{} + 1", i - 1);
         }
     }
     root(jig)
@@ -144,8 +145,8 @@ fn for_loop(n: usize) -> Vec<(String, String)> {
 fn expressions(n: usize) -> Vec<(String, String)> {
     let mut jig = String::from("declare a\n    default 1\ndeclare s\n");
     for i in 0..n {
-        jig += &format!("set a (a * 3 + {i}) % 1000003\n");
-        jig += &format!("set s '{{a}} {{upper('x{i}')}} {{len(split('a,b,c', ','))}} {{join(['x', a], '-')}}'\n");
+        let _ = writeln!(jig, "set a (a * 3 + {i}) % 1000003");
+        let _ = writeln!(jig, "set s '{{a}} {{upper('x{i}')}} {{len(split('a,b,c', ','))}} {{join(['x', a], '-')}}'");
     }
     root(jig)
 }
@@ -154,7 +155,7 @@ fn expressions(n: usize) -> Vec<(String, String)> {
 fn crates_wide(n: usize) -> Vec<(String, String)> {
     let mut jig = String::from("crate base 'c.rs'\n");
     for i in 0..n {
-        jig += &format!("crate c{i} 'c.rs'\n    use base\n");
+        let _ = writeln!(jig, "crate c{i} 'c.rs'\n    use base");
     }
     vec![("Jig".into(), jig), ("c.rs".into(), String::new())]
 }
@@ -163,7 +164,7 @@ fn crates_wide(n: usize) -> Vec<(String, String)> {
 fn crates_chain(n: usize) -> Vec<(String, String)> {
     let mut jig = String::from("crate c0 'c.rs'\n");
     for i in 1..n {
-        jig += &format!("crate c{i} 'c.rs'\n    use c{}\n", i - 1);
+        let _ = writeln!(jig, "crate c{i} 'c.rs'\n    use c{}", i - 1);
     }
     vec![("Jig".into(), jig), ("c.rs".into(), String::new())]
 }
@@ -172,14 +173,18 @@ fn crates_chain(n: usize) -> Vec<(String, String)> {
 fn customs(n: usize) -> Vec<(String, String)> {
     let mut jig = String::new();
     for i in 0..n {
-        jig += &format!("custom k{i}\n    input 'in{i}'\n    output 'out{i}'\n    command 'cp' input output\n");
+        let _ = writeln!(jig, "custom k{i}\n    input 'in{i}'\n    output 'out{i}'\n    command 'cp' input output");
     }
     root(jig)
 }
 
 /// Files which the root file uses, each in its own directory.
 fn files(n: usize) -> Vec<(String, String)> {
-    let mut files = vec![("Jig".into(), (0..n).map(|i| format!("use 'f{i}'\n")).collect())];
+    let root = (0..n).fold(String::new(), |mut root, i| {
+        let _ = writeln!(root, "use 'f{i}'");
+        root
+    });
+    let mut files = vec![("Jig".into(), root)];
     files.extend((0..n).map(|i| (format!("f{i}/Jig"), format!("declare v{i}\n    default {i}\n"))));
     files
 }
@@ -204,7 +209,7 @@ fn nested_files(n: usize) -> Vec<(String, String)> {
 
 #[test]
 fn empty_project() {
-    let _timing = TIMING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let elapsed = baseline();
     println!("empty: {elapsed:?}");
     assert!(elapsed <= budget(2000), "an empty project took {elapsed:?}");
@@ -270,10 +275,10 @@ fn chain_of_sibling_files() {
 fn up_to_date_build() {
     let mut jig = String::new();
     for i in 0..500 {
-        jig += &format!("custom k{i}\n    output 'out{i}'\n    command 'touch' output\n    default\n");
+        let _ = writeln!(jig, "custom k{i}\n    output 'out{i}'\n    command 'touch' output\n    default");
     }
     let project = Project::new("up-to-date", &root(jig));
-    let _timing = TIMING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     project.generate();
     project.time(&["build"]);
     // with nothing to do, neither the configuration nor ninja's work should take long

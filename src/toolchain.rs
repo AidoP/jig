@@ -33,7 +33,7 @@ pub fn parse(args: &mut Peekable<impl Iterator<Item = OsString>>) -> Result<Opti
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Err(Error::Toolchain(name, "selecting a toolchain needs rustup, which was not found".into()))
         },
-        Err(error) => Err(Error::Exec(rustup, error)),
+        Err(error) => Err(Error::Exec(Box::new(rustup), error)),
     }
 }
 

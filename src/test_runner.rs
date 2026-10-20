@@ -1,5 +1,6 @@
 //! `jig test`, which runs the tests recorded in the database.
 
+use std::fmt::Write as _;
 use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
@@ -22,7 +23,7 @@ pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
     ninja.args(&targets);
     let built = match ninja.status() {
         Ok(status) => status.success(),
-        Err(error) => return Err(Error::Exec(ninja, error)),
+        Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
     };
     // read after ninja, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
@@ -73,7 +74,7 @@ pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
             Ok(output) => {
                 let mut report = String::new();
                 if !output.status.success() {
-                    report.push_str(&format!("{}\n", output.status));
+                    let _ = writeln!(report, "{}", output.status);
                 }
                 report.push_str(&String::from_utf8_lossy(&output.stdout));
                 report.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -114,7 +115,7 @@ fn indent(output: &str) -> String {
         if line.trim().is_empty() {
             indented.push('\n');
         } else {
-            indented.push_str(&format!("    {line}\n"));
+            let _ = writeln!(indented, "    {line}");
         }
     }
     indented

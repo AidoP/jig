@@ -50,7 +50,7 @@ pub fn time(mut run: impl FnMut()) -> Duration {
 pub fn assert_linear<T>(name: &str, size: usize, setup: impl Fn(usize) -> T, mut run: impl FnMut(&T)) {
     let small_input = setup(size);
     let large_input = setup(size * 4);
-    let _timing = TIMING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut ratio = 0.0;
     for _ in 0..2 {
         let small = time(|| run(std::hint::black_box(&small_input)));

@@ -20,7 +20,7 @@ pub enum Severity {
     Allow,
 }
 impl Severity {
-    pub const fn accent(&self) -> &'static str {
+    pub const fn accent(self) -> &'static str {
         match self {
             Self::Fatal | Self::Error => "\x1b[91m\x1b[1m",
             Self::Warning => "\x1b[93m\x1b[1m",
@@ -602,7 +602,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
         let mut diagonal = row[0];
         row[0] = i + 1;
         for (j, &cb) in b.iter().enumerate() {
-            let substitute = diagonal + (ca != cb) as usize;
+            let substitute = diagonal + usize::from(ca != cb);
             diagonal = row[j + 1];
             row[j + 1] = substitute.min(row[j] + 1).min(diagonal + 1);
         }

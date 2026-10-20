@@ -61,7 +61,7 @@ impl Project {
                 let data = match operand.data {
                     Data::Unsigned(i) if operand.coerce != Coercion::Any => Data::Unsigned(!i),
                     Data::Signed(i) if operand.coerce != Coercion::Any => Data::Signed(!i),
-                    _ => Data::Bool(!self.bool_operand(operand)?),
+                    _ => Data::Bool(!self.bool_operand(&operand)?),
                 };
                 Some(Operand { data, span: parser.span_from(start), coerce: Coercion::Strict, origin: None })
             },
@@ -101,15 +101,15 @@ impl Project {
                     return Some(operand);
                 }
                 let name = self.parse_name_from(parser, start, operand.data.coerce_string(), false)?;
-                self.named_operand(parser, name)
+                self.named_operand(parser, &name)
             },
             // any word is parsed as a name, to report its invalid characters
             Some(c) if c.is_alphabetic() || c == '_' => {
                 let name = self.parse_name(parser)?;
-                if parser.peek() == Some('(') && name.literal && !name.name.contains('/') {
-                    return self.parse_call(parser, &name.name, name.span);
+                if parser.peek() == Some('(') && name.literal && !name.text.contains('/') {
+                    return self.parse_call(parser, &name.text, name.span);
                 }
-                self.named_operand(parser, name)
+                self.named_operand(parser, &name)
             },
             _ => {
                 self.diagnostics.push(Diagnostic {
@@ -138,20 +138,20 @@ impl Project {
     }
     /// Returns the value of what a name refers to, or of its attribute after `.`, or the dict of a namespace, when it is
     /// followed by a `/` which does not continue it.
-    fn named_operand(&mut self, parser: &mut Parser, name: Name) -> Option<Operand> {
+    fn named_operand(&mut self, parser: &mut Parser, name: &Name) -> Option<Operand> {
         if parser.peek() == Some('/') {
             parser.expect('/');
             let span = Span { len: name.span.len + 1, ..name.span };
-            let data = self.namespace(&name.name, span)?;
+            let data = self.namespace(&name.text, span)?;
             return Some(Operand { data, span, coerce: Coercion::Strict, origin: None });
         }
         if is_attribute_access(parser) {
-            return self.parse_named_attribute(parser, &name.name, name.span, name.span.offset);
+            return self.parse_named_attribute(parser, &name.text, name.span, name.span.offset);
         }
-        let data = match name.name.as_str() {
+        let data = match name.text.as_str() {
             "true" if name.literal => Data::Bool(true),
             "false" if name.literal => Data::Bool(false),
-            _ => return self.reference(&name.name, name.span),
+            _ => return self.reference(&name.text, name.span),
         };
         Some(Operand { data, span: name.span, coerce: Coercion::Strict, origin: None })
     }
@@ -169,8 +169,8 @@ impl Project {
         let mut coerce = Coercion::Strict;
         let data = match operator {
             Operator::Or | Operator::And => {
-                let lhs = self.bool_operand(lhs)?;
-                let rhs = self.bool_operand(rhs)?;
+                let lhs = self.bool_operand(&lhs)?;
+                let rhs = self.bool_operand(&rhs)?;
                 Data::Bool(match operator {
                     Operator::Or => lhs || rhs,
                     _ => lhs && rhs,
@@ -277,14 +277,14 @@ impl Project {
         Some(Operand { data, span, coerce, origin: None })
     }
     /// Ensure an operand is a boolean, converting it if it permits coercion.
-    pub(super) fn bool_operand(&mut self, operand: Operand) -> Option<bool> {
+    pub(super) fn bool_operand(&mut self, operand: &Operand) -> Option<bool> {
         let value = match &operand.data {
             Data::Bool(value) => Some(*value),
             data if operand.coerce == Coercion::Any => data.coerce_bool(),
             _ => None,
         };
         if value.is_none() {
-            self.invalid_operand(&operand, "bool", operand.coerce == Coercion::Any);
+            self.invalid_operand(operand, "bool", operand.coerce == Coercion::Any);
         }
         value
     }
@@ -389,15 +389,15 @@ impl Project {
         let entries = self.parse_arguments(parser, ']', |this, parser| this.parse_dict_entry(parser))?;
         let mut dict = BTreeMap::new();
         for entry in entries {
-            if dict.contains_key(&entry.name.name) {
+            if dict.contains_key(&entry.name.text) {
                 self.diagnostics.push(Diagnostic {
                     span: Some(entry.name.span),
-                    message: Message::RepeatedKey(entry.name.name),
+                    message: Message::RepeatedKey(entry.name.text),
                     severity: Severity::Error,
                 });
                 return None;
             }
-            dict.insert(entry.name.name, entry.value);
+            dict.insert(entry.name.text, entry.value);
         }
         Some(Operand { data: Data::Dict(dict), span: parser.span_from(start), coerce: Coercion::Strict, origin: None })
     }
@@ -512,7 +512,7 @@ impl Project {
         let mut rest = s;
         while let Some(i) = rest.find(['{', '}']) {
             string.push_str(&rest[..i]);
-            let brace = &rest[i..i + 1];
+            let brace = &rest[i..=i];
             let after = &rest[i + 1..];
             if after.starts_with(brace) {
                 string.push_str(brace);

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use super::codegen::target_of_codegen_option;
 use super::customs::CustomKind;
 use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::install::Install;
@@ -24,7 +25,7 @@ impl Project {
                 Message::UnsetProperty(name.into())
             },
             // a codegen option of a target which is not known
-            _ if let Some(target) = self.target_of_codegen_option(name) => {
+            _ if let Some(target) = target_of_codegen_option(name) => {
                 Message::UnknownTarget { suggestion: suggest(target, &self.builtin_targets()), target: target.into() }
             },
             // a property in a namespace of properties, such as `profile/<name>`, rather than of crates
@@ -93,7 +94,8 @@ impl Project {
         parser.expect('.');
         self.parse_ident(parser)
     }
-    /// Returns the value of an attribute as an operand, or reports an attribute which is unknown or not set.
+    /// Returns the value of an attribute as an operand at `span`, which is of the reference and the attribute, or reports
+    /// an attribute which is unknown or not set.
     fn attribute_value(
         &mut self,
         item: Item,
@@ -101,13 +103,10 @@ impl Project {
         attribute: &str,
         attribute_span: Span,
         value: AttributeValue,
-        start: usize,
-        parser: &Parser,
+        span: Span,
     ) -> Option<Operand> {
         let message = match value {
-            AttributeValue::Set(data) => {
-                return Some(Operand { data, span: parser.span_from(start), coerce: Coercion::Strict, origin: None });
-            },
+            AttributeValue::Set(data) => return Some(Operand { data, span, coerce: Coercion::Strict, origin: None }),
             AttributeValue::Unset => Message::AttributeNotSet { item, name: name.into(), attribute: attribute.into() },
             AttributeValue::Unknown => {
                 Message::UnknownAttributeOf { item, name: name.into(), attribute: attribute.into() }
@@ -122,6 +121,7 @@ impl Project {
     /// looked for first, while a test has its own names, so it is looked for last.
     pub(super) fn parse_named_attribute(&mut self, parser: &mut Parser, name: &str, span: Span, start: usize) -> Option<Operand> {
         let (attribute, attribute_span) = self.parse_attribute_access(parser)?;
+        let operand_span = parser.span_from(start);
         let referent = match self.referenced_value(name, span.file) {
             Some(Value { data: Data::Ref(reference), .. }) => Some(reference.referent.clone()),
             _ => None,
@@ -134,7 +134,7 @@ impl Project {
             let tested = self.custom(name, true).is_some();
             if !matches!(value, AttributeValue::Unknown) || !tested {
                 let crate_name = crate_name.clone();
-                return self.attribute_value(Item::Crate, &crate_name, attribute, attribute_span, value, start, parser);
+                return self.attribute_value(Item::Crate, &crate_name, attribute, attribute_span, value, operand_span);
             }
         }
         let custom = match &referent {
@@ -151,7 +151,7 @@ impl Project {
                 attribute => install_attribute(install, attribute),
             };
             let name = custom.name.clone();
-            return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, start, parser);
+            return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, operand_span);
         }
         self.declare_on_demand(name);
         if let Some(&id) = self.properties_idx.get(name) && let Some(property) = &self.properties[id] {
@@ -162,7 +162,7 @@ impl Project {
                 "info" => AttributeValue::optional(property.info.clone().map(Data::Str)),
                 _ => AttributeValue::Unknown,
             };
-            return self.attribute_value(Item::Property, name, attribute, attribute_span, value, start, parser);
+            return self.attribute_value(Item::Property, name, attribute, attribute_span, value, operand_span);
         }
         // a builtin target, or one declared by a `target` statement
         if let Some(target) = self.target(name) {
@@ -176,7 +176,7 @@ impl Project {
             };
             if let Some(value) = value {
                 let value = AttributeValue::Set(Data::Bool(value));
-                return self.attribute_value(Item::Target, name, attribute, attribute_span, value, start, parser);
+                return self.attribute_value(Item::Target, name, attribute, attribute_span, value, operand_span);
             }
             let target = self.target(name).unwrap();
             let value = match (attribute, &target.kind) {
@@ -196,7 +196,7 @@ impl Project {
                     None => AttributeValue::Unknown,
                 },
             };
-            return self.attribute_value(Item::Target, name, attribute, attribute_span, value, start, parser);
+            return self.attribute_value(Item::Target, name, attribute, attribute_span, value, operand_span);
         }
         // a test has its own name, which is looked for last
         if let Some(test) = self.custom(name, true) {
@@ -206,7 +206,7 @@ impl Project {
                 "command" => AttributeValue::Set(strings(&test.command(&self.runners))),
                 _ => AttributeValue::Unknown,
             };
-            return self.attribute_value(Item::Test, name, attribute, attribute_span, value, start, parser);
+            return self.attribute_value(Item::Test, name, attribute, attribute_span, value, operand_span);
         }
         // a crate for a target, which is reported as it would be without the attribute
         if name.contains('/') {

@@ -90,7 +90,7 @@ impl Configured {
         ninja.arg("build.ninja").stdout(std::process::Stdio::piped());
         let mut child = match ninja.spawn() {
             Ok(child) => child,
-            Err(error) => return Err(Error::Exec(ninja, error)),
+            Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
         };
         let mut w: Box<dyn Write> = match output {
             Output::Stdout | Output::Quiet => Box::new(std::io::stdout()),
@@ -107,7 +107,7 @@ impl Configured {
         match child.wait() {
             Ok(status) if status.success() => (),
             Ok(_) => return Err(Error::BuildFailed),
-            Err(error) => return Err(Error::Exec(ninja, error)),
+            Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
         }
         let bytes = read(&self.root)?;
         let database = parse(&self.root, &bytes)?;
@@ -154,15 +154,14 @@ fn toolchain(database: &database::Database) -> Option<String> {
 /// another is given, when its database is of another version, or `build.ninja` is missing, such as when the build
 /// directory has been removed.
 pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
-    let root = match database::root() {
-        Some(root) => root,
-        None => {
-            let dir = std::env::current_dir().map_err(|error| Error::Read(".".into(), error))?;
-            match dir.ancestors().find(|dir| dir.join("Jig").is_file()) {
-                Some(root) => root.to_path_buf(),
-                None => return Err(Error::NotConfigured),
-            }
-        },
+    let root = if let Some(root) = database::root() {
+        root
+    } else {
+        let dir = std::env::current_dir().map_err(|error| Error::Read(".".into(), error))?;
+        match dir.ancestors().find(|dir| dir.join("Jig").is_file()) {
+            Some(root) => root.to_path_buf(),
+            None => return Err(Error::NotConfigured),
+        }
     };
     let bytes = std::fs::read(root.join(database::PATH)).ok();
     let database = bytes.as_deref().and_then(|bytes| database::read(bytes).ok());

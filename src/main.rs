@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, path::PathBuf};
+use std::{io::IsTerminal, path::{Path, PathBuf}};
 
 #[cfg(test)]
 mod bench;
@@ -91,7 +91,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             match ninja.status() {
                 Ok(status) if status.success() => Ok(ExitCode::SUCCESS),
                 Ok(_) => Err(Error::BuildFailed),
-                Err(error) => Err(Error::Exec(ninja, error)),
+                Err(error) => Err(Error::Exec(Box::new(ninja), error)),
             }
         },
         "check" => {
@@ -146,7 +146,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let targets: Vec<String> = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
     let version = rustc_version(toolchain)?;
 
-    let mut project = project::Project::new(input.parent().map(|path| path.into()).unwrap_or_default(), targets.clone());
+    let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
@@ -287,7 +287,8 @@ enum Error {
         warnings: usize,
     },
     Stderr(std::io::Error),
-    InvalidOutput(std::process::Command),
+    // the commands are boxed, as they are much larger than the other errors
+    InvalidOutput(Box<std::process::Command>),
     TestBuild,
     TargetSpec(String, &'static str),
     /// The specification of a builtin target which a custom target inherits could not be read, as rustc reported.
@@ -302,7 +303,7 @@ enum Error {
     UnknownLint(String),
     LintFailed,
     LintWarnings,
-    Exec(std::process::Command, std::io::Error),
+    Exec(Box<std::process::Command>, std::io::Error),
     Install(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     NotConfigured,
     Toolchain(String, String),
@@ -379,14 +380,12 @@ fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> 
 /// Returns the version of rustc, from the `release` line of `rustc -vV`, with a toolchain if one is given.
 fn rustc_version(toolchain: Option<&str>) -> Result<String, Error> {
     let output = rustc_output("-vV", toolchain)?;
-    match output.lines().find_map(|line| line.strip_prefix("release: ")) {
-        Some(version) => Ok(version.trim().into()),
-        None => {
-            let mut cmd = std::process::Command::new("rustc");
-            cmd.arg("-vV");
-            Err(Error::InvalidOutput(cmd))
-        },
-    }
+    let version = output.lines().find_map(|line| line.strip_prefix("release: "));
+    version.map(|version| version.trim().into()).ok_or_else(|| {
+        let mut cmd = std::process::Command::new("rustc");
+        cmd.arg("-vV");
+        Error::InvalidOutput(Box::new(cmd))
+    })
 }
 
 /// Returns the trimmed output of rustc with an argument, with a toolchain if one is given.
@@ -397,15 +396,15 @@ fn rustc_output(argument: &str, toolchain: Option<&str>) -> Result<String, Error
     toolchain::apply(&mut cmd, toolchain);
     let output = match cmd.output() {
         Err(error) => {
-            return Err(Error::Exec(cmd, error));
+            return Err(Error::Exec(Box::new(cmd), error));
         },
         Ok(output) => output,
     };
     if !output.status.success() {
-        return Err(Error::InvalidOutput(cmd));
+        return Err(Error::InvalidOutput(Box::new(cmd)));
     }
     match String::from_utf8(output.stdout) {
         Ok(value) if !value.trim().is_empty() => Ok(value.trim().into()),
-        _ => Err(Error::InvalidOutput(cmd)),
+        _ => Err(Error::InvalidOutput(Box::new(cmd))),
     }
 }

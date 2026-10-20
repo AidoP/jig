@@ -135,10 +135,10 @@ impl Project {
     /// which is forced is processed again with a new index, even while it is still being processed, which recurses
     /// until it stops using itself, or the depth of the files being processed reaches [`MAX_USE_DEPTH`].
     fn parse_forced(&mut self, file: File, force: bool) -> Option<usize> {
-        let idx = self.files.len();
         // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
         // rather than reading every symbolic link in its path, as finding its canonical path would
         use std::os::unix::fs::MetadataExt;
+        let idx = self.files.len();
         // the time the file was processed before, which is the latest again once this one has finished, so that using it
         // without `force` while that time is still being processed is found to be a cycle
         let mut previous = None;
@@ -207,13 +207,13 @@ impl Project {
                         *value = property;
                     },
                 }
-                return id;
+                id
             },
             Entry::Vacant(entry) => {
                 let id = self.properties.len();
                 entry.insert(id);
                 self.properties.push(property);
-                return id;
+                id
             },
         }
     }
@@ -337,7 +337,7 @@ impl Project {
         undeclared.sort_by_key(|undeclared| undeclared.value);
         for UndeclaredValue { name, value } in undeclared {
             // a codegen option of a target which is not known
-            let message = match self.target_of_codegen_option(&name) {
+            let message = match codegen::target_of_codegen_option(&name) {
                 Some(target) => {
                     let suggestion = diagnostic::suggest(target, &self.builtin_targets());
                     Message::UnknownTarget { target: target.into(), suggestion }
@@ -489,6 +489,8 @@ impl File {
 
 #[cfg(test)]
 mod benches {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::bench::{assert_linear, configure};
 
@@ -507,7 +509,7 @@ mod benches {
         assert_configures_linearly("statements", 2000, |n| {
             let mut source = String::from("declare a\n    default 1\n");
             for i in 0..n {
-                source += &format!("set a (a * 3 + {i}) % 1000003\n");
+                let _ = writeln!(source, "set a (a * 3 + {i}) % 1000003");
             }
             source
         });
@@ -518,7 +520,7 @@ mod benches {
         assert_configures_linearly("string-templates", 1000, |n| {
             let mut source = String::from("declare a\n    default 1\ndeclare s\n");
             for i in 0..n {
-                source += &format!("set s '{{a}} {{upper('x{i}')}} {{len(split('a,b,c', ','))}} {{join(['x', a], '-')}}'\n");
+                let _ = writeln!(source, "set s '{{a}} {{upper('x{i}')}} {{len(split('a,b,c', ','))}} {{join(['x', a], '-')}}'");
             }
             source
         });
@@ -529,9 +531,9 @@ mod benches {
         assert_configures_linearly("properties", 8000, |n| {
             let mut source = String::new();
             for i in 0..n {
-                source += &format!("declare p{i}\n    default {i}\n");
+                let _ = writeln!(source, "declare p{i}\n    default {i}");
                 if i > 0 {
-                    source += &format!("set p{i} p{} + 1\n", i - 1);
+                    let _ = writeln!(source, "set p{i} p{} + 1", i - 1);
                 }
             }
             source
@@ -560,7 +562,7 @@ mod benches {
         assert_configures_linearly("crate-chain", 500, |n| {
             let mut source = String::from("crate c0 'c.rs'\n");
             for i in 1..n {
-                source += &format!("crate c{i} 'c.rs'\n    use c{}\n", i - 1);
+                let _ = writeln!(source, "crate c{i} 'c.rs'\n    use c{}", i - 1);
             }
             source
         });
@@ -571,7 +573,7 @@ mod benches {
         assert_configures_linearly("crates-using-one", 500, |n| {
             let mut source = String::from("crate base 'c.rs'\n");
             for i in 0..n {
-                source += &format!("crate c{i} 'c.rs'\n    use base\n");
+                let _ = writeln!(source, "crate c{i} 'c.rs'\n    use base");
             }
             source
         });
@@ -582,7 +584,7 @@ mod benches {
         assert_configures_linearly("custom-commands", 1000, |n| {
             let mut source = String::from("custom k0\n    output 'gen/k0'\n    command 'touch' output\n");
             for i in 1..n {
-                source += &format!("custom k{i}\n    input k{}\n    output 'gen/k{i}'\n    command 'cp' input output\n", i - 1);
+                let _ = writeln!(source, "custom k{i}\n    input k{}\n    output 'gen/k{i}'\n    command 'cp' input output", i - 1);
             }
             source
         });

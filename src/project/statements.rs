@@ -6,7 +6,7 @@ use super::diagnostic::{Diagnostic, Message, Severity};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{File, MAX_USE_DEPTH, Project, resolve_parents};
+use super::{File, MAX_USE_DEPTH, Project, Target, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -20,7 +20,7 @@ pub(super) struct Attribute<'a> {
 }
 /// The name of a property or crate, as taken by [`Project::parse_name`].
 pub(super) struct Name {
-    pub(super) name: String,
+    pub(super) text: String,
     pub(super) span: Span,
     /// Whether the name was written as an identifier, so that its characters are at known offsets.
     pub(super) literal: bool,
@@ -156,7 +156,7 @@ impl Project {
             match attribute.name {
                 "file" => file = true,
                 "force" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         force = value;
                     }
                 },
@@ -222,7 +222,7 @@ impl Project {
                     severity: Severity::Error,
                 });
             },
-        };
+        }
     }
     fn parse_log(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
@@ -268,7 +268,7 @@ impl Project {
         while let Some(attribute) = self.next_attribute(parser, &["location"]) {
             match attribute.name {
                 "quiet" => {
-                    if let Some(value) = self.flag(attribute.operand()) {
+                    if let Some(value) = self.flag(&attribute.operand()) {
                         quiet = value;
                     }
                 },
@@ -310,7 +310,7 @@ impl Project {
             None => self.properties_idx.get(name).and_then(|&property| declared(self, property)),
         };
         let location = location
-            .or_else(|| self.target(name).and_then(|target| target.declaration()))
+            .or_else(|| self.target(name).and_then(Target::declaration))
             .or_else(|| self.custom(name, true).map(|test| test.name_span));
         if location.is_some() {
             return location;
@@ -403,7 +403,7 @@ impl Project {
             Some((_, character)) => (span, Message::InvalidIdentifier { name, character }),
             None if parser.offset == start => (parser.span_until(|c| c == ' ' || c == '\n'), Message::ExpectedIdentifier),
             None if name.split('/').any(str::is_empty) => (span, Message::ExpectedIdentifier),
-            None => return Some(Name { name, span, literal }),
+            None => return Some(Name { text: name, span, literal }),
         };
         self.diagnostics.push(Diagnostic {
             span: Some(span),
@@ -452,15 +452,14 @@ impl Project {
             });
             return None;
         };
-        let path_buf;
-        if path.starts_with('/') {
-            let path = self.evaluate_str(&path[1..], span.file, span.offset + 2);
-            path_buf = self.root.join(path);
+        let path = if let Some(path) = path.strip_prefix('/') {
+            let path = self.evaluate_str(path, span.file, span.offset + 2);
+            self.root.join(path)
         } else {
             let path = self.evaluate_str(path, span.file, span.offset + 1);
-            path_buf = self.file(parser.file).relative_path(path)
-        }
-        Some((path_buf, span))
+            self.file(parser.file).relative_path(path)
+        };
+        Some((path, span))
     }
     /// Take the optional value of an attribute after its name, which is at the parser, as an operand which is `none`
     /// without a value.
@@ -473,7 +472,7 @@ impl Project {
         self.parse_expression(parser)
     }
     /// Returns the value of a flag attribute, such as `default`, which is `true` without a value, or is a `bool`.
-    pub(super) fn flag(&mut self, operand: Operand) -> Option<bool> {
+    pub(super) fn flag(&mut self, operand: &Operand) -> Option<bool> {
         if operand.data == Data::None {
             return Some(true);
         }
@@ -489,21 +488,21 @@ impl Project {
         let (names, list) = match parser.peek() {
             Some('[') => {
                 let operand = self.parse_expression(parser)?;
-                (self.crate_names(operand)?, true)
+                (self.crate_names(&operand)?, true)
             },
             Some('{') => {
                 let operand = self.parse_braced(parser)?;
                 if matches!(operand.data, Data::List(_)) && matches!(parser.peek(), Some('\n') | None) {
-                    (self.crate_names(operand)?, true)
+                    (self.crate_names(&operand)?, true)
                 } else {
                     // part of a name, or the whole of one
                     let name = self.parse_name_from(parser, start, operand.data.coerce_string(), false)?;
-                    (vec![(name.name, name.span)], false)
+                    (vec![(name.text, name.span)], false)
                 }
             },
             _ => {
                 let name = self.parse_name(parser)?;
-                (vec![(name.name, name.span)], false)
+                (vec![(name.text, name.span)], false)
             },
         };
         let span = parser.span_from(start);
@@ -535,10 +534,10 @@ impl Project {
         }
     }
     /// Returns the names of the crates in a list, which are names or references to crates, with the span of the list.
-    fn crate_names(&mut self, operand: Operand) -> Option<Vec<(String, Span)>> {
+    fn crate_names(&mut self, operand: &Operand) -> Option<Vec<(String, Span)>> {
         let span = operand.span;
         let Data::List(items) = &operand.data else {
-            self.invalid_operand(&operand, "list of crate names", false);
+            self.invalid_operand(operand, "list of crate names", false);
             return None;
         };
         let mut names = Vec::new();
@@ -547,7 +546,7 @@ impl Project {
                 Data::Str(name) => names.push((name.clone(), span)),
                 Data::Ref(Ref { referent: Referent::Crate { name, .. }, .. }) => names.push((name.clone(), span)),
                 _ => {
-                    self.invalid_operand(&operand, "list of crate names", false);
+                    self.invalid_operand(operand, "list of crate names", false);
                     return None;
                 },
             }

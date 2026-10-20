@@ -64,7 +64,7 @@ impl Project {
     pub(super) fn install_attribute(&mut self, install: &mut Install, name: &str, operand: Operand) {
         match name {
             "install" => {
-                if let Some(enabled) = self.flag(operand) {
+                if let Some(enabled) = self.flag(&operand) {
                     install.enabled = enabled;
                 }
             },
@@ -77,7 +77,7 @@ impl Project {
                 let span = operand.span;
                 let mode = match self.integer_operand(operand).map(|operand| operand.data) {
                     Some(Data::Unsigned(mode)) => mode,
-                    Some(Data::Signed(mode)) if mode >= 0 => mode as u64,
+                    Some(Data::Signed(mode)) if mode >= 0 => mode.unsigned_abs(),
                     Some(data) => return self.invalid_install_mode(data.coerce_string(), span),
                     None => return,
                 };

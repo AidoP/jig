@@ -22,7 +22,7 @@ pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
     ninja.args(["-k", "0"]).args(&targets);
     let linted = match ninja.status() {
         Ok(status) => status.success(),
-        Err(error) => return Err(Error::Exec(ninja, error)),
+        Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
     };
     // read after ninja, which reconfigures if needed, so that it is current
     let bytes = project.read()?;

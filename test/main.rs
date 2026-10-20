@@ -6,7 +6,8 @@
 //! The `jig` binary is found with the `CONFIGURE` environment variable, or as the `jig` crate's output, in the target
 //! directory which contains the directory of this test harness.
 
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A project in a temporary directory, removed when dropped.
@@ -136,7 +137,7 @@ impl Output {
     /// Returns the outputs of the crates' `build` statements, rather than their checks.
     fn outputs(&self) -> Vec<&str> {
         let outputs = self.ninja.lines().filter_map(|line| line.strip_prefix("build ")?.split(':').next());
-        outputs.filter(|output| output.ends_with(".rlib")).collect()
+        outputs.filter(|output| Path::new(output).extension().is_some_and(|extension| extension == "rlib")).collect()
     }
 }
 
@@ -246,7 +247,7 @@ crate core 'core.rs'
     let host = project.host();
     let output = project.configure().ok();
     let mut outputs = output.outputs();
-    outputs.sort();
+    outputs.sort_unstable();
     // in the order of their names, as the host target may come before the other
     let mut expected = ["riscv64gc-unknown-none-elf/libcore.rlib".to_string(), format!("{host}/libcore.rlib")];
     expected.sort();
@@ -2353,7 +2354,7 @@ crate app 'app.rs'
     let output = project.configure().ok();
     // a crate is declared for each target, with its dependencies for the same target
     let mut outputs = output.outputs();
-    outputs.sort();
+    outputs.sort_unstable();
     let mut expected = vec![
         "riscv64gc-unknown-none-elf/libapp.rlib".to_string(),
         "riscv64gc-unknown-none-elf/libcore.rlib".into(),
@@ -2632,7 +2633,7 @@ log note 'after'
     let output = project.configure().ok();
     // the statement is processed for each value, with the meta-statements after the `@for`
     let mut outputs = output.outputs();
-    outputs.sort();
+    outputs.sort_unstable();
     assert_eq!(outputs, ["riscv64gc-unknown-none-elf/libk.rlib", "x86_64-unknown-none/libk.rlib"]);
     output.stderr("note: even 2\n").stderr("note: even 4\n");
     assert!(!output.stderr.contains("even 1") && !output.stderr.contains("even 3"), "{}", output.stderr);
@@ -3736,7 +3737,6 @@ custom doc
         assert!(output.status.success(), "install failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
         stdout
     };
-    use std::os::unix::fs::PermissionsExt;
     let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
     // the `install-prefix` property is relative to the project root
     let stdout = install(&[]);
@@ -3783,7 +3783,6 @@ custom doc
     let run = || run_with_stderr().0;
     // it is up to date, so it is run without a diagnostic
     assert_eq!(run_with_stderr(), ("one [\"a b\"]\n".into(), String::new()));
-    use std::os::unix::fs::PermissionsExt;
     assert_eq!(std::fs::metadata(stage.join("bin/app")).unwrap().permissions().mode() & 0o7777, 0o755);
     // which builds it again when it changes, with a warning
     std::fs::write(project.dir.join("app.rs"), "fn main() { println!(\"two\"); }\n").unwrap();
@@ -3876,7 +3875,6 @@ custom tool
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), stderr)
     };
     let script = || std::fs::read_to_string(&wrapper).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     let mode = || std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o7777;
     let installed = script();
     let (success, stdout, stderr) = run();

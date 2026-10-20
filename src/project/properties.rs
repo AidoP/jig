@@ -12,7 +12,7 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        let Some(Name { name, span, literal }) = self.parse_name(parser) else {
+        let Some(Name { text: name, span, literal }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
         };
@@ -143,23 +143,21 @@ impl Project {
             });
         }
     }
-    /// Returns the span of the value of a read-only property which already has a value.
+    /// Returns the index of the value of a read-only property which already has a value.
     ///
     /// A read-only property may be assigned once, by a `default` or a `set`, so further assignments are errors.
-    /// The span is [`None`] for a builtin value.
-    fn read_only_value(&self, id: usize, name: &str) -> Option<Option<Span>> {
+    fn read_only_value(&self, id: usize, name: &str) -> Option<usize> {
         if !self.properties[id].as_ref().is_some_and(|property| property.read_only) {
             return None;
         }
-        let value = self.values_idx.get(name)?;
-        Some(self.values[*value].span)
+        self.values_idx.get(name).copied()
     }
     pub(super) fn parse_set(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
             parser.skip_statement();
             return;
         }
-        let Some(Name { name, span, .. }) = self.parse_name(parser) else {
+        let Some(Name { text: name, span, .. }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
         };
@@ -195,13 +193,14 @@ impl Project {
         // the codegen options of a target, and clippy's lints, are declared when they are first used
         self.declare_on_demand(ident);
         let property = self.declare(ident.into(), None);
-        if let Some(assigned) = self.read_only_value(property, ident) {
+        if let Some(value) = self.read_only_value(property, ident) {
             self.diagnostics.push(Diagnostic {
                 span: Some(span),
                 message: Message::ReadOnlyProperty {
                     id: property,
                     name: ident.into(),
-                    assigned,
+                    // which is none for a builtin value
+                    assigned: self.values[value].span,
                     builtin: self.properties[property].as_ref().is_some_and(|property| property.span.is_none()),
                 },
                 severity: Severity::Error,
@@ -242,15 +241,12 @@ impl Project {
     /// Check that an assigned value has the type of its property, converting it if needed, and report it if not.
     fn check_type(&mut self, value: usize, name: &str) -> bool {
         let property = self.properties[self.values[value].property].as_ref().unwrap();
-        match property.ty.accept(self.values[value].data.clone()) {
-            Ok(data) => {
-                self.values[value].data = data;
-                true
-            },
-            Err(_) => {
-                self.mismatched_type(value, name);
-                false
-            },
+        if let Ok(data) = property.ty.accept(self.values[value].data.clone()) {
+            self.values[value].data = data;
+            true
+        } else {
+            self.mismatched_type(value, name);
+            false
         }
     }
     /// Report a value which does not have the type of its property.

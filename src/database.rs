@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -110,7 +110,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
         write_str(w, flycheck.diagnostics)?;
-        write_u32(w, flycheck.member as u32)?;
+        write_u32(w, u32::from(flycheck.member))?;
         write_u32s(w, &flycheck.deps)?;
     }
     write_u32(w, database.tests.len())?;
@@ -130,7 +130,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         write_str(w, install.target)?;
         write_str(w, install.dir)?;
         write_u32(w, install.mode)?;
-        write_u32(w, install.program as u32)?;
+        write_u32(w, u32::from(install.program))?;
     }
     Ok(())
 }

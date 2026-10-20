@@ -128,7 +128,7 @@ impl Project {
                         *chain = None;
                         return Meta::Skip;
                     }
-                    let Some(inner) = self.process_with(parser, with) else {
+                    let Ok(inner) = self.process_with(parser, with) else {
                         state.failed = true;
                         continue;
                     };
@@ -237,21 +237,21 @@ impl Project {
     /// Process the meta-statements and statement after a `@with`, and the statements chained to it, with its property
     /// set, then restore the property's value, unless they set it.
     ///
-    /// Returns the chain of the conditions after it, or [`None`] if the property cannot be set.
+    /// Returns the chain of the conditions after it, or an error if the property cannot be set, which is reported.
     ///
     /// As with `set`, the property may be declared later, which checks the value it was given.
-    fn process_with(&mut self, parser: &mut Parser, with: With) -> Option<Option<bool>> {
+    fn process_with(&mut self, parser: &mut Parser, with: With) -> Result<Option<bool>, ()> {
         let previous = self.values_idx.get(&with.name).copied();
         let previous_local = self.files[parser.file].locals.get(&with.name).copied();
         if !self.set_property(&with.name, with.span, with.value) {
-            return None;
+            return Err(());
         }
         let assigned = self.values_idx[&with.name];
         let mut inner = None;
         self.parse_statement(parser, &mut inner);
         // a value set by the statements remains, as with `set` anywhere else
         if self.values_idx.get(&with.name) != Some(&assigned) {
-            return Some(inner);
+            return Ok(inner);
         }
         self.reverted.push(assigned);
         match previous {
@@ -261,7 +261,7 @@ impl Project {
         if let Some(local) = previous_local {
             self.files[parser.file].locals.insert(with.name, local);
         }
-        Some(inner)
+        Ok(inner)
     }
     /// Take the rest of a `@with`, a property and its value, as `<name> as <value>`, skipping the line if it is invalid.
     fn parse_with(&mut self, parser: &mut Parser) -> Option<With> {
@@ -283,7 +283,7 @@ impl Project {
         if !self.parse_line_end(parser) {
             return None;
         }
-        Some(With { name: name.name, span: name.span, value })
+        Some(With { name: name.text, span: name.span, value })
     }
     /// Take a keyword, such as the `in` of `@for`, reporting it if it is missing.
     fn parse_keyword(&mut self, parser: &mut Parser, keyword: &'static str) -> bool {
@@ -311,7 +311,7 @@ impl Project {
         if !self.parse_space(parser) {
             return None;
         }
-        let name = self.parse_name(parser)?.name;
+        let name = self.parse_name(parser)?.text;
         if !self.parse_space(parser) || !self.parse_keyword(parser, "in") {
             return None;
         }
@@ -347,6 +347,6 @@ impl Project {
             parser.skip_line();
             return None;
         }
-        self.bool_operand(operand)
+        self.bool_operand(&operand)
     }
 }

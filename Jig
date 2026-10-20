@@ -4,6 +4,17 @@ use msrv
 
 # defaults
 set codegen/opt-level 3
+set clippy/pedantic 'warn'
+# paths and names are quoted in messages with `{:?}`
+set clippy/unnecessary_debug_formatting 'allow'
+# the parsers of statements are read from start to end, and the cases of a match are kept apart where they mean
+# different things, or their order matters
+set clippy/too_many_lines 'allow'
+set clippy/match_same_arms 'allow'
+# the values which are narrowed are known to fit, such as the fields of 32-bit ELF files, and the flags of a crate are
+# independent
+set clippy/cast_possible_truncation 'allow'
+set clippy/struct_excessive_bools 'allow'
 declare targets
     type 'list'
     info 'the targets jig is built for, of which those with their standard library installed are built'

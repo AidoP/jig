@@ -54,3 +54,21 @@ jobs:
         env:
           # the budgets of the performance tests are for a fast machine, while their scaling is checked regardless
           JIG_PERF_SCALE: ${{ matrix.os == 'ubuntu-24.04-riscv' && '10' || '4' }}
+
+  lint:
+    # on one machine, with the latest clippy, as its lints change between versions
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Bootstrap
+        run: ninja -f bootstrap.ninja
+      - name: Lint
+        # any warning fails, as the levels of the lints, set in `Jig`, are those the project keeps to
+        run: build/bootstrap/jig lint -D

@@ -27,7 +27,7 @@ impl <'a> Parser<'a> {
         &self.data[self.offset..]
     }
     pub fn as_bytes(&self) -> &'a [u8] {
-        self.data[self.offset..].as_bytes()
+        &self.data.as_bytes()[self.offset..]
     }
     pub fn is_empty(&self) -> bool {
         self.offset >= self.data.len()
@@ -46,7 +46,7 @@ impl <'a> Parser<'a> {
         }
     }
     pub fn skip_empty(&mut self) {
-        while let Some(b) = self.as_bytes().get(0) {
+        while let Some(b) = self.as_bytes().first() {
             match b {
                 b'#' => {
                     self.skip_statement();
@@ -77,7 +77,7 @@ impl <'a> Parser<'a> {
             } else {
                 self.offset = self.data.len();
             }
-            match self.as_bytes().get(0) {
+            match self.as_bytes().first() {
                 Some(b' ') => (),
                 _ => break,
             }
@@ -204,7 +204,7 @@ impl <'a> Parser<'a> {
         Span {
             file: self.file,
             offset: self.offset,
-            len: self.as_str().chars().next().map(|c| c.len_utf8()).unwrap_or_default(),
+            len: self.as_str().chars().next().map(char::len_utf8).unwrap_or_default(),
         }
     }
     /// Returns the span from `start` to the current offset.

@@ -8,7 +8,7 @@
 //!
 //! macOS needs a code signature for arm64 and does not support static executables, so a macOS target is probed by
 //! running `/usr/bin/true`, which is a universal program of macOS, as the target's architecture with `arch`, which runs
-//! where macOS does, such as x86_64 with Rosetta.
+//! where macOS does, such as `x86_64` with Rosetta.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -364,8 +364,8 @@ fn command(path: &Path, runner: &[String]) -> Command {
 
 /// Run a command, returning whether it exited successfully within the timeout.
 fn run(mut command: Command, toolchain: Option<&str>, timeout: Duration) -> bool {
-    crate::toolchain::apply(&mut command, toolchain);
     use std::process::Stdio;
+    crate::toolchain::apply(&mut command, toolchain);
     let Ok(mut child) = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
         return false;
     };

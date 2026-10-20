@@ -99,7 +99,7 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        let Some(Name { name, span, .. }) = self.parse_name(parser) else {
+        let Some(Name { text: name, span, .. }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
         };
@@ -154,7 +154,7 @@ impl Project {
                         continue;
                     };
                     if attribute == "default" {
-                        if let Some(value) = self.flag(operand) {
+                        if let Some(value) = self.flag(&operand) {
                             default = value;
                         }
                     } else {

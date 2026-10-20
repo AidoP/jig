@@ -94,6 +94,12 @@ fn target_codegen_option(name: &str) -> Option<(&str, &'static CodegenOption)> {
     Some((target, option))
 }
 
+/// Returns the target of the name of a property of a codegen option for a target, `codegen/<target>/<option>`, if it
+/// names an option, whether or not the target is known.
+pub(super) fn target_of_codegen_option(name: &str) -> Option<&str> {
+    target_codegen_option(name).map(|(target, _)| target)
+}
+
 impl Project {
     /// Declare the property of each codegen option, which has no value until it is set.
     ///
@@ -128,11 +134,6 @@ impl Project {
         self.declare(name.into(), Some(property));
         true
     }
-    /// Returns the target of the name of a property of a codegen option for a target, `codegen/<target>/<option>`, if
-    /// it names an option, whether or not the target is known.
-    pub(super) fn target_of_codegen_option<'a>(&self, name: &'a str) -> Option<&'a str> {
-        target_codegen_option(name).map(|(target, _)| target)
-    }
     /// Returns the codegen options of a crate declared at `span` for each of its targets, as `<option>=<value>`, from
     /// its attributes, or the properties which are set, those for the target replacing the others, reporting those
     /// whose values cannot be given to rustc.
@@ -152,12 +153,12 @@ impl Project {
             } else {
                 self.property_operand(&property_name(option), span)
             };
-            let values = operand.and_then(|operand| self.codegen_values(option, operand));
+            let values = operand.and_then(|operand| self.codegen_values(option, &operand));
             for (target, options) in targets.iter().zip(&mut options) {
                 let values = match attribute {
                     Some(_) => values.clone(),
                     None => match self.property_operand(&target_property_name(target, option), span) {
-                        Some(operand) => self.codegen_values(option, operand),
+                        Some(operand) => self.codegen_values(option, &operand),
                         None => values.clone(),
                     },
                 };
@@ -175,13 +176,13 @@ impl Project {
     }
     /// Returns the values of a codegen option, which is given once for each, reporting a value which cannot be given
     /// to rustc.
-    fn codegen_values(&mut self, option: &CodegenOption, operand: Operand) -> Option<Vec<String>> {
+    fn codegen_values(&mut self, option: &CodegenOption, operand: &Operand) -> Option<Vec<String>> {
         match (&operand.data, option.list) {
             (Data::List(items), ListKind::Joined(separator)) => Some(vec![strings(items).join(separator)]),
             (Data::List(items), ListKind::Repeated) => Some(strings(items)),
             (Data::List(_) | Data::Dict(_) | Data::None, _) => {
                 let expected = if matches!(option.list, ListKind::None) { "str" } else { "str or list" };
-                self.invalid_operand(&operand, expected, false);
+                self.invalid_operand(operand, expected, false);
                 None
             },
             (data, _) => Some(vec![data.coerce_string()]),

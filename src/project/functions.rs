@@ -117,7 +117,7 @@ impl Project {
         }
         if name == "defined" {
             let names = self.parse_arguments(parser, ')', |this, parser| {
-                this.parse_name(parser).map(|name| (name.name, name.span))
+                this.parse_name(parser).map(|name| (name.text, name.span))
             })?;
             let span = parser.span_from(name_span.offset);
             let [(name, name_span)] = &names[..] else {
@@ -129,7 +129,7 @@ impl Project {
         }
         if name == "select" {
             let names = self.parse_arguments(parser, ')', |this, parser| {
-                this.parse_name(parser).map(|name| (name.name, name.span))
+                this.parse_name(parser).map(|name| (name.text, name.span))
             })?;
             let span = parser.span_from(name_span.offset);
             if names.is_empty() {
@@ -152,7 +152,7 @@ impl Project {
                 let collection = arguments.next()?;
                 let key = arguments.next()?;
                 let default = arguments.next().map(|default| default.data);
-                self.get(collection, key, default)?
+                self.get(&collection, key, default)?
             },
             "min" | "max" => {
                 let mut values = values(arguments);
@@ -221,7 +221,7 @@ impl Project {
             "contains" => {
                 let collection = arguments.next()?;
                 let value = arguments.next()?;
-                Data::Bool(self.contains(collection, value)?)
+                Data::Bool(self.contains(&collection, value)?)
             },
             // the first of each value which is equal to others, in order
             "unique" => {
@@ -374,7 +374,7 @@ impl Project {
         Some(Operand { data, span, coerce: Coercion::Strict, origin: None })
     }
     /// Returns the item of a list at an index, or the value of a dict for a key, or the default if there is none.
-    fn get(&mut self, collection: Operand, key: Operand, default: Option<Data>) -> Option<Data> {
+    fn get(&mut self, collection: &Operand, key: Operand, default: Option<Data>) -> Option<Data> {
         let key_span = key.span;
         let missing = match &collection.data {
             Data::Dict(entries) => {
@@ -397,7 +397,7 @@ impl Project {
                 Message::IndexOutOfRange { len: items.len() }
             },
             _ => {
-                self.invalid_operand(&collection, "list or dict", false);
+                self.invalid_operand(collection, "list or dict", false);
                 return None;
             },
         };
@@ -415,16 +415,16 @@ impl Project {
         let mut items = Vec::new();
         for value in values {
             let data = match value.data {
-                Data::Unsigned(_) if signed => match value.data.convert_sign() {
-                    Some(data) => data,
-                    None => {
+                Data::Unsigned(_) if signed => {
+                    let Some(data) = value.data.convert_sign() else {
                         self.diagnostics.push(Diagnostic {
                             span: Some(value.span),
                             message: Message::IntegerOverflow,
                             severity: Severity::Error,
                         });
                         return None;
-                    },
+                    };
+                    data
                 },
                 Data::Str(_) | Data::Bool(_) | Data::Unsigned(_) | Data::Signed(_) => value.data,
                 _ => {
@@ -461,7 +461,7 @@ impl Project {
         Some(items)
     }
     /// Returns whether a list has an item equal to a value, or a dict has an entry for a key.
-    fn contains(&mut self, collection: Operand, value: Operand) -> Option<bool> {
+    fn contains(&mut self, collection: &Operand, value: Operand) -> Option<bool> {
         match &collection.data {
             Data::Dict(entries) => {
                 let key = self.str_operand(value)?;
@@ -477,7 +477,7 @@ impl Project {
                 Some(false)
             },
             _ => {
-                self.invalid_operand(&collection, "list or dict", false);
+                self.invalid_operand(collection, "list or dict", false);
                 None
             },
         }
@@ -490,7 +490,7 @@ impl Project {
         if !is_named_entry(parser) {
             return Some(Argument::Positional(self.parse_binary(parser, 0)?));
         }
-        let Name { name, span, .. } = self.parse_name(parser)?;
+        let Name { text: name, span, .. } = self.parse_name(parser)?;
         parser.offset += 2;
         Some(Argument::Named { name, span, value: self.parse_binary(parser, 0)? })
     }
@@ -515,7 +515,7 @@ impl Project {
                         failed = true;
                         continue;
                     }
-                    match self.bool_operand(value) {
+                    match self.bool_operand(&value) {
                         Some(value) => ignore_pre_release = Some(value),
                         None => failed = true,
                     }

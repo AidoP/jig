@@ -73,7 +73,7 @@ as `<name>`, or `<name>@<target>` if the target is not the host target. A crate 
 levels of the lints set by the `clippy/<lint>` properties where it is declared. Every crate which can be is linted,
 even if another fails, and the diagnostics of each are shown, even if nothing needed linting, as they are saved. It
 fails if a lint is an error, such as one which is denied, and with `-D` or `--deny-warnings`, if there is a warning,
-which is found in what was saved, so the lints are not run again.
+which is found in what was saved, so the lints are not run again, as `jig lint -D` is in CI.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
 project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is

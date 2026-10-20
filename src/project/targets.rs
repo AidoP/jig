@@ -53,12 +53,7 @@ const TARGET_OPTIONS: &[TargetOption] = &[
 
 /// Returns the option set by an attribute of a `target` statement, if it sets one.
 pub(super) fn target_option(attribute: &str) -> Option<&'static TargetOption> {
-    for option in TARGET_OPTIONS {
-        if option.attribute == attribute {
-            return Some(option);
-        }
-    }
-    None
+    TARGET_OPTIONS.iter().find(|option| option.attribute == attribute)
 }
 
 /// A field of a target specification.
@@ -152,7 +147,7 @@ impl Project {
             parser.skip_statement();
             return;
         }
-        let Some(Name { name, span, .. }) = self.parse_name(parser) else {
+        let Some(Name { text: name, span, .. }) = self.parse_name(parser) else {
             parser.skip_statement();
             return;
         };

@@ -1,5 +1,6 @@
 //! Generation of `.rust-project.json`, which describes the crates to rust-analyzer.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::generate::Unit;
@@ -43,31 +44,32 @@ fn entry(unit: &Unit, units: &[Unit]) -> String {
         crate::project::rust::Kind::Lib | crate::project::rust::Kind::ProcMacro => "lib",
     };
     let mut entry = String::from("        {\n");
-    entry.push_str(&format!("            \"display_name\": {},\n", string(&unit.name)));
-    entry.push_str(&format!("            \"root_module\": {},\n", path(&unit.root)));
+    let _ = writeln!(entry, "            \"display_name\": {},", string(&unit.name));
+    let _ = writeln!(entry, "            \"root_module\": {},", path(&unit.root));
     entry.push_str("            \"edition\": \"2024\",\n");
     // a custom target is given to rustc as its specification
     let target = match &unit.spec {
         Some(spec) => path(spec),
         None => string(&unit.target),
     };
-    entry.push_str(&format!("            \"target\": {target},\n"));
-    entry.push_str(&format!("            \"is_workspace_member\": {},\n", unit.member));
+    let _ = writeln!(entry, "            \"target\": {target},");
+    let _ = writeln!(entry, "            \"is_workspace_member\": {},", unit.member);
     // rust-analyzer loads procedural macros itself to expand them
     if unit.kind == crate::project::rust::Kind::ProcMacro {
         entry.push_str("            \"is_proc_macro\": true,\n");
-        entry.push_str(&format!("            \"proc_macro_dylib_path\": {},\n", path(&unit.output)));
+        let _ = writeln!(entry, "            \"proc_macro_dylib_path\": {},", path(&unit.output));
     }
-    entry.push_str(&format!("            \"cfg\": [{cfg}],\n"));
+    let _ = writeln!(entry, "            \"cfg\": [{cfg}],");
     if !env.is_empty() {
-        entry.push_str(&format!("            \"env\": {{ {} }},\n", env.join(", ")));
+        let _ = writeln!(entry, "            \"env\": {{ {} }},", env.join(", "));
     }
-    entry.push_str(&format!(
-        "            \"build\": {{ \"label\": {}, \"build_file\": {}, \"target_kind\": \"{kind}\" }},\n",
+    let _ = writeln!(
+        entry,
+        "            \"build\": {{ \"label\": {}, \"build_file\": {}, \"target_kind\": \"{kind}\" }},",
         string(&unit.label),
         path(&unit.build_file),
-    ));
-    entry.push_str(&format!("            \"deps\": [{}]\n", deps.join(", ")));
+    );
+    let _ = writeln!(entry, "            \"deps\": [{}]", deps.join(", "));
     entry.push_str("        }");
     entry
 }
@@ -89,7 +91,7 @@ pub fn string(s: &str) -> String {
             '"' => json.push_str("\\\""),
             '\\' => json.push_str("\\\\"),
             '\n' => json.push_str("\\n"),
-            c if (c as u32) < 0x20 => json.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => _ = write!(json, "\\u{:04x}", c as u32),
             c => json.push(c),
         }
     }

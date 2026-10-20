@@ -1,5 +1,6 @@
 //! Generation of the JSON specifications of custom targets, which rustc uses in place of a builtin target.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::project::{Data, Field};
@@ -41,7 +42,7 @@ pub fn spec(target_fields: &[Field], inherited: Option<&str>) -> Result<String, 
         if i > 0 {
             spec.push_str(",\n");
         }
-        spec.push_str(&format!("  {}: {}", string(&field.name), field.json));
+        let _ = write!(spec, "  {}: {}", string(&field.name), field.json);
     }
     spec.push_str("\n}\n");
     Ok(spec)
@@ -74,7 +75,7 @@ fn json(data: &Data) -> String {
                 if json.len() > 1 {
                     json.push_str(", ");
                 }
-                json.push_str(&format!("{}: {}", string(name), self::json(value)));
+                let _ = write!(json, "{}: {}", string(name), self::json(value));
             }
             json.push('}');
             json

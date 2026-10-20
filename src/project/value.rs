@@ -1,6 +1,7 @@
 //! The values of properties and expressions, and their types.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::syntax::{Parser, Span};
@@ -66,7 +67,7 @@ impl Data {
                     _ => None,
                 }
             },
-            Self::Bool(value) => Some(Self::Unsigned(*value as u64)),
+            Self::Bool(value) => Some(Self::Unsigned(u64::from(*value))),
             Self::Unsigned(_) | Self::Signed(_) => Some(self.clone()),
             Self::List(_) | Self::Dict(_) | Self::Ref(_) => None,
         }
@@ -131,7 +132,7 @@ impl Data {
                     if !string.is_empty() {
                         string.push_str(", ");
                     }
-                    string.push_str(&format!("{name}: {}", value.coerce_string()));
+                    let _ = write!(string, "{name}: {}", value.coerce_string());
                 }
                 string
             },
