@@ -55,18 +55,26 @@ which runs ninja in the build directory, and tested with `jig test`.
 ```
 
 `jig generate` evaluates `Jig`, writes `build.ninja` to the build directory and records the build directory in `.jig`,
-at the project root. `jig build`, `jig check`, `jig test`, `jig lint` and `jig install` find `.jig` in the working
-directory or its parents, so they can be run from anywhere in the project. They configure the project first if it is
-not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its build
-directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja, such as
-the targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test`,
-`test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom commands
-with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the checks,
-which are for rust-analyzer, nor the lints.
+at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install` find `.jig` in the
+working directory or its parents, so they can be run from anywhere in the project. They configure the project first if
+it is not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
+build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
+such as the targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`,
+`test`, `test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom
+commands with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the
+checks, which are for rust-analyzer, nor the lints.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
 until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
 when it was configured, where `'error'` stops the command before running ninja.
+
+`jig run [<name>] [--] [<argument> ...]` builds a binary crate and runs it with the arguments, in the working
+directory, by the `runner` of its target if it has one, which it is given to before the arguments, and exits as it
+does. What is built is reported on stderr, so that stdout is the program's. A crate is named as a test is, as
+`<name>@<target>` if its target is not the host target, though its name alone is enough if only one target has a binary
+crate with it, or only one of those is `default`, and without a name, the project's only binary crate is run, or the
+only one which is `default`. Arguments which start with `-` follow `--`,
+as in `jig run -- --help`.
 
 `jig lint` lints the crates of the project with clippy, which are those not from the toolchain, or only those named,
 as `<name>`, or `<name>@<target>` if the target is not the host target. A crate is linted as it is checked, with the

@@ -123,6 +123,8 @@ pub struct Unit {
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
     pub doc: Option<String>,
+    /// Whether the crate is built by `ninja` without targets, which `jig run` prefers.
+    pub default: bool,
     /// The name of the crate's lint, `lint/<name>`, if it is edited, so that it is linted.
     pub lint: Option<String>,
     /// The flags which give clippy's lints their levels.
@@ -321,6 +323,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             env: c.env.clone(),
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
+            default: c.default,
             lint: member.then(|| c.short_name(&host)),
             lints: c.lints.clone(),
             harness: c.test,
@@ -731,6 +734,17 @@ fn write_database(
         }
     }
 
+    // the binary crates, by the name of the crate with its target, as a test is named
+    let host = project.host();
+    let mut programs = Vec::new();
+    for unit in units.iter().filter(|unit| unit.kind == Kind::Bin) {
+        let name = if unit.target == host { unit.name.clone() } else { format!("{}@{}", unit.name, unit.target) };
+        let runner = project.target(&unit.target).and_then(|target| target.runner);
+        let runner = runner.map(|runner| project.runners[runner].command.clone()).unwrap_or_default();
+        let (path, target) = (unit.output.display().to_string(), at.path(&unit.output).display().to_string());
+        programs.push((name, path, target, runner, unit.default));
+    }
+
     let missing = missing.iter().map(String::as_str).collect();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets: Vec<_> = installed.iter().map(|file| at.path(&file.path).display().to_string()).collect();
@@ -758,6 +772,10 @@ fn write_database(
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
         database.tests.push(database::Test { name: test.name, command, libtest: test.libtest });
+    }
+    for (name, path, target, runner, default) in &programs {
+        let runner = runner.iter().map(String::as_str).collect();
+        database.programs.push(database::Program { name, path, target, runner, default: *default });
     }
     for ((file, path), target) in installed.iter().zip(&install_paths).zip(&install_targets) {
         let (dir, mode, program) = (&file.dir, file.mode, file.program);

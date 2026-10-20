@@ -2267,6 +2267,67 @@ log note clippy/nope
 }
 
 #[test]
+fn run_programs() {
+    let hello = "\
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    println!(\"hello {args:?} in {}\", std::env::current_dir().unwrap().display());
+    std::process::exit(if args.first().is_some_and(|arg| arg == \"fail\") { 3 } else { 0 });
+}
+";
+    let project = Project::new("run-programs", &[
+        ("Jig", "crate hello 'hello.rs'\n    crate-type 'bin'\ncrate lib 'lib.rs'\n"),
+        ("hello.rs", hello),
+        ("lib.rs", ""),
+        ("sub/.keep", ""),
+    ]);
+    project.configure().ok();
+    let run = |dir: &str, args: &[&str]| {
+        let mut command = Command::new(configure_path());
+        let output = command.arg("run").args(args).current_dir(project.dir.join(dir)).output().unwrap();
+        (output.status.code(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
+    };
+    let dir = project.dir.display().to_string();
+    // the only binary crate is built and run in the working directory, with what is built reported on stderr
+    let (code, stdout, stderr) = run("sub", &[]);
+    assert_eq!((code, stdout), (Some(0), format!("hello [] in {dir}/sub\n")), "{stderr}");
+    assert_contains(&stderr, "RUSTC ");
+    // with the arguments after its name, or after `--`, and with its exit status
+    assert_eq!(run(".", &["hello", "a", "-b"]).1, format!("hello [\"a\", \"-b\"] in {dir}\n"));
+    assert_eq!(run(".", &["--", "--flag"]).1, format!("hello [\"--flag\"] in {dir}\n"));
+    assert_eq!(run(".", &["hello", "fail"]).0, Some(3));
+    let (code, _, stderr) = run(".", &["nope"]);
+    assert_eq!(code, Some(1));
+    assert_contains(&stderr, "no program named \"nope\", of hello");
+
+    // the runner of the program's target runs it, before its arguments
+    let host = project.host();
+    let project = Project::new("run-programs-runner", &[
+        ("Jig", &format!("\
+crate hello 'hello.rs'
+    crate-type 'bin'
+crate other 'hello.rs'
+    crate-type 'bin'
+    default
+target {host}
+    override
+    runner ['./wrap.sh', '--tag']
+")),
+        ("hello.rs", hello),
+        ("wrap.sh", "#!/bin/sh\necho \"wrapped $1\"\nshift\nexec \"$@\"\n"),
+    ]);
+    make_executable(&project.dir.join("wrap.sh"), &project.dir.join("wrap.sh"));
+    project.configure().ok();
+    let output = Command::new(configure_path()).args(["run", "other", "x"]).current_dir(&project.dir).output().unwrap();
+    let expected = format!("wrapped --tag\nhello [\"x\"] in {}\n", project.dir.display());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+    // of several, the one built by default is run without a name
+    let output = Command::new(configure_path()).args(["run", "--", "y"]).current_dir(&project.dir).output().unwrap();
+    let expected = format!("wrapped --tag\nhello [\"y\"] in {}\n", project.dir.display());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+}
+
+#[test]
 fn crate_test_errors() {
     let project = Project::new("crate-test-errors", &[("Jig", "\
 crate k 'k.rs'

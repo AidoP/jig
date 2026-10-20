@@ -7,9 +7,10 @@
 //!
 //! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
 //! paths, the install prefix, the severities of `proxy-build` and `other-jig`, and the `jig` which configured it,
-//! followed by each section: the flychecks, the tests, the lints, then the installed files. A section is the number of its records
-//! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
-//! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
+//! followed by each section: the flychecks, the tests, the lints, the programs, then the installed files. A section
+//! is the number of its records followed by each record. Numbers are little-endian `u32`, strings are their length
+//! followed by their UTF-8 bytes, a list of strings or numbers is their number followed by each of them, and a `bool`
+//! is a number which is `0` or `1`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 11;
+const VERSION: u32 = 12;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -42,6 +43,7 @@ pub struct Database<'a> {
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
+    pub programs: Vec<Program<'a>>,
     pub installs: Vec<Install<'a>>,
 }
 
@@ -78,6 +80,21 @@ pub struct Lint<'a> {
     pub name: &'a str,
     /// The file of the diagnostics saved by the lint, relative to the project root.
     pub diagnostics: &'a str,
+}
+
+/// A binary crate, which `jig run` builds and runs.
+#[derive(Debug, PartialEq)]
+pub struct Program<'a> {
+    /// The name of the crate, with its target if it is not the host target, as `<name>@<target>`.
+    pub name: &'a str,
+    /// The binary, relative to the project root.
+    pub path: &'a str,
+    /// The ninja target which builds it, relative to the build directory.
+    pub target: &'a str,
+    /// The runner of its target, which it is run by, as its program and first arguments, or empty to run it directly.
+    pub runner: Vec<&'a str>,
+    /// Whether the crate is built by default, which chooses it from those which `jig run` could run.
+    pub default: bool,
 }
 
 /// A file which `jig install` installs.
@@ -124,6 +141,14 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         write_str(w, lint.name)?;
         write_str(w, lint.diagnostics)?;
     }
+    write_u32(w, database.programs.len())?;
+    for program in &database.programs {
+        write_str(w, program.name)?;
+        write_str(w, program.path)?;
+        write_str(w, program.target)?;
+        write_strs(w, &program.runner)?;
+        write_u32(w, u32::from(program.default))?;
+    }
     write_u32(w, database.installs.len())?;
     for install in &database.installs {
         write_str(w, install.path)?;
@@ -160,6 +185,10 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
     }
     for _ in 0..r.u32()? {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
+    }
+    for _ in 0..r.u32()? {
+        let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, r.bool()?);
+        database.programs.push(Program { name, path, target, runner, default });
     }
     for _ in 0..r.u32()? {
         database.installs.push(Install {
@@ -268,6 +297,16 @@ mod tests {
                 Test { name: "app", command: vec!["./build/test/app"], libtest: true },
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
+            programs: vec![
+                Program { name: "app", path: "build/host/app", target: "host/app", runner: vec![], default: true },
+                Program {
+                    name: "app@riscv64",
+                    path: "build/riscv64/app",
+                    target: "riscv64/app",
+                    runner: vec!["qemu", "-kernel"],
+                    default: false,
+                },
+            ],
             installs: vec![
                 Install { path: "build/app", target: "app", dir: "bin", mode: 0o755, program: true },
                 Install { path: "build/data", target: "custom/data", dir: "share", mode: 0o644, program: false },

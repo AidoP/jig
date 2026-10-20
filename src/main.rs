@@ -10,6 +10,7 @@ mod install;
 mod lint;
 mod ninja;
 mod project;
+mod run;
 mod rust_analyzer;
 mod target_spec;
 mod test_runner;
@@ -43,6 +44,10 @@ commands:
     test [-v] [<name> ...]
                          build and run the tests, or only those named, where `-v` or `--verbose` shows the output of
                          each test, such as the tests of a crate's test harness, rather than only those which fail
+    run [<name>] [--] [<argument> ...]
+                         build a binary crate and run it with arguments, by its target's runner if it has one, where
+                         a crate for a target other than the host is `<name>@<target>`, unless it is the only one with
+                         the name, and without a name, the only binary crate is run
     lint [-D] [<name> ...]
                          lint the crates which are edited with clippy, or only those named, as the `clippy/<lint>`
                          properties set where they are declared give the levels of the lints, where `-D` or
@@ -109,6 +114,14 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             let verbose = args.next_if(|arg| arg == "-v" || arg == "--verbose").is_some();
             let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
             test_runner::test(&names, verbose).map(|()| ExitCode::SUCCESS)
+        },
+        "run" => {
+            let mut args = args.peekable();
+            // a name before `--`, which the arguments of the program follow, so that they may start with `-`
+            let name = args.next_if(|arg| arg != "--").map(|name| name.to_string_lossy().into_owned());
+            args.next_if(|arg| arg == "--");
+            let args: Vec<_> = args.collect();
+            run::run(name.as_deref(), &args)
         },
         "lint" => {
             let mut args = args.peekable();
@@ -303,6 +316,10 @@ enum Error {
     /// Text which cannot be written to a file of ninja's, as it has a line break.
     LineBreak(std::path::PathBuf, String),
     UnknownLint(String),
+    UnknownProgram(String, Vec<String>),
+    /// A program to run was not named, though there are several, or a name is that of crates for several targets.
+    ProgramNotChosen(Vec<String>),
+    NoPrograms,
     LintFailed,
     LintWarnings,
     Exec(Box<std::process::Command>, std::io::Error),
@@ -352,6 +369,9 @@ impl core::fmt::Display for Error {
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
             Self::LineBreak(path, text) => write!(f, "cannot write {text:?} to {path:?}, as ninja cannot write a line break"),
             Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
+            Self::UnknownProgram(name, names) => write!(f, "no program named {name:?}, of {}", names.join(", ")),
+            Self::ProgramNotChosen(names) => write!(f, "choose the program to run, of {}", names.join(", ")),
+            Self::NoPrograms => write!(f, "no binary crate to run"),
             Self::LintFailed => write!(f, "linting failed"),
             Self::LintWarnings => write!(f, "linting raised warnings, which `-D` denies"),
             Self::Exec(cmd, error) => write!(f, "failed to execute {cmd:?}: {error}"),
