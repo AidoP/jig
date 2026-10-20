@@ -58,6 +58,85 @@ impl Installed {
 /// The largest permissions of an installed file, including the setuid, setgid and sticky bits.
 const MAX_MODE: u64 = 0o7777;
 
+/// Returns the `rwx` bits of written permissions, before they are shifted to the position of a class, where `X` is `x`
+/// if anyone can execute a file with `mode`, or [`None`] if one is not a permission.
+fn class_bits(permissions: &str, mode: u32) -> Option<u32> {
+    let mut rwx = 0;
+    for c in permissions.chars() {
+        match c {
+            'r' => rwx |= 0o4,
+            'w' => rwx |= 0o2,
+            'x' => rwx |= 0o1,
+            'X' if mode & 0o111 != 0 => rwx |= 0o1,
+            'X' | 's' | 't' => (),
+            _ => return None,
+        }
+    }
+    Some(rwx)
+}
+
+/// Returns the special bit of a class if written permissions have it: setuid and setgid, `s`, are of the owner and the
+/// group, while the sticky bit, `t`, is of others.
+fn special_bits(permissions: &str, class: char, special: u32) -> u32 {
+    let letter = if class == 'o' { 't' } else { 's' };
+    if permissions.contains(letter) { special } else { 0 }
+}
+
+/// Returns `base` changed by a symbolic mode, as taken by chmod, or [`None`] if it is not one.
+///
+/// It is clauses separated by `,`, each of which is who it applies to, of `u`, `g`, `o` and `a`, or everyone without
+/// any, followed by operations: `+`, `-` or `=`, and the permissions which are added, removed or set, of `r`, `w`, `x`,
+/// `X`, which is `x` if anyone can execute it, `s` and `t`, or one of `u`, `g` and `o`, whose permissions are copied.
+/// As there is no umask, `+x` is `a+x`.
+fn apply_symbolic_mode(symbolic: &str, base: u32) -> Option<u32> {
+    // the permissions of each class, in its position for the owner, and the special bit of each class
+    const CLASSES: [(char, u32, u32); 3] = [('u', 6, 0o4000), ('g', 3, 0o2000), ('o', 0, 0o1000)];
+    let mut mode = base;
+    for clause in symbolic.split(',') {
+        let operations = clause.trim_start_matches(['u', 'g', 'o', 'a']);
+        let who = &clause[..clause.len() - operations.len()];
+        let classes: Vec<_> = CLASSES.iter().filter(|(class, ..)| who.is_empty() || who.contains(['a', *class])).collect();
+        let mut chars = operations.chars().peekable();
+        // a clause needs an operation
+        chars.peek()?;
+        while let Some(operator) = chars.next() {
+            if !matches!(operator, '+' | '-' | '=') {
+                return None;
+            }
+            let mut permissions = String::new();
+            while let Some(&c) = chars.peek() && !matches!(c, '+' | '-' | '=') {
+                permissions.push(c);
+                chars.next();
+            }
+            // the permissions of another class, as `rwx`, or those which are written
+            let copied = match permissions.as_str() {
+                "u" | "g" | "o" => {
+                    let shift = CLASSES.iter().find(|(class, ..)| permissions.starts_with(*class)).unwrap().1;
+                    Some((mode >> shift) & 0o7)
+                },
+                _ => None,
+            };
+            let mut bits = 0;
+            for &&(class, shift, special) in &classes {
+                bits |= match copied {
+                    Some(rwx) => rwx << shift,
+                    None => class_bits(&permissions, mode)? << shift | special_bits(&permissions, class, special),
+                };
+            }
+            match operator {
+                '+' => mode |= bits,
+                '-' => mode &= !bits,
+                _ => {
+                    // the permissions of the classes are replaced, with their special bits
+                    let cleared = classes.iter().fold(0, |cleared, &&(_, shift, special)| cleared | (0o7 << shift) | special);
+                    mode = (mode & !cleared) | bits;
+                },
+            }
+        }
+    }
+    Some(mode)
+}
+
 impl Project {
     /// Take the value of an install attribute, `install`, `install-dir` or `install-mode`, which is `none` for an
     /// attribute without a value.
@@ -73,17 +152,26 @@ impl Project {
                     install.dir = dir;
                 }
             },
+            // a symbolic mode changes the default, or the mode it was given before
             "install-mode" => {
-                if let Some(mode) = self.mode_operand(operand) {
+                if let Some(mode) = self.mode_operand(operand, install.mode) {
                     install.mode = mode;
                 }
             },
             _ => unreachable!("not an install attribute: {name}"),
         }
     }
-    /// Returns the permissions of a file, such as `0o755`, from an operand, reporting a value which cannot be one.
-    pub(super) fn mode_operand(&mut self, operand: Operand) -> Option<u32> {
+    /// Returns the permissions of a file from an operand, which is an integer, such as `0o755`, or a symbolic mode, as
+    /// taken by chmod, such as `'u+x'`, which changes `base`, reporting a value which cannot be one.
+    pub(super) fn mode_operand(&mut self, operand: Operand, base: u32) -> Option<u32> {
         let span = operand.span;
+        if let Data::Str(symbolic) = &operand.data {
+            let mode = apply_symbolic_mode(symbolic, base);
+            if mode.is_none() {
+                self.invalid_mode(format!("{symbolic:?}"), span);
+            }
+            return mode;
+        }
         let mode = match self.integer_operand(operand)?.data {
             Data::Unsigned(mode) => mode,
             Data::Signed(mode) if mode >= 0 => mode.unsigned_abs(),
@@ -180,5 +268,35 @@ impl Project {
             message: Message::InvalidMode(mode),
             severity: Severity::Error,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_symbolic_mode;
+
+    #[test]
+    fn symbolic_modes() {
+        let mode = |symbolic: &str, base: u32| apply_symbolic_mode(symbolic, base);
+        // without who it applies to everyone, as there is no umask
+        assert_eq!(mode("+x", 0o644), Some(0o755));
+        assert_eq!(mode("u+x", 0o644), Some(0o744));
+        assert_eq!(mode("go-w", 0o666), Some(0o644));
+        assert_eq!(mode("a=r,u+w", 0o777), Some(0o644));
+        assert_eq!(mode("u=rwx,g=rx,o=", 0), Some(0o750));
+        // several operations in a clause, and the permissions of another class
+        assert_eq!(mode("u+x-w", 0o644), Some(0o544));
+        assert_eq!(mode("g=u", 0o640), Some(0o660));
+        assert_eq!(mode("+r=o", 0o640), Some(0o444));
+        // `X` is `x` only if someone can execute it
+        assert_eq!(mode("+X", 0o644), Some(0o644));
+        assert_eq!(mode("+X", 0o744), Some(0o755));
+        // the special bits, which `=` replaces with the rest
+        assert_eq!(mode("u+s", 0o755), Some(0o4755));
+        assert_eq!(mode("+t", 0o755), Some(0o1755));
+        assert_eq!(mode("u=rw", 0o4755), Some(0o655));
+        for invalid in ["", "x", "u", "u+q", "u+x,", "g=uw", "+ro"] {
+            assert_eq!(mode(invalid, 0o644), None, "{invalid:?}");
+        }
     }
 }

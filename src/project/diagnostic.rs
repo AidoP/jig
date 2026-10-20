@@ -568,7 +568,7 @@ impl core::fmt::Display for Message {
                 write!(f, "invalid {kind} {value:?}, as {reason}")
             },
             Self::InvalidMode(mode) => {
-                write!(f, "invalid mode {mode}, which must be permissions from 0 to 0o7777")
+                write!(f, "invalid mode {mode}, which must be permissions from 0 to 0o7777, or symbolic, such as 'u+x'")
             },
             Self::OtherJig { running, configured } => write!(
                 f,

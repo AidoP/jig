@@ -1854,7 +1854,7 @@ log note '{kernel-link.output} {len(kernel-link.content)} {empty.output}'
 fn generated_file_modes() {
     let project = Project::new("generated-file-modes", &[("Jig", "\
 file run-app
-    mode 0o755
+    mode '+x'
     install
     install-dir 'bin'
     content '''
@@ -1862,17 +1862,23 @@ file run-app
         exec echo hello
     '''
 file config
+    install-mode 'go-r'
     install
-    install-mode 0o600
+    mode 0o640
     content 'key = 1'
+custom tool
+    command 'true'
+    install-mode 'u=rwx,go=rx'
 log note '{run-app.mode} {run-app.install-mode} {run-app.install-dir} {config.mode} {config.install-mode} {config.install-dir}'
+log note '{tool.install-mode}'
 ")]);
     let output = project.configure().ok();
-    // a file is installed in `share` with its own permissions, which are `0o644` without `mode`, by default
-    output.stderr("note: 493 493 bin 420 384 share\n");
+    // a file is installed in `share` with its own permissions, which are `0o644` without `mode`, by default, and which a
+    // symbolic mode changes, as chmod does, though `install-mode` is given before `mode`
+    output.stderr("note: 493 493 bin 416 384 share\n").stderr("note: 493\n");
     let mode = |path: &str| std::fs::metadata(project.dir.join(path)).unwrap().permissions().mode() & 0o7777;
     assert_eq!(mode("build/run-app"), 0o755);
-    assert_eq!(mode("build/config"), 0o644);
+    assert_eq!(mode("build/config"), 0o640);
     // which are set again when they are changed
     std::fs::set_permissions(project.dir.join("build/run-app"), std::fs::Permissions::from_mode(0o600)).unwrap();
     project.configure().ok();
@@ -1922,8 +1928,8 @@ file g
         // a file cannot replace what ninja builds, nor another file
         .stderr("error[overlapping-output]: output \"build/gen\" of the file overlaps \"build/gen/out\", the output of the custom command \"gen\"\n  --> Jig:16:6")
         .stderr("error[overlapping-output]: output \"build/b\" of the file is also the output of the file \"b\"\n  --> Jig:19:6")
-        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777\n  --> Jig:23:10")
-        .stderr("error[invalid-operand]: str value used where integer is required\n  --> Jig:24:18")
+        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777, or symbolic, such as 'u+x'\n  --> Jig:23:10")
+        .stderr("error[invalid-mode]: invalid mode \"x\", which must be permissions from 0 to 0o7777, or symbolic, such as 'u+x'\n  --> Jig:24:18")
         .stderr("configuration failed with 9 errors");
 }
 
@@ -3886,10 +3892,10 @@ custom f
     install
 ")]);
     project.configure().failed()
-        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777\n --> Jig:2:18")
+        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777, or symbolic, such as 'u+x'\n --> Jig:2:18")
         .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:4:13")
         .stderr("error[invalid-operand]: none value used where str is required\n --> Jig:5:5")
-        .stderr("error[invalid-mode]: invalid mode -1, which must be permissions from 0 to 0o7777\n --> Jig:8:18")
+        .stderr("error[invalid-mode]: invalid mode -1, which must be permissions from 0 to 0o7777, or symbolic, such as 'u+x'\n --> Jig:8:18")
         .stderr("error[unknown-attribute]: unknown test attribute \"install\"\n  --> Jig:11:5")
         .stderr("error[install-conflict]: the crate \"x86_64-unknown-linux-gnu/e\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs")
         .stderr("error[install-conflict]: the custom command \"f\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs");

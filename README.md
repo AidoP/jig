@@ -513,8 +513,11 @@ A `crate` statement may be followed by indented attributes:
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is
   `'bin'` for a binary and `'lib'` otherwise
-- `install-mode <unsigned>`: the permissions of the installed output, such as `0o644`, which are `0o755` for a binary or
-  a procedural macro and `0o644` for a library
+- `install-mode <mode>`: the permissions of the installed output, such as `0o644`, which are `0o755` for a binary or
+  a procedural macro and `0o644` for a library. A mode is an integer, or a symbolic mode, as taken by chmod, which
+  changes the default: clauses separated by `,`, of who they apply to, `u`, `g`, `o` or `a`, or everyone without any,
+  and operations, `+`, `-` or `=`, with the permissions `r`, `w`, `x`, `X`, `s` and `t`, or those of `u`, `g` or `o`,
+  such as `'u+s'` or `'go-w'`. There is no umask, so `'+x'` is `'a+x'`
 
 ```
 crate core '{rust-src}/library/core/src/lib.rs'
@@ -579,8 +582,8 @@ A `custom` statement is followed by indented attributes:
   program which is a reference is the path of the crate or custom command's output. It is required
 - `default <bool>`: run the command when `jig build` is run without targets, which is `false` by default. Without a
   value, it is `true`
-- `install <bool>`, `install-dir <str>`, `install-mode <unsigned>`: install the outputs with `jig install`, as for a
-  crate, in `'share'` with the permissions `0o644` by default
+- `install <bool>`, `install-dir <str>`, `install-mode <mode>`: install the outputs with `jig install`, as for a
+  crate, in `'share'` with the permissions `0o644` by default, which `'+x'` makes executable
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output
@@ -601,10 +604,11 @@ value is a reference to it, so it can be an input, or a `link-script`. Its outpu
 - `content <str>`: the contents, which are usually a multi-line string, where braces must be doubled. The file ends with
   a newline, which the last line of a multi-line string does not have, unless it is empty
 - `output <path>`: the file, relative to the build directory, `<build-dir>/<name>` by default
-- `mode <unsigned>`: the permissions of the file in the build directory, such as `0o755` for a script, which are
-  `0o644` by default, and are set again when the project is configured if they have been changed
+- `mode <mode>`: the permissions of the file in the build directory, as for `install-mode`, such as `'+x'` for a
+  script, which are `0o644` by default, and are set again when the project is configured if they have been changed
 - `install`, `install-dir` and `install-mode`: as for a custom command, where the file is installed in `share` by
-  default, with its `mode`. A file whose installed permissions are executable is a program for `jig install --proxy`
+  default, with its `mode`, which a symbolic `install-mode` changes. A file whose installed permissions are executable
+  is a program for `jig install --proxy`
 
 ```
 file kernel-link

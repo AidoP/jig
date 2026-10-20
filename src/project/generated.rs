@@ -58,9 +58,9 @@ impl Project {
         let build_dir = self.build_dir();
         let mut output = normalize(&build_dir.join(&name));
         let mut content = None;
-        let mut mode = None;
-        let mut install = Install::data();
-        let mut install_mode = false;
+        let mut mode = DEFAULT_MODE;
+        // the install attributes are applied once the mode is known, which is their default
+        let mut install_attributes = Vec::new();
         // an attribute which failed has been reported, so `content` is not also reported as missing
         let reported = self.diagnostics.len();
         while let Some(attribute) = self.next_attribute(parser, &[]) {
@@ -76,20 +76,22 @@ impl Project {
                     }
                 },
                 "mode" => {
-                    if let Some(value) = self.mode_operand(attribute.operand()) {
-                        mode = Some(value);
+                    if let Some(value) = self.mode_operand(attribute.operand(), mode) {
+                        mode = value;
                     }
                 },
-                name @ ("install" | "install-dir" | "install-mode") => {
-                    install_mode |= name == "install-mode";
-                    self.install_attribute(&mut install, name, attribute.operand());
-                },
+                name @ ("install" | "install-dir" | "install-mode") => install_attributes.push((name, attribute.operand())),
                 name => self.diagnostics.push(Diagnostic {
                     span: Some(attribute.name_span),
                     message: Message::UnknownAttribute { keyword: Item::File.keyword(), name: name.into() },
                     severity: Severity::Error,
                 }),
             }
+        }
+        // a file is installed with its own permissions by default, such as a script which is executable
+        let mut install = Install { mode, ..Install::data() };
+        for (name, operand) in install_attributes {
+            self.install_attribute(&mut install, name, operand);
         }
         let Some(content) = content else {
             if self.diagnostics.len() == reported {
@@ -114,11 +116,6 @@ impl Project {
         let reference = Ref { referent: Referent::File(name.clone()), paths: vec![output.clone()] };
         self.declare_reference(name.clone(), span, Item::File, reference);
         self.generated_idx.insert(name.clone(), self.generated.len());
-        // a file is installed with its own permissions by default, such as a script which is executable
-        let mode = mode.unwrap_or(DEFAULT_MODE);
-        if !install_mode {
-            install.mode = mode;
-        }
         self.generated.push(GeneratedFile { name, name_span: span, output, content, mode, install });
     }
     /// Returns the file declared by a `file` statement with a name.
