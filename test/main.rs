@@ -1991,6 +1991,91 @@ build {host}/doc/app/index.html: rustdoc app.rs | {host}/check/libutil.rmeta {ho
 }
 
 #[test]
+fn lints() {
+    let project = Project::new("lints", &[
+        ("Jig", "\
+set clippy/pedantic 'warn'
+set clippy/must_use_candidate 'allow'
+crate util 'util.rs'
+set clippy/needless-return 'deny'
+crate app 'app.rs'
+    crate-type 'bin'
+    use util
+log note clippy/
+"),
+        ("util.rs", "//! Utilities.\n\n/// Returns two.\npub fn two() -> u32 { return 2; }\n"),
+        ("app.rs", "fn four() -> u32 { return util::two() * 2; }\nfn main() { four(); }\n"),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    output.stderr("note: must_use_candidate: allow, needless-return: deny, pedantic: warn\n");
+    // a crate is linted as it is checked, with the levels set where it is declared, where groups are given first
+    assert_contains(&output.ninja, &format!("\
+build {host}/lint/libapp.rmeta | {host}/lint/app.txt: clippy app.rs | {host}/check/libutil.rmeta
+    crate-name = app
+    crate-type = bin
+    flags = --target={host} -L dependency={host}/check --extern util={host}/check/libutil.rmeta \
+-W clippy::pedantic -A clippy::must_use_candidate -D clippy::needless_return
+"));
+    assert_contains(output.build(&format!("{host}/lint/libutil.rmeta | {host}/lint/util.txt")), "\
+-W clippy::pedantic -A clippy::must_use_candidate\n");
+    assert_contains(&output.ninja, "\nbuild lint: phony lint/app lint/util\n");
+    // and again when any of its sources change, which rustc lists
+    assert_contains(&output.ninja, "--emit=dep-info=$out.d --crate-type=$crate-type");
+    assert_contains(&output.ninja, "\n    description = CLIPPY $out\n    deps = gcc\n    depfile = $out.d\n");
+    // the lints are not built without targets, as the checks are not
+    assert!(!output.ninja.lines().any(|line| line.starts_with("default ") && line.contains("lint/")), "{}", output.ninja);
+
+    let lint = |names: &[&str]| {
+        let output = Command::new(configure_path()).arg("lint").args(names).current_dir(&project.dir).output().unwrap();
+        (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
+    };
+    // every crate is linted, even if one fails, and their diagnostics are shown without colour, as stdout is not a
+    // terminal
+    let (success, stdout, stderr) = lint(&[]);
+    assert!(!success, "{stdout}");
+    assert_contains(&stderr, "linting failed");
+    assert_contains(&stdout, "error: unneeded `return` statement\n --> ");
+    assert_contains(&stdout, "app.rs:1:20\n");
+    assert_contains(&stdout, "warning: unneeded `return` statement\n --> ");
+    assert_contains(&stdout, "util.rs:4:23\n");
+    assert!(!stdout.contains('\x1b'), "{stdout}");
+    // and shown again when they are up to date
+    std::fs::write(project.dir.join("app.rs"), "fn four() -> u32 { util::two() * 2 }\nfn main() { four(); }\n").unwrap();
+    let (success, stdout, _) = lint(&["util"]);
+    assert!(success, "{stdout}");
+    assert_contains(&stdout, "ninja: no work to do.\nwarning: unneeded `return` statement\n");
+    // which fails with `-D`, without linting again
+    let (success, stdout, stderr) = lint(&["-D", "util"]);
+    assert!(!success, "{stdout}");
+    assert_contains(&stdout, "ninja: no work to do.\n");
+    assert_contains(&stderr, "linting raised warnings, which `-D` denies");
+    let (success, stdout, _) = lint(&[]);
+    assert!(success, "{stdout}");
+    assert!(!stdout.contains("app.rs"), "{stdout}");
+    let (success, stdout, _) = lint(&["--deny-warnings", "app"]);
+    assert!(success, "{stdout}");
+    let (success, _, stderr) = lint(&["nope"]);
+    assert!(!success);
+    assert_contains(&stderr, "no crate to lint named \"nope\"");
+}
+
+#[test]
+fn lint_errors() {
+    let project = Project::new("lint-errors", &[("Jig", "\
+set clippy/pedantic 'loud'
+set clippy/needless_return 1
+log note clippy/nope
+")]);
+    project.configure().failed()
+        .stderr("error[unknown-lint-level]: unknown lint level \"loud\", which must be 'allow', 'warn', 'force-warn', 'deny' or 'forbid'\n --> Jig:1:21")
+        .stderr("error[unknown-lint-level]: unknown lint level \"1\"")
+        // a lint is declared when it is first used, so has no value until it is set
+        .stderr("error[unset-property]: no value for property \"clippy/nope\"\n --> Jig:3:10")
+        .stderr("configuration failed with 3 errors");
+}
+
+#[test]
 fn crate_test_errors() {
     let project = Project::new("crate-test-errors", &[("Jig", "\
 crate k 'k.rs'
@@ -3091,12 +3176,12 @@ log note '{codegen/opt-level} {codegen/opt-level.info}'
 ")]);
     let host = project.host();
     let output = project.configure().ok();
-    // the options are those set where the crate is declared, and are also used to check it
+    // the options are those set where the crate is declared, and are also used to check and lint it
     let kernel = format!("\
     flags = --target={host} -L dependency={host} -C debug-assertions=true -C link-arg=-Tlink.x -C link-arg=-static \
 -C 'llvm-args=-a -b c' -C opt-level=s");
     assert_contains(output.build(&format!("{host}/kernel")), &kernel);
-    assert_eq!(output.ninja.matches("-C 'llvm-args=-a -b c' -C opt-level=s").count(), 2, "{}", output.ninja);
+    assert_eq!(output.ninja.matches("-C 'llvm-args=-a -b c' -C opt-level=s").count(), 3, "{}", output.ninja);
     assert_contains(output.build(&format!("{host}/libother.rlib")), "-C opt-level=3");
     // an attribute replaces the property for the crate, where the last is used
     assert_contains(output.build(&format!("{host}/libfast.rlib")), "-C 'llvm-args=-a -b c' -C opt-level=1 -C target-feature=+a,-b");

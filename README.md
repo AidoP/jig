@@ -54,19 +54,26 @@ which runs ninja in the build directory, and tested with `jig test`.
 ./build/bootstrap/jig test
 ```
 
-`jig generate` evaluates `Jig`, writes `build.ninja` to the build directory and records the build directory in
-`.jig`, at the project root. `jig build`, `jig check`, `jig test` and `jig install` find `.jig` in the working
+`jig generate` evaluates `Jig`, writes `build.ninja` to the build directory and records the build directory in `.jig`,
+at the project root. `jig build`, `jig check`, `jig test`, `jig lint` and `jig install` find `.jig` in the working
 directory or its parents, so they can be run from anywhere in the project. They configure the project first if it is
-not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
-build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
-such as the targets to build, which are relative to the build directory, or the names `custom/<name>`,
-`check/<label>`, `test`, `test/<name>`, `doc` and `doc/<name>`. Without targets, it builds the crates and custom
-commands with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the
-checks, which are for rust-analyzer.
+not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its build
+directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja, such as
+the targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test`,
+`test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom commands
+with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the checks,
+which are for rust-analyzer, nor the lints.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
 until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
 when it was configured, where `'error'` stops the command before running ninja.
+
+`jig lint` lints the crates of the project with clippy, which are those not from the toolchain, or only those named,
+as `<name>`, or `<name>@<target>` if the target is not the host target. A crate is linted as it is checked, with the
+levels of the lints set by the `clippy/<lint>` properties where it is declared. Every crate which can be is linted,
+even if another fails, and the diagnostics of each are shown, even if nothing needed linting, as they are saved. It
+fails if a lint is an error, such as one which is denied, and with `-D` or `--deny-warnings`, if there is a warning,
+which is found in what was saved, so the lints are not run again.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
 project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is
@@ -649,6 +656,11 @@ target bluemetal-riscv64
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
   `codegen/<option>`
+- `clippy/<lint>`: the level of a clippy lint for the crates declared while it is set, which `jig lint` lints them with:
+  `'allow'`, `'warn'`, `'force-warn'`, `'deny'` or `'forbid'`, such as `set clippy/needless_return 'deny'`, where
+  `-` can be written for `_`. A group, such as `clippy/pedantic`, is given before the single lints, so that a lint in
+  it can be given another level. As clippy has many lints, each is declared when it is first used, while `clippy/` is
+  a dict of those which are set
 - `diagnostic/<id>`: the severity of a diagnostic, as described below
 
 ### Diagnostics

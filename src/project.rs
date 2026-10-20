@@ -1,5 +1,6 @@
 use std::{collections::{HashMap, hash_map::Entry}, path::{Path, PathBuf}};
 
+mod clippy;
 mod codegen;
 mod crates;
 mod customs;
@@ -44,6 +45,8 @@ pub struct Project {
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
     files_idx: HashMap<FileId, usize>,
+    /// The names of the properties of clippy's lints which have been declared, in order.
+    clippy_lints: std::collections::BTreeSet<String>,
     /// The number of files being processed, each used by the one before.
     use_depth: usize,
     properties: Vec<Option<Property>>,
@@ -93,6 +96,7 @@ impl Project {
             dependencies: Vec::new(),
             missing: Vec::new(),
             files_idx: HashMap::new(),
+            clippy_lints: std::collections::BTreeSet::default(),
             use_depth: 0,
             properties: Vec::new(),
             properties_idx: HashMap::new(),
@@ -160,6 +164,12 @@ impl Project {
             self.files_idx.insert(id, previous);
         }
         None
+    }
+    /// Declare a property which is declared when it is first used, as there are too many to declare beforehand: a
+    /// codegen option of a target, `codegen/<target>/<option>`, or a clippy lint, `clippy/<lint>`. Returns whether it
+    /// is the name of one.
+    pub(super) fn declare_on_demand(&mut self, name: &str) -> bool {
+        self.declare_target_codegen_option(name) || self.declare_clippy_lint(name)
     }
     /// Declare the read-only property of each builtin file, such as `msrv` or `profile/release`, whose value is a
     /// reference to it, which `use` processes.
@@ -303,7 +313,7 @@ impl Project {
         // the codegen options of a target which is declared after they are set
         let names: Vec<_> = self.values_idx.keys().cloned().collect();
         for name in names {
-            self.declare_target_codegen_option(&name);
+            self.declare_on_demand(&name);
         }
         let mut undeclared = Vec::new();
         for (name, &idx) in &self.values_idx {

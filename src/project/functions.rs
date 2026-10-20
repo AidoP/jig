@@ -750,7 +750,7 @@ impl Project {
     /// A crate is a property, which is referred to by its name alone for the `target` property, while one for a target,
     /// `<target>/<name>`, has no value if it has not been declared, as it may be later.
     fn named_value(&mut self, name: &str, span: Span) -> Result<Option<&Value>, ()> {
-        self.declare_target_codegen_option(name);
+        self.declare_on_demand(name);
         if self.properties_idx.contains_key(name) {
             return Ok(self.value(name, span.file));
         }

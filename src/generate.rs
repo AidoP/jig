@@ -121,6 +121,13 @@ pub struct Unit {
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
     pub doc: Option<String>,
+    /// The name of the crate's lint, `lint/<name>`, if it is edited, so that it is linted.
+    pub lint: Option<String>,
+    /// The flags which give clippy's lints their levels.
+    pub lints: Vec<String>,
+    /// Whether the crate has a test harness, as which it is linted, so that its tests are, while a library is checked
+    /// without them, as the crates which use it use its metadata.
+    pub harness: bool,
 }
 impl Unit {
     fn check_dir(&self) -> PathBuf {
@@ -133,6 +140,16 @@ impl Unit {
     /// after it, which rustdoc writes their shared files beside.
     fn doc_dir(&self) -> PathBuf {
         self.dir.join("doc")
+    }
+    fn lint_dir(&self) -> PathBuf {
+        self.dir.join("lint")
+    }
+    fn lint_rmeta(&self) -> PathBuf {
+        self.lint_dir().join(format!("lib{}.rmeta", self.name))
+    }
+    /// The file of the diagnostics from linting the crate, as clippy shows them.
+    pub fn lint_diagnostics(&self) -> PathBuf {
+        self.lint_dir().join(format!("{}.txt", self.name))
     }
     /// The first page of the crate's documentation.
     fn doc_index(&self) -> PathBuf {
@@ -250,6 +267,8 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
     let host = project.host();
     let mut units = Vec::new();
     for (c, deps) in crates.iter().zip(externs(crates)) {
+        // crates from the toolchain, such as `core`, are not edited
+        let member = !rust_analyzer::absolute(&c.path).starts_with(sysroot);
         units.push(Unit {
             label: format!("{}@{}", c.name, c.target),
             name: c.name.clone(),
@@ -261,14 +280,16 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             kind: c.kind,
             output: c.output(),
             deps,
-            // crates from the toolchain, such as `core`, are not edited
-            member: !rust_analyzer::absolute(&c.path).starts_with(sysroot),
+            member,
             build_file: project.files[c.name_span.file].path.clone(),
             codegen: codegen(c, project),
             cfg: c.cfg.clone(),
             env: c.env.clone(),
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
+            lint: member.then(|| c.short_name(&host)),
+            lints: c.lints.clone(),
+            harness: c.test,
         });
     }
     units
@@ -338,6 +359,14 @@ fn write_build_ninja(
         ("description", "RUSTDOC $out"),
     ])?;
 
+    // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to date
+    build_ninja.rule("clippy", &[
+        ("command", &format!("{env}$crate-env clippy-driver --color=always --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
+        ("description", "CLIPPY $out"),
+        ("deps", "gcc"),
+        ("depfile", "$out.d"),
+    ])?;
+
     build_ninja.rule("rustc-check", &[
         ("command", &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
         ("description", "CHECK $out"),
@@ -351,6 +380,8 @@ fn write_build_ninja(
     let mut everything: Vec<PathBuf> = Vec::new();
     // the documentation of the crates
     let mut docs: Vec<PathBuf> = Vec::new();
+    // the lints of the crates, which are not built without targets, like the checks
+    let mut lints: Vec<PathBuf> = Vec::new();
 
     // the command of an edge is `command-line`, as its `command` would replace the rule's
     build_ninja.rule("custom", &[("command", &format!("{cd} {env}$command-line")), ("description", "CUSTOM $name")])?;
@@ -508,6 +539,35 @@ fn write_build_ninja(
         if unit.test {
             flags.push_str(" --test");
         }
+        // linted as it is checked, with the metadata of the crates it uses from their checks
+        if let Some(name) = &unit.lint {
+            let output = at.path(&unit.lint_rmeta());
+            let diagnostics = at.path(&unit.lint_diagnostics());
+            let outdir = at.path(&unit.lint_dir());
+            let mut lint_flags: String = unit.lints.iter().map(|flag| format!(" {flag}")).collect();
+            if unit.harness && !unit.test {
+                lint_flags.push_str(" --test");
+            }
+            build_ninja.build(&ninja::Build {
+                rule: "clippy",
+                outputs: &[&output],
+                implicit_outputs: &[&diagnostics],
+                inputs: &[&at.path(&unit.root)],
+                implicit: &deps,
+                variables: &[
+                    ("crate-name", &unit.name),
+                    ("crate-type", unit.kind.crate_type()),
+                    ("flags", &format!("{flags}{lint_flags}")),
+                    ("outdir", &outdir.display().to_string()),
+                    ("diagnostics", &diagnostics.display().to_string()),
+                    ("crate-env", &crate_env),
+                ],
+                ..Default::default()
+            })?;
+            let phony = Path::new("lint").join(name);
+            build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &[&output], ..Default::default() })?;
+            lints.push(phony);
+        }
         let diagnostics = at.path(&unit.diagnostics());
         build_ninja.build(&ninja::Build {
             rule: "rustc-check",
@@ -533,6 +593,8 @@ fn write_build_ninja(
         })?;
     }
 
+    // lints every crate which is edited
+    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("lint")], inputs: &as_paths(&lints), ..Default::default() })?;
     // builds the documentation of every crate with `doc`
     build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("doc")], inputs: &as_paths(&docs), ..Default::default() })?;
     // builds what all of the tests need
@@ -623,6 +685,7 @@ fn write_database(
     let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
     let diagnostics: Vec<_> = units.iter().map(|unit| unit.diagnostics().display().to_string()).collect();
+    let lint_diagnostics: Vec<_> = units.iter().map(|unit| unit.lint_diagnostics().display().to_string()).collect();
     let mut commands = Vec::new();
     for custom in &project.customs {
         if custom.is_test() {
@@ -649,6 +712,11 @@ fn write_database(
         let deps = unit.deps.iter().map(|&index| index as u32).collect();
         let (label, member) = (&unit.label, unit.member);
         database.flychecks.push(database::Flycheck { label, diagnostics, member, deps });
+    }
+    for (unit, diagnostics) in units.iter().zip(&lint_diagnostics) {
+        if let Some(name) = &unit.lint {
+            database.lints.push(database::Lint { name, diagnostics });
+        }
     }
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();

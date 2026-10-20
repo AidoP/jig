@@ -7,6 +7,7 @@ mod configured;
 mod database;
 mod generate;
 mod install;
+mod lint;
 mod ninja;
 mod project;
 mod rust_analyzer;
@@ -42,6 +43,10 @@ commands:
     test [-v] [<name> ...]
                          build and run the tests, or only those named, where `-v` or `--verbose` shows the output of
                          each test, such as the tests of a crate's test harness, rather than only those which fail
+    lint [-D] [<name> ...]
+                         lint the crates which are edited with clippy, or only those named, as the `clippy/<lint>`
+                         properties set where they are declared give the levels of the lints, where `-D` or
+                         `--deny-warnings` fails if there is a warning
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -104,6 +109,12 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             let verbose = args.next_if(|arg| arg == "-v" || arg == "--verbose").is_some();
             let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
             test_runner::test(&names, verbose).map(|()| ExitCode::SUCCESS)
+        },
+        "lint" => {
+            let mut args = args.peekable();
+            let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
+            let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
+            lint::lint(&names, deny_warnings).map(|()| ExitCode::SUCCESS)
         },
         "install" => {
             let mut proxy = false;
@@ -222,6 +233,7 @@ fn declare_builtins(
     project.declare("rust-version".into(), Some(rust_version));
     project.declare_builtin_files();
     project.declare_codegen_options();
+    project.declare_clippy_lints();
     project.declare_diagnostic_overrides();
 }
 
@@ -287,6 +299,9 @@ enum Error {
     },
     UnknownTest(String),
     TestsFailed(usize),
+    UnknownLint(String),
+    LintFailed,
+    LintWarnings,
     Exec(std::process::Command, std::io::Error),
     Install(std::path::PathBuf, std::path::PathBuf, std::io::Error),
     NotConfigured,
@@ -332,6 +347,9 @@ impl core::fmt::Display for Error {
             Self::UnknownTest(name) => write!(f, "no test named {name:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
+            Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
+            Self::LintFailed => write!(f, "linting failed"),
+            Self::LintWarnings => write!(f, "linting raised warnings, which `-D` denies"),
             Self::Exec(cmd, error) => write!(f, "failed to execute {cmd:?}: {error}"),
             Self::Install(source, destination, error) => {
                 write!(f, "failed to install {source:?} as {destination:?}: {error}")

@@ -188,8 +188,12 @@ impl Project {
             });
             return false;
         }
-        // the codegen options of a target are declared when they are first used
-        self.declare_target_codegen_option(ident);
+        // as must the level of a clippy lint
+        if !self.check_clippy_level(ident, &operand.data, operand.span) {
+            return false;
+        }
+        // the codegen options of a target, and clippy's lints, are declared when they are first used
+        self.declare_on_demand(ident);
         let property = self.declare(ident.into(), None);
         if let Some(assigned) = self.read_only_value(property, ident) {
             self.diagnostics.push(Diagnostic {

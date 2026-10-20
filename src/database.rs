@@ -7,7 +7,7 @@
 //!
 //! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
 //! paths, the install prefix, the severities of `proxy-build` and `other-jig`, and the `jig` which configured it,
-//! followed by each section: the flychecks, the tests, then the installed files. A section is the number of its records
+//! followed by each section: the flychecks, the tests, the lints, then the installed files. A section is the number of its records
 //! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
 //! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
 
@@ -41,6 +41,7 @@ pub struct Database<'a> {
     pub jig: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
+    pub lints: Vec<Lint<'a>>,
     pub installs: Vec<Install<'a>>,
 }
 
@@ -68,6 +69,15 @@ pub struct Test<'a> {
     /// Whether the program is a test harness built by libtest, run directly, which takes its arguments, such as
     /// `--color`.
     pub libtest: bool,
+}
+
+/// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
+#[derive(Debug, PartialEq)]
+pub struct Lint<'a> {
+    /// The name of the crate, with its target if it is not the host target, which its ninja target is `lint/<name>`.
+    pub name: &'a str,
+    /// The file of the diagnostics saved by the lint, relative to the project root.
+    pub diagnostics: &'a str,
 }
 
 /// A file which `jig install` installs.
@@ -107,7 +117,12 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     for test in &database.tests {
         write_str(w, test.name)?;
         write_strs(w, &test.command)?;
-        write_u32(w, test.libtest as u32)?;
+        write_u32(w, u32::from(test.libtest))?;
+    }
+    write_u32(w, database.lints.len())?;
+    for lint in &database.lints {
+        write_str(w, lint.name)?;
+        write_str(w, lint.diagnostics)?;
     }
     write_u32(w, database.installs.len())?;
     for install in &database.installs {
@@ -142,6 +157,9 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
     }
     for _ in 0..r.u32()? {
         database.tests.push(Test { name: r.str()?, command: r.strs()?, libtest: r.bool()? });
+    }
+    for _ in 0..r.u32()? {
+        database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
     }
     for _ in 0..r.u32()? {
         database.installs.push(Install {
@@ -249,6 +267,7 @@ mod tests {
                 Test { name: "unit", command: vec!["./run", "a b"], libtest: false },
                 Test { name: "app", command: vec!["./build/test/app"], libtest: true },
             ],
+            lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             installs: vec![
                 Install { path: "build/app", target: "app", dir: "bin", mode: 0o755, program: true },
                 Install { path: "build/data", target: "custom/data", dir: "share", mode: 0o644, program: false },

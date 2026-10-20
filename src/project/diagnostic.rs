@@ -147,6 +147,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "proc-macro-target",
     "unknown-reference",
     "unknown-namespace",
+    "unknown-lint-level",
     "unknown-attribute-of",
     "attribute-not-set",
     "use-binary",
@@ -315,6 +316,8 @@ pub enum Message {
     UnknownReference(String),
     /// A namespace, `<prefix>/`, which is written with its `/`.
     UnknownNamespace(String),
+    /// The level of a clippy lint which is not one.
+    UnknownLintLevel(String),
     UnknownAttributeOf {
         item: Item,
         name: String,
@@ -509,6 +512,10 @@ impl core::fmt::Display for Message {
             Self::Replacement { description, .. } | Self::Insertion { description, .. } => f.write_str(description),
             Self::UnknownReference(name) => write!(f, "no property, custom command, target or test named {name:?}"),
             Self::UnknownNamespace(prefix) => write!(f, "no property or target has the namespace `{prefix}`"),
+            Self::UnknownLintLevel(level) => write!(
+                f,
+                "unknown lint level {level:?}, which must be 'allow', 'warn', 'force-warn', 'deny' or 'forbid'",
+            ),
             Self::UnknownAttributeOf { item, name, attribute } => {
                 write!(f, "unknown attribute {attribute:?} of {item} {name:?}")
             },
@@ -670,6 +677,7 @@ impl Message {
             Self::ProcMacroTarget { .. } => "proc-macro-target",
             Self::UnknownReference { .. } => "unknown-reference",
             Self::UnknownNamespace(_) => "unknown-namespace",
+            Self::UnknownLintLevel(_) => "unknown-lint-level",
             Self::UnknownAttributeOf { .. } => "unknown-attribute-of",
             Self::AttributeNotSet { .. } => "attribute-not-set",
             Self::UseBinary { .. } => "use-binary",

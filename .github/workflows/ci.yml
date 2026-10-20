@@ -30,11 +30,11 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Install the toolchains
-        # the tests of custom targets use nightly as well
+        # the tests of custom targets use nightly as well, and those of `jig lint` use clippy
         run: |
           toolchain=${{ matrix.toolchain }}
           if [ "$toolchain" = msrv ]; then toolchain=$MSRV; fi
-          rustup toolchain install "$toolchain" nightly --profile minimal
+          rustup toolchain install "$toolchain" nightly --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - name: Install ninja
         run: |

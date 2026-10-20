@@ -193,6 +193,7 @@ impl Project {
             return;
         }
         let codegen = self.codegen_options(span, &codegen, &targets);
+        let lints = self.clippy_flags(span);
         let build_dir = self.build_dir();
         // the targets the crate is declared for, whose outputs are declared after its tests are registered
         let mut declared = Vec::new();
@@ -236,6 +237,7 @@ impl Project {
                         cfg: cfg.clone(),
                         env: env.clone(),
                         codegen: codegen[i].clone(),
+                        lints: lints.clone(),
                         link_script: link_script.clone(),
                         install: install.clone(),
                     });

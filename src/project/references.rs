@@ -20,7 +20,7 @@ impl Project {
             return Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin });
         }
         let message = match name.split_once('/') {
-            _ if self.declare_target_codegen_option(name) || self.properties_idx.contains_key(name) => {
+            _ if self.declare_on_demand(name) || self.properties_idx.contains_key(name) => {
                 Message::UnsetProperty(name.into())
             },
             // a codegen option of a target which is not known
@@ -153,7 +153,7 @@ impl Project {
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, start, parser);
         }
-        self.declare_target_codegen_option(name);
+        self.declare_on_demand(name);
         if let Some(&id) = self.properties_idx.get(name) && let Some(property) = &self.properties[id] {
             let value = match attribute {
                 "default" => AttributeValue::optional(property.default.clone()),
