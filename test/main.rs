@@ -1801,6 +1801,133 @@ target kernel
 }
 
 #[test]
+fn generated_files() {
+    let project = Project::new("generated-files", &[
+        ("Jig", "\
+declare base
+    default '0x80000000'
+file kernel-link
+    output 'link/kernel.x'
+    content '''
+        ENTRY(_start)
+        SECTIONS {{
+            . = {base};
+        }}
+    '''
+file empty
+    content ''
+custom copy
+    input kernel-link
+    command 'cp' input output
+crate app 'app.rs'
+    crate-type 'bin'
+    link-script kernel-link
+log note '{kernel-link.output} {len(kernel-link.content)} {empty.output}'
+"),
+        ("app.rs", "fn main() {}\n"),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // a file is written from its template when the project is configured, ending with a newline, unless it is empty
+    let path = project.dir.join("build/link/kernel.x");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "ENTRY(_start)\nSECTIONS {\n    . = 0x80000000;\n}\n");
+    assert_eq!(std::fs::read_to_string(project.dir.join("build/empty")).unwrap(), "");
+    output.stderr("note: build/link/kernel.x 46 build/empty\n");
+    // and is referred to by its name, as a custom command is
+    assert_contains(&output.ninja, "\nbuild copy: custom link/kernel.x\n");
+    assert_contains(output.build(&format!("{host}/app")), "-C link-arg=-Tlink/kernel.x");
+    // the configuration depends on it, so that it is written again if it is removed
+    assert_contains(&project.depfile(), " link/kernel.x empty reconfigure.stamp\n");
+
+    // it is only written when it changes, so that what uses it is not built again
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    project.configure().ok();
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
+    std::fs::remove_file(&path).unwrap();
+    let run = Command::new(configure_path()).args(["build", "custom/copy"]).current_dir(&project.dir).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(std::fs::read_to_string(project.dir.join("build/copy")).unwrap(), std::fs::read_to_string(&path).unwrap());
+}
+
+#[test]
+fn generated_file_modes() {
+    let project = Project::new("generated-file-modes", &[("Jig", "\
+file run-app
+    mode 0o755
+    install
+    install-dir 'bin'
+    content '''
+        #!/bin/sh
+        exec echo hello
+    '''
+file config
+    install
+    install-mode 0o600
+    content 'key = 1'
+log note '{run-app.mode} {run-app.install-mode} {run-app.install-dir} {config.mode} {config.install-mode} {config.install-dir}'
+")]);
+    let output = project.configure().ok();
+    // a file is installed in `share` with its own permissions, which are `0o644` without `mode`, by default
+    output.stderr("note: 493 493 bin 420 384 share\n");
+    let mode = |path: &str| std::fs::metadata(project.dir.join(path)).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode("build/run-app"), 0o755);
+    assert_eq!(mode("build/config"), 0o644);
+    // which are set again when they are changed
+    std::fs::set_permissions(project.dir.join("build/run-app"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    project.configure().ok();
+    assert_eq!(mode("build/run-app"), 0o755);
+    let install = Command::new(configure_path()).args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
+    assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
+    assert_eq!(mode("stage/bin/run-app"), 0o755);
+    assert_eq!(mode("stage/share/config"), 0o600);
+    assert_eq!(std::fs::read_to_string(project.dir.join("stage/share/config")).unwrap(), "key = 1\n");
+}
+
+#[test]
+fn generated_file_errors() {
+    let project = Project::new("generated-file-errors", &[("Jig", "\
+file a
+    output 'x'
+file b
+    content 'x'
+    owner 'root'
+file b
+    content ''
+file c
+    content [1]
+file d
+    output ''
+    content ''
+custom gen
+    output 'gen/out'
+    command 'true'
+file e
+    output 'gen'
+    content ''
+file f
+    output 'b'
+    content ''
+file g
+    mode 0o10000
+    install-mode 'x'
+    content ''
+")]);
+    project.configure().failed()
+        .stderr("error[missing-attribute]: missing required attribute \"content\"\n --> Jig:1:6")
+        .stderr("error[unknown-attribute]: unknown file attribute \"owner\"\n --> Jig:5:5")
+        .stderr("error[redeclare-custom]: redeclaration of file \"b\"\n --> Jig:6:6")
+        .stderr("error[invalid-operand]: list value used where str is required\n --> Jig:9:13")
+        .stderr("error[empty-path]: a path cannot be empty\n  --> Jig:11:12")
+        // a file cannot replace what ninja builds, nor another file
+        .stderr("error[overlapping-output]: output \"build/gen\" of the file overlaps \"build/gen/out\", the output of the custom command \"gen\"\n  --> Jig:16:6")
+        .stderr("error[overlapping-output]: output \"build/b\" of the file is also the output of the file \"b\"\n  --> Jig:19:6")
+        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777\n  --> Jig:23:10")
+        .stderr("error[invalid-operand]: str value used where integer is required\n  --> Jig:24:18")
+        .stderr("configuration failed with 9 errors");
+}
+
+#[test]
 fn list_errors() {
     let project = Project::new("list-errors", &[("Jig", "\
 declare flags
@@ -3759,10 +3886,10 @@ custom f
     install
 ")]);
     project.configure().failed()
-        .stderr("error[invalid-install-mode]: invalid install mode 0o10000, which must be permissions from 0 to 0o7777\n --> Jig:2:18")
+        .stderr("error[invalid-mode]: invalid mode 0o10000, which must be permissions from 0 to 0o7777\n --> Jig:2:18")
         .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:4:13")
         .stderr("error[invalid-operand]: none value used where str is required\n --> Jig:5:5")
-        .stderr("error[invalid-install-mode]: invalid install mode -1, which must be permissions from 0 to 0o7777\n --> Jig:8:18")
+        .stderr("error[invalid-mode]: invalid mode -1, which must be permissions from 0 to 0o7777\n --> Jig:8:18")
         .stderr("error[unknown-attribute]: unknown test attribute \"install\"\n  --> Jig:11:5")
         .stderr("error[install-conflict]: the crate \"x86_64-unknown-linux-gnu/e\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs")
         .stderr("error[install-conflict]: the custom command \"f\" installs \"bin/e\", which the crate \"aarch64-unknown-linux-gnu/e\" also installs");

@@ -123,6 +123,7 @@ impl Project {
             "log" => self.parse_log(parser),
             "crate" => self.parse_crate(parser),
             "custom" => self.parse_custom(parser, false),
+            "file" => self.parse_file_statement(parser),
             "test" => self.parse_custom(parser, true),
             "target" => self.parse_target(parser),
             _ => {

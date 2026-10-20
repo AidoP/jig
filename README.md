@@ -148,6 +148,7 @@ to, which is the error `empty-path`.
   target or test, whose name may be computed, such as `location {target}` in a `@for`
 - `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
+- `file <name>`: a file generated from a template string, which is written when the project is configured. See below
 - `target <name>`: a custom target, which crates can be compiled for. See below
 - `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input`, `depends` and `command`
   attributes, but no `output` or `default`. Its inputs and dependencies are built with `jig build test/<name>`, or those
@@ -295,17 +296,17 @@ crate boot 'boot.rs'
 
 An expression is a string, `true`, `false`, an integer, a list, a dict, or the name of a property or a crate.
 
-An attribute is taken with `.` after the name of a property, a custom command, a crate, or a target, as in
+An attribute is taken with `.` after the name of a property, a custom command, a file, a crate, or a target, as in
 `data.default`, `image.input`, `{host-target}/macros.crate-type`, `macros.crate-type`, `my-kernel.runner` or
-`{target}.has-std`, where a name computed in `{}` is put in `()` in a string template, as in
-`'{({target}.has-std)}'`. The
-attributes of a property whose value is a reference are those of the crate or custom command it refers to. Those of a
-property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`, `depends` and
-`command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
-after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
-`builtin`, `default`, `test`, `doc`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and
-`install-mode`, and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`,
-`has-std`, `can-run` and its options, such as `code-model`. An attribute which is not set is an error.
+`{target}.has-std`, where a name computed in `{}` is put in `()` in a string template, as in `'{({target}.has-std)}'`.
+The attributes of a property whose value is a reference are those of the crate, custom command or file it refers to.
+Those of a property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`,
+`depends` and `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a file are
+`output`, `content`, `mode`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for after the
+others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`, `builtin`,
+`default`, `test`, `doc`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and `install-mode`,
+and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`, `has-std`,
+`can-run` and its options, such as `code-model`. An attribute which is not set is an error.
 
 `has-std` is whether the toolchain has the standard library of a builtin target, as installed by `rustup target add`,
 which is `false` for a custom target. The configuration is generated again when the target's libraries change, so it
@@ -590,6 +591,34 @@ custom device-tree
     input 'virt.dts'
     output 'virt.dtb'
     command 'dtc' '-O' 'dtb' '-o' output input
+```
+
+A `file` statement is followed by indented attributes, which give the contents of the file, as it is written when the
+project is configured, rather than by ninja. It is only written when its contents change, so that what uses it is only
+built again then, and is written again if it is removed. Like a custom command, it is a property with its name, whose
+value is a reference to it, so it can be an input, or a `link-script`. Its output cannot overlap another output.
+
+- `content <str>`: the contents, which are usually a multi-line string, where braces must be doubled. The file ends with
+  a newline, which the last line of a multi-line string does not have, unless it is empty
+- `output <path>`: the file, relative to the build directory, `<build-dir>/<name>` by default
+- `mode <unsigned>`: the permissions of the file in the build directory, such as `0o755` for a script, which are
+  `0o644` by default, and are set again when the project is configured if they have been changed
+- `install`, `install-dir` and `install-mode`: as for a custom command, where the file is installed in `share` by
+  default, with its `mode`. A file whose installed permissions are executable is a program for `jig install --proxy`
+
+```
+file kernel-link
+    output 'kernel.x'
+    content '''
+        ENTRY(_start)
+        SECTIONS {{
+            . = {kernel-base};
+        }}
+    '''
+
+crate kernel 'kernel/main.rs'
+    crate-type 'bin'
+    link-script kernel-link
 ```
 
 A `target` statement is followed by indented attributes, which describe the target with a JSON target specification,

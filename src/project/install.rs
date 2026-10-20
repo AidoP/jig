@@ -1,5 +1,5 @@
-//! The `install`, `install-dir` and `install-mode` attributes of crates and custom commands, which `jig install` copies
-//! the outputs of.
+//! The `install`, `install-dir` and `install-mode` attributes of crates, custom commands and generated files, which
+//! `jig install` copies the outputs of.
 
 use std::path::{Path, PathBuf};
 
@@ -74,23 +74,32 @@ impl Project {
                 }
             },
             "install-mode" => {
-                let span = operand.span;
-                let mode = match self.integer_operand(operand).map(|operand| operand.data) {
-                    Some(Data::Unsigned(mode)) => mode,
-                    Some(Data::Signed(mode)) if mode >= 0 => mode.unsigned_abs(),
-                    Some(data) => return self.invalid_install_mode(data.coerce_string(), span),
-                    None => return,
-                };
-                if mode > MAX_MODE {
-                    return self.invalid_install_mode(format!("0o{mode:o}"), span);
+                if let Some(mode) = self.mode_operand(operand) {
+                    install.mode = mode;
                 }
-                install.mode = mode as u32;
             },
             _ => unreachable!("not an install attribute: {name}"),
         }
     }
+    /// Returns the permissions of a file, such as `0o755`, from an operand, reporting a value which cannot be one.
+    pub(super) fn mode_operand(&mut self, operand: Operand) -> Option<u32> {
+        let span = operand.span;
+        let mode = match self.integer_operand(operand)?.data {
+            Data::Unsigned(mode) => mode,
+            Data::Signed(mode) if mode >= 0 => mode.unsigned_abs(),
+            data => {
+                self.invalid_mode(data.coerce_string(), span);
+                return None;
+            },
+        };
+        if mode > MAX_MODE {
+            self.invalid_mode(format!("0o{mode:o}"), span);
+            return None;
+        }
+        Some(mode as u32)
+    }
     /// Returns the files which are installed, those of crates in the order they were declared, then those of custom
-    /// commands.
+    /// commands, then generated files.
     pub fn installed(&self) -> Vec<Installed> {
         let mut installed = Vec::new();
         for key in self.crate_keys() {
@@ -127,6 +136,19 @@ impl Project {
                 });
             }
         }
+        for file in &self.generated {
+            if file.install.enabled {
+                installed.push(Installed {
+                    path: file.output.clone(),
+                    dir: file.install.dir.clone(),
+                    mode: file.install.mode,
+                    program: file.install.mode & 0o111 != 0,
+                    item: Item::File,
+                    name: file.name.clone(),
+                    span: file.name_span,
+                });
+            }
+        }
         installed
     }
     /// Report files which are installed at the same destination as another, such as a binary crate for several
@@ -152,10 +174,10 @@ impl Project {
             });
         }
     }
-    fn invalid_install_mode(&mut self, mode: String, span: Span) {
+    fn invalid_mode(&mut self, mode: String, span: Span) {
         self.diagnostics.push(Diagnostic {
             span: Some(span),
-            message: Message::InvalidInstallMode(mode),
+            message: Message::InvalidMode(mode),
             severity: Severity::Error,
         });
     }

@@ -48,6 +48,7 @@ impl core::fmt::Display for Severity {
 pub enum Item {
     Crate,
     CustomCommand,
+    File,
     Test,
     Target,
     Property,
@@ -58,6 +59,7 @@ impl Item {
         match self {
             Self::Crate => "crate",
             Self::CustomCommand => "custom",
+            Self::File => "file",
             Self::Test => "test",
             Self::Target => "target",
             Self::Property => "declare",
@@ -69,6 +71,7 @@ impl core::fmt::Display for Item {
         f.write_str(match self {
             Self::Crate => "crate",
             Self::CustomCommand => "custom command",
+            Self::File => "file",
             Self::Test => "test",
             Self::Target => "target",
             Self::Property => "property",
@@ -161,7 +164,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "invalid-target",
     "overlapping-output",
     "invalid-crate-name",
-    "invalid-install-mode",
+    "invalid-mode",
     "invalid-version",
     "no-location",
     "unknown-keyword-argument",
@@ -367,6 +370,8 @@ pub enum Message {
     InvalidTarget(String),
     /// An output of a custom command which is, or is within or contains, the output of something else.
     OverlappingOutput {
+        /// What the output is of, a custom command or a generated file.
+        owner: Item,
         path: String,
         other: String,
         item: Item,
@@ -378,7 +383,7 @@ pub enum Message {
         character: char,
     },
     /// The value of an `install-mode` attribute, which is not a permission.
-    InvalidInstallMode(String),
+    InvalidMode(String),
     /// The `location` of a `log` statement which is builtin, so it is not in a file.
     NoLocation(String),
     /// A keyword argument, `<name>: <value>`, which a function does not take.
@@ -546,11 +551,11 @@ impl core::fmt::Display for Message {
             ),
             Self::UnknownCrate { name, target } => write!(f, "no crate {name:?} for target {target:?}"),
             Self::InvalidTarget(target) => write!(f, "`{target}` is not a valid target"),
-            Self::OverlappingOutput { path, other, item, name, .. } if path == other => {
-                write!(f, "output {path:?} of the custom command is also the output of the {item} {name:?}")
+            Self::OverlappingOutput { owner, path, other, item, name, .. } if path == other => {
+                write!(f, "output {path:?} of the {owner} is also the output of the {item} {name:?}")
             },
-            Self::OverlappingOutput { path, other, item, name, .. } => {
-                write!(f, "output {path:?} of the custom command overlaps {other:?}, the output of the {item} {name:?}")
+            Self::OverlappingOutput { owner, path, other, item, name, .. } => {
+                write!(f, "output {path:?} of the {owner} overlaps {other:?}, the output of the {item} {name:?}")
             },
             Self::InvalidCrateName { name, character } => write!(f, "invalid character {character:?} in crate name {name:?}"),
             Self::NoLocation(name) => write!(f, "{name:?} is builtin, so it has no location"),
@@ -562,8 +567,8 @@ impl core::fmt::Display for Message {
                 let kind = if *requirement { "version requirement" } else { "version" };
                 write!(f, "invalid {kind} {value:?}, as {reason}")
             },
-            Self::InvalidInstallMode(mode) => {
-                write!(f, "invalid install mode {mode}, which must be permissions from 0 to 0o7777")
+            Self::InvalidMode(mode) => {
+                write!(f, "invalid mode {mode}, which must be permissions from 0 to 0o7777")
             },
             Self::OtherJig { running, configured } => write!(
                 f,
@@ -704,7 +709,7 @@ impl Message {
             Self::InvalidTarget { .. } => "invalid-target",
             Self::OverlappingOutput { .. } => "overlapping-output",
             Self::InvalidCrateName { .. } => "invalid-crate-name",
-            Self::InvalidInstallMode(_) => "invalid-install-mode",
+            Self::InvalidMode(_) => "invalid-mode",
             Self::InvalidVersion { .. } => "invalid-version",
             Self::NoLocation(_) => "no-location",
             Self::UnknownKeywordArgument { .. } => "unknown-keyword-argument",

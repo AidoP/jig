@@ -397,8 +397,9 @@ impl Project {
         arguments[0] = Path::new(".").join(&program).display().to_string();
         Some(Runner { command: arguments, program: Some(program) })
     }
-    /// Report the outputs of custom commands which are, or are within or contain, the output of a crate or of another
-    /// custom command, which ninja would build twice, or in place of a directory.
+    /// Report the outputs of custom commands and generated files which are, or are within or contain, the output of a
+    /// crate or of another custom command or generated file, which ninja would build twice, or in place of a directory,
+    /// or would replace a file which is written when configuring.
     ///
     /// The outputs are kept in order of their paths as well, in which the paths within a path come directly after it, so
     /// that each is compared with its ancestors and the paths after it, rather than with every other output.
@@ -420,43 +421,51 @@ impl Project {
         for (index, output) in owned.iter().enumerate() {
             sorted.entry(output.path.clone()).or_insert(index);
         }
+        let mut checked = Vec::new();
         for custom in &self.customs {
-            let CustomKind::Command { outputs, .. } = &custom.kind else {
-                continue;
-            };
-            for path in outputs {
-                // of the outputs it overlaps, the one which was owned first is reported
-                let within = path.ancestors().filter_map(|ancestor| sorted.get(ancestor));
-                let containing = sorted.range::<Path, _>((Bound::Excluded(path.as_path()), Bound::Unbounded))
-                    .take_while(|(other, _)| other.starts_with(path))
-                    .map(|(_, index)| index);
-                if let Some(&index) = within.chain(containing).min() {
-                    let other = &owned[index];
-                    self.diagnostics.push(Diagnostic {
-                        span: Some(custom.name_span),
-                        message: Message::OverlappingOutput {
-                            path: path.display().to_string(),
-                            other: other.path.display().to_string(),
-                            item: other.item,
-                            name: other.name.clone(),
-                            declared: other.span,
-                        },
-                        severity: Severity::Error,
-                    });
-                    continue;
+            if let CustomKind::Command { outputs, .. } = &custom.kind {
+                for path in outputs {
+                    checked.push(Output { path: path.clone(), item: Item::CustomCommand, name: custom.name.clone(), span: custom.name_span });
                 }
-                sorted.insert(path.clone(), owned.len());
-                owned.push(Output { path: path.clone(), item: Item::CustomCommand, name: custom.name.clone(), span: custom.name_span });
             }
+        }
+        for file in &self.generated {
+            checked.push(Output { path: file.output.clone(), item: Item::File, name: file.name.clone(), span: file.name_span });
+        }
+        for output in checked {
+            let path = &output.path;
+            // of the outputs it overlaps, the one which was owned first is reported
+            let within = path.ancestors().filter_map(|ancestor| sorted.get(ancestor));
+            let containing = sorted.range::<Path, _>((Bound::Excluded(path.as_path()), Bound::Unbounded))
+                .take_while(|(other, _)| other.starts_with(path))
+                .map(|(_, index)| index);
+            if let Some(&index) = within.chain(containing).min() {
+                let other = &owned[index];
+                self.diagnostics.push(Diagnostic {
+                    span: Some(output.span),
+                    message: Message::OverlappingOutput {
+                        owner: output.item,
+                        path: path.display().to_string(),
+                        other: other.path.display().to_string(),
+                        item: other.item,
+                        name: other.name.clone(),
+                        declared: other.span,
+                    },
+                    severity: Severity::Error,
+                });
+                continue;
+            }
+            sorted.insert(path.clone(), owned.len());
+            owned.push(output);
         }
     }
 }
 
-/// An output of a crate or custom command, which no other may overlap.
+/// An output of a crate, custom command or generated file, which no other may overlap.
 struct Output {
     path: PathBuf,
     item: Item,
-    /// The name of the crate, with its target, or the custom command.
+    /// The name of the crate, with its target, or of the custom command or file.
     name: String,
     span: Span,
 }

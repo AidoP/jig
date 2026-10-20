@@ -153,6 +153,16 @@ impl Project {
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, operand_span);
         }
+        if let Some(Referent::File(name)) = &referent && let Some(file) = self.generated_file(name) {
+            let value = match attribute {
+                "output" => AttributeValue::Set(Data::Str(file.output.display().to_string())),
+                "content" => AttributeValue::Set(Data::Str(file.content.clone())),
+                "mode" => AttributeValue::Set(Data::Unsigned(file.mode.into())),
+                attribute => install_attribute(&file.install, attribute),
+            };
+            let name = file.name.clone();
+            return self.attribute_value(Item::File, &name, attribute, attribute_span, value, operand_span);
+        }
         self.declare_on_demand(name);
         if let Some(&id) = self.properties_idx.get(name) && let Some(property) = &self.properties[id] {
             let value = match attribute {
