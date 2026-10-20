@@ -367,13 +367,24 @@ impl Project {
     /// Any value is an argument, converted to a string as in a string template, while each item of a list is a separate
     /// argument.
     fn parse_command(&mut self, parser: &mut Parser) -> Option<Runner> {
-        let mut arguments = Vec::new();
-        let mut program = None;
-        while parser.peek() == Some(' ') || arguments.is_empty() {
+        let mut operands = Vec::new();
+        while parser.peek() == Some(' ') || operands.iter().all(|operand: &Operand| operand.data.spread().is_empty()) {
             if !self.parse_space(parser) {
                 return None;
             }
-            let operand = self.parse_expression(parser)?;
+            operands.push(self.parse_expression(parser)?);
+        }
+        self.operands_command(&operands, parser.file)
+    }
+    /// Returns the command whose arguments are the values of operands, each item of a list being one, with its program
+    /// resolved as by [`Self::resolve_command`], unless it is a reference, such as to a crate or a custom command, whose
+    /// path is run, and which it then depends on.
+    ///
+    /// The operands must give at least one argument, and none can have a newline.
+    pub(super) fn operands_command(&mut self, operands: &[Operand], file: usize) -> Option<Runner> {
+        let mut arguments = Vec::new();
+        let mut program = None;
+        for operand in operands {
             if arguments.is_empty() && let Some(reference) = leading_reference(&operand.data) {
                 program = reference.paths.first().cloned();
             }
@@ -390,8 +401,13 @@ impl Project {
                 arguments.push(argument);
             }
         }
+        if arguments.is_empty() {
+            let operand = operands.last()?;
+            self.invalid_operand(operand, "a program, or a list of it and its arguments", false);
+            return None;
+        }
         let Some(program) = program else {
-            return Some(self.resolve_command(arguments, parser.file));
+            return Some(self.resolve_command(arguments, file));
         };
         // the program is run from the project root, as a path rather than from `PATH`
         arguments[0] = Path::new(".").join(&program).display().to_string();
@@ -480,6 +496,15 @@ fn path_refs(paths: &[PathBuf]) -> Data {
 }
 
 /// Returns the reference which a value starts with, which is the program if it is the first argument of a command.
+/// Whether a value can be the arguments of a command, which `none` and a dict cannot be, nor a list with them.
+pub(super) fn is_argument(data: &Data) -> bool {
+    match data {
+        Data::None | Data::Dict(_) => false,
+        Data::List(items) => items.iter().all(is_argument),
+        _ => true,
+    }
+}
+
 pub(super) fn leading_reference(data: &Data) -> Option<&Ref> {
     match data {
         Data::Ref(reference) => Some(reference),

@@ -648,8 +648,9 @@ A `target` statement is followed by indented attributes, which describe the targ
 - `test <bool>`: whether crates for the target can be tested, which by default is its `can-run` for a builtin target,
   and `false` for a custom target. Without a value, it is `true`
 - `runner <program>`: the program which runs a test harness for the target, given as its last argument, or a list of the
-  program and its first arguments. As with `run`, a program containing a `/` is a path relative to the file. Without
-  it, a test harness is run directly
+  program and its first arguments, as for the `command` of a custom command. As with `run`, a program containing a `/`
+  is a path relative to the file, while a reference, such as to a crate or a custom command, is its output, which is
+  built before the tests. Without it, a test harness is run directly
 
 ```
 target riscv64gc-unknown-none-elf

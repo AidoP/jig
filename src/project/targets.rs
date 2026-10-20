@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use super::customs::is_argument;
 use super::diagnostic::{Diagnostic, Item, Message, Severity, suggest};
 use super::statements::{Attribute, Name};
 use super::syntax::{Parser, Span};
@@ -201,9 +202,17 @@ impl Project {
                 // tests are only run where they are allowed, and without a runner, they are run directly
                 ("test", Data::None) => test = Some(true),
                 ("test", Data::Bool(value)) => test = Some(value),
-                ("runner", Data::Str(program)) => runner = Some(self.add_runner(vec![program], parser.file)),
-                ("runner", Data::List(items)) if !items.is_empty() && items.iter().all(|item| matches!(item, Data::Str(_))) => {
-                    runner = Some(self.add_runner(items.iter().map(Data::coerce_string).collect(), parser.file));
+                // a program and its first arguments, as a `command` is, so it can be a crate or a custom command
+                ("runner", data) => {
+                    let operand = Attribute { data, ..attribute }.operand();
+                    if !is_argument(&operand.data) {
+                        self.invalid_operand(&operand, "str, reference, or a list of them", false);
+                        continue;
+                    }
+                    if let Some(command) = self.operands_command(&[operand], parser.file) {
+                        self.runners.push(command);
+                        runner = Some(self.runners.len() - 1);
+                    }
                 },
                 // a path relative to the file, or a reference, so that the script can be generated
                 ("link-script", data) => {
@@ -212,10 +221,9 @@ impl Project {
                         link_script = Some(path);
                     }
                 },
-                (name @ ("inherit" | "test" | "runner" | "override"), data) => {
+                (name @ ("inherit" | "test" | "override"), data) => {
                     let expected = match name {
                         "test" => "bool",
-                        "runner" => "str or a list of str",
                         "override" => "none",
                         _ => "str",
                     };
@@ -378,12 +386,6 @@ impl Project {
                 severity: Severity::Note,
             });
         }
-    }
-    /// Add the runner of a target, returning its index.
-    fn add_runner(&mut self, command: Vec<String>, file: usize) -> usize {
-        let runner = self.resolve_command(command, file);
-        self.runners.push(runner);
-        self.runners.len() - 1
     }
 }
 

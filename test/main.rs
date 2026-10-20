@@ -2584,7 +2584,7 @@ crate c 'c.rs'
 fn target_test_runners() {
     let project = Project::new("target-runners", &[("Jig", "\
 crate app 'app.rs'
-    target ['vm', 'plain', host-target]
+    target ['vm', 'plain', 'wrapped', host-target]
     test
 target vm
     inherit 'riscv64gc-unknown-none-elf'
@@ -2593,12 +2593,22 @@ target vm
 target plain
     inherit 'x86_64-unknown-none'
     test true
+custom wrapper
+    input 'run.sh'
+    output 'wrap.sh'
+    command 'cp' input output
+target wrapped
+    inherit 'x86_64-unknown-none'
+    test
+    runner [wrapper, '--fast']
 "), ("run.sh", "")]);
     let host = project.host();
     let output = project.configure_with(NIGHTLY).ok();
     // a test is named with its target unless it is the host target, and needs its runner
     assert_contains(&output.ninja, "\nbuild test/app@vm: phony vm/test/app run.sh\n");
     assert_contains(&output.ninja, "\nbuild test/app@plain: phony plain/test/app\n");
+    // a runner can be what is built, such as the output of a custom command, which is built first
+    assert_contains(&output.ninja, "\nbuild test/app@wrapped: phony wrapped/test/app wrap.sh\n");
     assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app\n"));
     // the runner runs the harness, which is its last argument, while without one the harness runs directly
     let database = std::fs::read(project.dir.join(".jig")).unwrap();
@@ -2613,6 +2623,7 @@ target plain
     let contains = |needle: &[u8]| database.windows(needle.len()).any(|window| window == needle);
     assert!(contains(&strings(&["./run.sh", "-m", "virt", "./build/vm/test/app"])));
     assert!(contains(&strings(&["./build/plain/test/app"])));
+    assert!(contains(&strings(&["./build/wrap.sh", "--fast", "./build/wrapped/test/app"])));
 }
 
 #[test]
@@ -2628,14 +2639,18 @@ target bad
     inherit 'x86_64-unknown-none'
     test 'yes'
     runner []
+target worse
+    inherit 'x86_64-unknown-none'
+    runner [a: 'b']
 ")]);
     let host = project.host();
     project.configure_with(NIGHTLY).failed()
         // a runner does not allow tests on its own
         .stderr(&format!("error[test-target]: tests for target \"no-tests\" cannot be run, only those for targets which the host \"{host}\" can run, or a target with `test`\n --> Jig:2:12"))
         .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:9:10")
-        .stderr("error[invalid-operand]: list value used where str or a list of str is required\n  --> Jig:10:12")
-        .stderr("configuration failed with 3 errors");
+        .stderr("error[invalid-operand]: list value used where a program, or a list of it and its arguments is required\n  --> Jig:10:12")
+        .stderr("error[invalid-operand]: dict value used where str, reference, or a list of them is required\n  --> Jig:13:12")
+        .stderr("configuration failed with 4 errors");
 }
 
 #[test]
