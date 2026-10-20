@@ -1,9 +1,10 @@
 //! The stable codegen options of rustc, `-C <option>=<value>`, which are properties named `codegen/<option>`, and
 //! `codegen/<target>/<option>` for the crates for a target.
 
+use super::diagnostic::{Diagnostic, Message, Severity};
 use super::syntax::Span;
 use super::value::{Coercion, Data, Operand, Property, Type};
-use super::Project;
+use super::{Project, has_line_break};
 
 /// A codegen option which can be given to a crate.
 struct CodegenOption {
@@ -177,7 +178,7 @@ impl Project {
     /// Returns the values of a codegen option, which is given once for each, reporting a value which cannot be given
     /// to rustc.
     fn codegen_values(&mut self, option: &CodegenOption, operand: &Operand) -> Option<Vec<String>> {
-        match (&operand.data, option.list) {
+        let values = match (&operand.data, option.list) {
             (Data::List(items), ListKind::Joined(separator)) => Some(vec![strings(items).join(separator)]),
             (Data::List(items), ListKind::Repeated) => Some(strings(items)),
             (Data::List(_) | Data::Dict(_) | Data::None, _) => {
@@ -186,7 +187,17 @@ impl Project {
                 None
             },
             (data, _) => Some(vec![data.coerce_string()]),
+        };
+        // the options are arguments of rustc
+        if values.as_ref().is_some_and(|values| values.iter().any(|value| has_line_break(value))) {
+            self.diagnostics.push(Diagnostic {
+                span: Some(operand.span),
+                message: Message::NewlineInArgument,
+                severity: Severity::Error,
+            });
+            return None;
         }
+        values
     }
 }
 

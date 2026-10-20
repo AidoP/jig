@@ -111,6 +111,10 @@ reinstalled and run again in place of the program. A wrapper whose program the p
 
 Ninja runs in the build directory, so paths in `build.ninja` within the build directory are relative to it, and others
 are absolute. Custom commands, tests and `run` run from the project root, so their paths are relative to it as usual.
+Ninja cannot write a line break, so a path in `build.ninja`, such as an input, an output, a crate or a linker script,
+or an argument of a command, such as an `env` value or a codegen option, cannot contain one, which is the error
+`newline-in-path` or `newline-in-argument`. A path cannot be empty either, as it would be the directory it is relative
+to, which is the error `empty-path`.
 
 
 ### Statements

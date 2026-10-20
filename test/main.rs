@@ -1744,6 +1744,63 @@ build out.bin: custom a.dts b.dtsi c.dtsi
 }
 
 #[test]
+fn unwritable_paths() {
+    // ninja cannot write a newline, in a path or a command
+    let project = Project::new("unwritable-paths", &[("Jig", "\
+declare broken
+    default '''
+        a
+        b
+    '''
+custom gen
+    output broken
+    command 'true'
+test t
+    input '{broken}'
+    command 'true'
+crate app '{broken}.rs'
+crate lib 'lib.rs'
+    crate-type 'bin'
+    depends broken
+    link-script broken
+    env [X: broken]
+    codegen/llvm-args broken
+")]);
+    project.configure().failed()
+        .stderr("error[newline-in-path]: path \"build/a\\nb\" contains a newline, which ninja cannot write\n --> Jig:7:12")
+        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:10:11")
+        .stderr("error[newline-in-path]: path \"a\\nb.rs\" contains a newline, which ninja cannot write\n  --> Jig:12:11")
+        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:15:13")
+        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:16:17")
+        .stderr("error[newline-in-argument]: command arguments cannot contain a newline\n  --> Jig:17:9")
+        .stderr("error[newline-in-argument]: command arguments cannot contain a newline\n  --> Jig:18:23")
+        .stderr("configuration failed with 7 errors");
+    assert!(!project.dir.join("build/build.ninja").exists());
+
+    // nor is an empty path one, as it would be the directory it is relative to
+    let project = Project::new("empty-paths", &[("Jig", "\
+custom gen
+    input ''
+    output ''
+    command 'true'
+crate app ''
+crate lib 'lib.rs'
+    crate-type 'bin'
+    link-script ''
+target kernel
+    inherit 'riscv64gc-unknown-none-elf'
+    link-script ''
+")]);
+    project.configure_with(NIGHTLY).failed()
+        .stderr("error[empty-path]: a path cannot be empty\n --> Jig:2:11")
+        .stderr("error[empty-path]: a path cannot be empty\n --> Jig:3:12")
+        .stderr("error[empty-path]: a path cannot be empty\n --> Jig:5:11")
+        .stderr("error[empty-path]: a path cannot be empty\n --> Jig:8:17")
+        .stderr("error[empty-path]: a path cannot be empty\n  --> Jig:11:17")
+        .stderr("configuration failed with 5 errors");
+}
+
+#[test]
 fn list_errors() {
     let project = Project::new("list-errors", &[("Jig", "\
 declare flags

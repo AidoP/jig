@@ -457,8 +457,14 @@ impl Project {
             self.root.join(path)
         } else {
             let path = self.evaluate_str(path, span.file, span.offset + 1);
+            // which would be the directory of the file
+            if path.is_empty() {
+                self.diagnostics.push(Diagnostic { span: Some(span), message: Message::EmptyPath, severity: Severity::Error });
+                return None;
+            }
             self.file(parser.file).relative_path(path)
         };
+        self.check_path(&path, span)?;
         Some((path, span))
     }
     /// Take the optional value of an attribute after its name, which is at the parser, as an operand which is `none`

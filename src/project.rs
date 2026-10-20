@@ -30,6 +30,12 @@ use value::Ref;
 
 use customs::{Custom, Runner};
 
+/// Whether text has a line break, which ninja cannot write, as it has no escape for one: a `$` before a newline continues
+/// the line, and a carriage return is only taken before a newline.
+pub fn has_line_break(text: &str) -> bool {
+    text.contains(['\n', '\r'])
+}
+
 /// The greatest depth of files being processed, each used by the one before, beyond which a `use` is an error, so that
 /// a file which uses itself with `force` stops before the stack overflows. An optimized `jig` processes files about
 /// twice as deep within the 8 MiB stack a main thread has by default.

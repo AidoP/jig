@@ -135,6 +135,8 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "missing-attribute",
     "redeclare-custom",
     "newline-in-argument",
+    "newline-in-path",
+    "empty-path",
     "test-target",
     "builtin-target-name",
     "invalid-crate-type",
@@ -295,6 +297,10 @@ pub enum Message {
         previous: Span,
     },
     NewlineInArgument,
+    /// A path with a newline, which ninja cannot write.
+    NewlineInPath(PathBuf),
+    /// A path which is empty, which would be the directory it is relative to.
+    EmptyPath,
     TestTarget {
         target: String,
         host: String,
@@ -495,6 +501,11 @@ impl core::fmt::Display for Message {
             Self::MissingAttribute(name) => write!(f, "missing required attribute {name:?}"),
             Self::RedeclareCustom { item, name, .. } => write!(f, "redeclaration of {item} {name:?}"),
             Self::NewlineInArgument => write!(f, "command arguments cannot contain a newline"),
+            Self::EmptyPath => write!(f, "a path cannot be empty"),
+            // with the newline escaped, as the message is on one line
+            Self::NewlineInPath(path) => {
+                write!(f, "path {:?} contains a newline, which ninja cannot write", path.display().to_string())
+            },
             Self::EmptySeparator => write!(f, "the separator cannot be empty"),
             Self::NoValues => write!(f, "there are no values to compare"),
             Self::RepeatedKey(key) => write!(f, "key {key:?} is repeated in the dict"),
@@ -665,6 +676,8 @@ impl Message {
             Self::MissingAttribute { .. } => "missing-attribute",
             Self::RedeclareCustom { .. } => "redeclare-custom",
             Self::NewlineInArgument { .. } => "newline-in-argument",
+            Self::NewlineInPath(_) => "newline-in-path",
+            Self::EmptyPath => "empty-path",
             Self::TestTarget { .. } => "test-target",
             Self::BuiltinTargetName { .. } => "builtin-target-name",
             Self::InvalidCrateType { .. } => "invalid-crate-type",

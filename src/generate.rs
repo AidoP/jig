@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
-use crate::project::{CustomKind, Installed, Project, Severity, Target, TargetKind};
+use crate::project::{CustomKind, Installed, Project, Severity, Target, TargetKind, has_line_break};
 use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -236,6 +236,11 @@ fn write_reconfigure_stamp(build_dir: &Path) -> Result<(), Error> {
 /// reconfigure stamp is touched.
 fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(), Error> {
     let path = build_dir.join("build.ninja.d");
+    // a line break cannot be escaped in a depfile, as in `build.ninja`
+    let files = project.files.iter().map(|file| &file.path);
+    if let Some(broken) = files.chain(&project.dependencies).find(|path| has_line_break(&path.to_string_lossy())) {
+        return Err(Error::LineBreak(path, broken.display().to_string()));
+    }
     let mut file = match std::fs::File::create(&path) {
         Ok(file) => file,
         Err(error) => return Err(Error::Create(path, error)),

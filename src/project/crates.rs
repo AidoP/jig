@@ -10,7 +10,7 @@ use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Data, Operand, Ref, Referent};
-use super::{Project, rust};
+use super::{Project, has_line_break, rust};
 
 /// The targets a crate is declared for, from its `target` attribute or the property in effect.
 struct CrateTargets {
@@ -317,7 +317,17 @@ impl Project {
                 self.invalid_operand(operand, "dict of str", false);
                 return None;
             }
-            variables.push((name.clone(), value.coerce_string()));
+            let value = value.coerce_string();
+            // the variables are part of the command which runs rustc
+            if has_line_break(&value) {
+                self.diagnostics.push(Diagnostic {
+                    span: Some(operand.span),
+                    message: Message::NewlineInArgument,
+                    severity: Severity::Error,
+                });
+                return None;
+            }
+            variables.push((name.clone(), value));
         }
         Some(variables)
     }

@@ -300,6 +300,8 @@ enum Error {
     },
     UnknownTest(String),
     TestsFailed(usize),
+    /// Text which cannot be written to a file of ninja's, as it has a line break.
+    LineBreak(std::path::PathBuf, String),
     UnknownLint(String),
     LintFailed,
     LintWarnings,
@@ -348,6 +350,7 @@ impl core::fmt::Display for Error {
             Self::UnknownTest(name) => write!(f, "no test named {name:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
+            Self::LineBreak(path, text) => write!(f, "cannot write {text:?} to {path:?}, as ninja cannot write a line break"),
             Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
             Self::LintFailed => write!(f, "linting failed"),
             Self::LintWarnings => write!(f, "linting raised warnings, which `-D` denies"),

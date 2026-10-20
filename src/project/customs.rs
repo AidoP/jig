@@ -9,7 +9,7 @@ use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Data, Operand, Ref, Referent};
-use super::{Project, normalize};
+use super::{Project, has_line_break, normalize};
 
 /// A command, with its program if that is a path, which it depends on.
 #[derive(Clone, Default)]
@@ -305,6 +305,7 @@ impl Project {
     /// Returns the paths of a value, which is a path relative to `base`, a reference, whose paths are already
     /// resolved, or a list of them.
     pub(super) fn operand_paths(&mut self, operand: Operand, base: &Path) -> Option<Vec<PathBuf>> {
+        let span = operand.span;
         let items = match operand.data {
             Data::List(items) => items,
             Data::Ref(_) => vec![operand.data],
@@ -314,22 +315,51 @@ impl Project {
         for item in items {
             match item {
                 Data::Ref(reference) => paths.extend(reference.paths),
-                item => paths.push(normalize(&base.join(item.coerce_string()))),
+                item => paths.push(self.relative_path(base, &item.coerce_string(), span)?),
             }
         }
+        for path in &paths {
+            self.check_path(path, span)?;
+        }
         Some(paths)
+    }
+    /// Returns a path relative to `base`, reporting one which is empty, which would be `base` itself.
+    fn relative_path(&mut self, base: &Path, path: &str, span: Span) -> Option<PathBuf> {
+        if path.is_empty() {
+            self.diagnostics.push(Diagnostic { span: Some(span), message: Message::EmptyPath, severity: Severity::Error });
+            return None;
+        }
+        Some(normalize(&base.join(path)))
+    }
+    /// Report a path which ninja cannot write, as it has a newline, returning [`None`] if it is one.
+    pub(super) fn check_path(&mut self, path: &Path, span: Span) -> Option<()> {
+        if !has_line_break(&path.to_string_lossy()) {
+            return Some(());
+        }
+        self.diagnostics.push(Diagnostic {
+            span: Some(span),
+            message: Message::NewlineInPath(path.into()),
+            severity: Severity::Error,
+        });
+        None
     }
     /// Returns the path of a value which is one file, a path relative to `base` or a reference to a crate or custom
     /// command with one output.
     pub(super) fn operand_path(&mut self, operand: Operand, base: &Path) -> Option<PathBuf> {
-        match &operand.data {
-            Data::Ref(reference) if reference.paths.len() == 1 => Some(reference.paths[0].clone()),
+        let span = operand.span;
+        let path = match &operand.data {
+            Data::Ref(reference) if reference.paths.len() == 1 => reference.paths[0].clone(),
             Data::Ref(_) | Data::List(_) => {
                 self.invalid_operand(&operand, "str, or a reference to one file", false);
-                None
+                return None;
             },
-            _ => Some(normalize(&base.join(self.str_operand(operand)?))),
-        }
+            _ => {
+                let path = self.str_operand(operand)?;
+                self.relative_path(base, &path, span)?
+            },
+        };
+        self.check_path(&path, span)?;
+        Some(path)
     }
     /// Take the arguments of a `command` attribute, which are expressions separated by spaces, returning the command
     /// with its program resolved as by [`Self::resolve_command`], unless it is a reference, whose path is resolved.
@@ -349,7 +379,7 @@ impl Project {
             }
             for argument in operand.data.spread() {
                 // an argument is written to `build.ninja` on a single line
-                if argument.contains('\n') {
+                if has_line_break(&argument) {
                     self.diagnostics.push(Diagnostic {
                         span: Some(operand.span),
                         message: Message::NewlineInArgument,
