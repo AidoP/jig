@@ -6,7 +6,7 @@ use super::diagnostic::{Diagnostic, Message, Severity};
 use super::meta::Meta;
 use super::syntax::{Parser, Span, invalid_ident_char, invalid_name_char, is_name_continuation, is_word_char};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
-use super::{File, Project, resolve_parents};
+use super::{File, MAX_USE_DEPTH, Project, resolve_parents};
 
 pub(super) struct Attribute<'a> {
     pub(super) name: &'a str,
@@ -150,13 +150,30 @@ impl Project {
         }
         // a directory is used by its root file, unless the path is the file
         let mut file = false;
+        // a file which has been processed is processed again, as a builtin file is, even while it is being processed
+        let mut force = false;
         while let Some(attribute) = self.next_attribute(parser, &[]) {
             match attribute.name {
                 "file" => file = true,
+                "force" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        force = value;
+                    }
+                },
                 name => self.unknown_attribute("use", name, attribute.name_span),
             }
         }
         let span = operand.span;
+        // each file used is processed within the one using it, so a file which keeps using itself would overflow the
+        // stack
+        if self.use_depth >= MAX_USE_DEPTH {
+            self.diagnostics.push(Diagnostic {
+                span: Some(span),
+                message: Message::UseDepth(MAX_USE_DEPTH),
+                severity: Severity::Error,
+            });
+            return;
+        }
         let mut path = match &operand.data {
             Data::Str(path) => match path.strip_prefix('/') {
                 Some(path) => self.root.join(path),
@@ -189,8 +206,8 @@ impl Project {
         match File::read(path.clone()) {
             Ok(mut file) => {
                 file.used = Some(span);
-                // using a file again is fine unless it is still being processed, which is a cycle
-                if let Some(idx) = self.parse(file) && self.files[idx].active {
+                // using a file again is fine unless it is still being processed, which is a cycle, unless it is forced
+                if let Some(idx) = self.parse_forced(file, force) && self.files[idx].active {
                     self.diagnostics.push(Diagnostic {
                         span: Some(span),
                         message: Message::RepeatedUse { path, file: idx },

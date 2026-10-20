@@ -123,6 +123,7 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "expected-expression",
     "read-failure",
     "repeated-use",
+    "use-depth",
     "expected-exact",
     "undeclared-property",
     "redeclare-property",
@@ -253,6 +254,8 @@ pub enum Message {
         path: PathBuf,
         file: usize,
     },
+    /// The files being processed, each used by the one before, are as deep as they can be.
+    UseDepth(usize),
     ExpectedExact(&'static str),
     UndeclaredProperty {
         name: String,
@@ -472,6 +475,7 @@ impl core::fmt::Display for Message {
             Self::ExpectedExpression => write!(f, "expected expression"),
             Self::ExpectedExact(s) => write!(f, "expected {s:?}"),
             Self::RepeatedUse { path, .. } => write!(f, "file {path:?} is already used"),
+            Self::UseDepth(limit) => write!(f, "files are used more than {limit} deep, each by the one before"),
             Self::ReadFailure(path, error) => write!(f, "failed to read {path:?}: {error}"),
             Self::UndeclaredProperty { name, suggestion: None } => write!(f, "property {name:?} is undeclared"),
             Self::UndeclaredProperty { name, suggestion: Some(suggestion) } => {
@@ -642,6 +646,7 @@ impl Message {
             Self::ExpectedExpression { .. } => "expected-expression",
             Self::ReadFailure { .. } => "read-failure",
             Self::RepeatedUse { .. } => "repeated-use",
+            Self::UseDepth(_) => "use-depth",
             Self::ExpectedExact { .. } => "expected-exact",
             Self::UndeclaredProperty { .. } => "undeclared-property",
             Self::RedeclareProperty { .. } => "redeclare-property",

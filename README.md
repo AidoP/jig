@@ -110,7 +110,10 @@ are absolute. Custom commands, tests and `run` run from the project root, so the
 - `use <expression>`: start processing a file, which is one of:
   - a path, as a `str`, to the `Jig` file in the directory at the path, unless it has already been processed. The path
     is relative to the file, or to the project root if it starts with `/`. With the `file` attribute, the path is to
-    the file itself, of any name. A file which uses itself, directly or through other files, raises a warning
+    the file itself, of any name. With the `force` attribute, the file is processed even if it has been already, with
+    the values the properties have then, and `force <bool>` chooses whether it is. A file which uses itself, directly
+    or through other files, raises a warning, unless it is forced, so that it can use itself until it stops, such as
+    with `@if`. Files can be used up to 2048 deep, each by the one before, beyond which a `use` is an error
   - a builtin file, which is part of jig, and is processed each time it is used. Each is a read-only builtin property
     with its name, whose value is a reference to it, of type `'ref'`, which is its name where a string is needed. So
     `profile/` is a dict of the profiles, and a profile can be chosen as `use profile/{name}` or

@@ -1390,6 +1390,59 @@ fn use_file() {
 }
 
 #[test]
+fn use_force() {
+    let project = Project::new("use-force", &[
+        ("Jig", "\
+declare arch
+    default 'riscv64'
+use 'shared'
+set arch 'aarch64'
+use 'shared'
+    force
+set arch 'x86_64'
+use 'shared'
+use 'shared'
+    force false
+declare count
+    default 0
+use 'count'
+use 'cycle'
+"),
+        ("shared/Jig", "log note 'for {arch}'\n"),
+        ("count/Jig", "log note 'count {count}'\nset count count + 1\n@if count < 3\nuse '../count'\n    force\n"),
+        ("cycle/Jig", "use '../cycle'\n"),
+    ]);
+    let output = project.configure().ok();
+    // a file is processed again with `force`, with the values of the properties at the time
+    output.stderr("note: for riscv64\n").stderr("note: for aarch64\n");
+    assert!(!output.stderr.contains("for x86_64"), "{}", output.stderr);
+    // even while it is still being processed, so that it can use itself until it stops
+    output.stderr("note: count 0\n").stderr("note: count 1\n").stderr("note: count 2\n");
+    assert!(!output.stderr.contains("count 3"), "{}", output.stderr);
+    // which it is otherwise warned of
+    output.stderr("warning[repeated-use]: file \"cycle/Jig\" is already used\n --> cycle/Jig:1:5");
+    // and the configuration depends on each file once
+    assert_eq!(project.depfile(), "build.ninja: Jig shared/Jig count/Jig cycle/Jig reconfigure.stamp\n");
+
+    // a file which always uses itself stops at the greatest depth
+    let project = Project::new("use-force-depth", &[
+        ("Jig", "use 'loop'\n"),
+        ("loop/Jig", "use '../loop'\n    force\n"),
+    ]);
+    // with a larger stack than the default, which an unoptimized `jig` needs at that depth
+    let output = Command::new("sh")
+        .args(["-c", "ulimit -s 65532 2> /dev/null; exec \"$0\" generate Jig"])
+        .arg(configure_path())
+        .current_dir(&project.dir)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!output.status.success(), "{stderr}");
+    assert_contains(&stderr, "error[use-depth]: files are used more than 2048 deep, each by the one before\n --> loop/Jig:1:5");
+    assert_contains(&stderr, "configuration failed with 1 error");
+}
+
+#[test]
 fn use_paths() {
     let mut files = vec![
         ("Jig".to_string(), "use 'a'\nuse 'b'\nuse 'alias'\nuse 'link/../sib'\nuse 'cycle'\nuse 'f0'\n".to_string()),

@@ -29,6 +29,11 @@ use value::Ref;
 
 use customs::{Custom, Runner};
 
+/// The greatest depth of files being processed, each used by the one before, beyond which a `use` is an error, so that
+/// a file which uses itself with `force` stops before the stack overflows. An optimized `jig` processes files about
+/// twice as deep within the 8 MiB stack a main thread has by default.
+pub const MAX_USE_DEPTH: usize = 2048;
+
 pub struct Project {
     root: PathBuf,
     /// The rustup toolchain the project is configured with, which the programs `run` runs are given.
@@ -39,6 +44,8 @@ pub struct Project {
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
     files_idx: HashMap<FileId, usize>,
+    /// The number of files being processed, each used by the one before.
+    use_depth: usize,
     properties: Vec<Option<Property>>,
     properties_idx: HashMap<String, usize>,
     values: Vec<Value>,
@@ -86,6 +93,7 @@ impl Project {
             dependencies: Vec::new(),
             missing: Vec::new(),
             files_idx: HashMap::new(),
+            use_depth: 0,
             properties: Vec::new(),
             properties_idx: HashMap::new(),
             values: Vec::new(),
@@ -115,10 +123,21 @@ impl Project {
     ///
     /// Returns the index of the file if it has already been processed.
     pub fn parse(&mut self, file: File) -> Option<usize> {
+        self.parse_forced(file, false)
+    }
+    /// Process a file, unless it has already been processed and `force` is false.
+    ///
+    /// Returns the index of the file if it is not processed, which is that of the latest time it was processed. A file
+    /// which is forced is processed again with a new index, even while it is still being processed, which recurses
+    /// until it stops using itself, or the depth of the files being processed reaches [`MAX_USE_DEPTH`].
+    fn parse_forced(&mut self, file: File, force: bool) -> Option<usize> {
         let idx = self.files.len();
         // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
         // rather than reading every symbolic link in its path, as finding its canonical path would
         use std::os::unix::fs::MetadataExt;
+        // the time the file was processed before, which is the latest again once this one has finished, so that using it
+        // without `force` while that time is still being processed is found to be a cycle
+        let mut previous = None;
         // a builtin file, such as a profile, is processed each time it is used
         if !file.builtin {
             let id = match std::fs::metadata(&file.path) {
@@ -126,14 +145,20 @@ impl Project {
                 Err(_) => FileId::Path(file.path.clone()),
             };
             match self.files_idx.entry(id) {
-                Entry::Occupied(entry) => return Some(*entry.get()),
-                Entry::Vacant(entry) => entry.insert(idx),
-            };
+                Entry::Occupied(entry) if !force => return Some(*entry.get()),
+                Entry::Occupied(mut entry) => previous = Some((entry.key().clone(), entry.insert(idx))),
+                Entry::Vacant(entry) => _ = entry.insert(idx),
+            }
         }
         self.files.push(file);
         self.files[idx].active = true;
+        self.use_depth += 1;
         self.parse_file(idx);
+        self.use_depth -= 1;
         self.files[idx].active = false;
+        if let Some((id, previous)) = previous {
+            self.files_idx.insert(id, previous);
+        }
         None
     }
     /// Declare the read-only property of each builtin file, such as `msrv` or `profile/release`, whose value is a
@@ -371,7 +396,7 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 /// What identifies a file which has been used, however its path was written.
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum FileId {
     Inode { dev: u64, ino: u64 },
     /// The path of a file whose metadata could not be read.
