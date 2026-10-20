@@ -119,6 +119,8 @@ pub struct Unit {
     pub env: Vec<(String, String)>,
     /// The directory of the outputs for the target.
     pub dir: PathBuf,
+    /// The name of the crate's documentation, `doc/<name>`, if it is documented.
+    pub doc: Option<String>,
 }
 impl Unit {
     fn check_dir(&self) -> PathBuf {
@@ -126,6 +128,15 @@ impl Unit {
     }
     fn check_rmeta(&self) -> PathBuf {
         self.check_dir().join(format!("lib{}.rmeta", self.name))
+    }
+    /// The directory of the documentation of the crates for the target, where each crate's is in a directory named
+    /// after it, which rustdoc writes their shared files beside.
+    fn doc_dir(&self) -> PathBuf {
+        self.dir.join("doc")
+    }
+    /// The first page of the crate's documentation.
+    fn doc_index(&self) -> PathBuf {
+        self.doc_dir().join(&self.name).join("index.html")
     }
     /// The file of JSON diagnostics from checking the crate.
     pub fn diagnostics(&self) -> PathBuf {
@@ -236,6 +247,7 @@ fn write_dependencies(w: &mut dyn std::io::Write, project: &Project, at: &Rebase
 
 /// Returns the crates as units for rust-analyzer, in the same order.
 fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -> Vec<Unit> {
+    let host = project.host();
     let mut units = Vec::new();
     for (c, deps) in crates.iter().zip(externs(crates)) {
         units.push(Unit {
@@ -256,6 +268,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             cfg: c.cfg.clone(),
             env: c.env.clone(),
             dir: c.dir.clone(),
+            doc: c.doc.then(|| c.short_name(&host)),
         });
     }
     units
@@ -317,6 +330,14 @@ fn write_build_ninja(
         ("depfile", "$out.d"),
     ])?;
 
+    // rustdoc only writes dep-info with unstable options, so the documentation depends on the crate's check instead,
+    // which is built again when its sources change, and the crates for a target are documented together, as rustdoc
+    // locks the files they share
+    build_ninja.rule("rustdoc", &[
+        ("command", &format!("{env}$crate-env rustdoc --color=always --out-dir=$outdir --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in")),
+        ("description", "RUSTDOC $out"),
+    ])?;
+
     build_ninja.rule("rustc-check", &[
         ("command", &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
         ("description", "CHECK $out"),
@@ -328,6 +349,8 @@ fn write_build_ninja(
     let mut defaults: Vec<PathBuf> = Vec::new();
     // what is built without defaults, which is all but the checks, which are for rust-analyzer
     let mut everything: Vec<PathBuf> = Vec::new();
+    // the documentation of the crates
+    let mut docs: Vec<PathBuf> = Vec::new();
 
     // the command of an edge is `command-line`, as its `command` would replace the rule's
     build_ninja.rule("custom", &[("command", &format!("{cd} {env}$command-line")), ("description", "CUSTOM $name")])?;
@@ -455,12 +478,36 @@ fn write_build_ninja(
         let outdir = at.path(&unit.check_dir());
         let mut flags = rustc_flags(&target.flag(at), &outdir, unit.kind, &deps, &unit.codegen, at);
         flags.push_str(&cfg_flags(&unit.cfg));
-        if unit.test {
-            flags.push_str(" --test");
-        }
         let crate_env = crate_env(&unit.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
+        // the documentation is of the crate as it is built, rather than its tests, with the metadata of the crates it
+        // uses
+        if let Some(name) = &unit.doc {
+            let index = at.path(&unit.doc_index());
+            let implicit: Vec<_> = deps.iter().copied().chain([output.as_path()]).collect();
+            build_ninja.build(&ninja::Build {
+                rule: "rustdoc",
+                outputs: &[&index],
+                inputs: &[&at.path(&unit.root)],
+                implicit: &implicit,
+                variables: &[
+                    ("crate-name", &unit.name),
+                    ("crate-type", unit.kind.crate_type()),
+                    ("flags", &flags),
+                    ("outdir", &at.path(&unit.doc_dir()).display().to_string()),
+                    ("crate-env", &crate_env),
+                ],
+                ..Default::default()
+            })?;
+            let phony = Path::new("doc").join(name);
+            build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &[&index], ..Default::default() })?;
+            everything.push(phony.clone());
+            docs.push(phony);
+        }
+        if unit.test {
+            flags.push_str(" --test");
+        }
         let diagnostics = at.path(&unit.diagnostics());
         build_ninja.build(&ninja::Build {
             rule: "rustc-check",
@@ -486,6 +533,8 @@ fn write_build_ninja(
         })?;
     }
 
+    // builds the documentation of every crate with `doc`
+    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("doc")], inputs: &as_paths(&docs), ..Default::default() })?;
     // builds what all of the tests need
     build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("test")], inputs: &as_paths(&tests), ..Default::default() })?;
     // builds what `jig install` installs

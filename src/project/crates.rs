@@ -18,11 +18,6 @@ struct CrateTargets {
     span: Span,
 }
 
-/// The name of the test of a crate, which is the name of the crate, with its target if that is not the host target.
-fn crate_test_name(c: &rust::Crate, host: &str) -> String {
-    if c.target == host { c.name.clone() } else { format!("{}@{}", c.name, c.target) }
-}
-
 impl Project {
     pub(super) fn parse_crate(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
@@ -62,6 +57,7 @@ impl Project {
         let mut builtin = false;
         let mut default = false;
         let mut test = false;
+        let mut doc = false;
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
@@ -87,6 +83,11 @@ impl Project {
                 "test" => {
                     if let Some(value) = self.flag(attribute.operand()) {
                         test = value;
+                    }
+                },
+                "doc" => {
+                    if let Some(value) = self.flag(attribute.operand()) {
+                        doc = value;
                     }
                 },
                 "crate-type" => {
@@ -229,6 +230,7 @@ impl Project {
                         builtin,
                         default,
                         test,
+                        doc,
                         uses: uses.clone(),
                         depends: depends.clone(),
                         cfg: cfg.clone(),
@@ -240,7 +242,7 @@ impl Project {
                     declared.push(c.target.clone());
                     // the test is forward declared, so that it can be referred to, and completed once the target is known
                     if test {
-                        let name = crate_test_name(c, &host);
+                        let name = c.short_name(&host);
                         let harness = c.test_harness();
                         let depends = c.depends.clone();
                         self.add_crate_test(name, span, harness, depends);
@@ -348,7 +350,7 @@ impl Project {
             if !c.test {
                 continue;
             }
-            let name = crate_test_name(c, &host);
+            let name = c.short_name(&host);
             let span = c.name_span;
             let target_span = c.target_span;
             // the test which was forward declared, unless another had its name

@@ -60,8 +60,9 @@ directory or its parents, so they can be run from anywhere in the project. They 
 not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
 build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
 such as the targets to build, which are relative to the build directory, or the names `custom/<name>`,
-`check/<label>`, `test` and `test/<name>`. Without targets, it builds the crates and custom commands with `default`,
-or if none has it, every crate, test harness and custom command, but not the checks, which are for rust-analyzer.
+`check/<label>`, `test`, `test/<name>`, `doc` and `doc/<name>`. Without targets, it builds the crates and custom
+commands with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the
+checks, which are for rust-analyzer.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
 until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
@@ -291,7 +292,7 @@ attributes of a property whose value is a reference are those of the crate or cu
 property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`, `depends` and
 `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for
 after the others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`,
-`builtin`, `default`, `test`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and
+`builtin`, `default`, `test`, `doc`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and
 `install-mode`, and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`,
 `has-std`, `can-run` and its options, such as `code-model`. An attribute which is not set is an error.
 
@@ -491,6 +492,11 @@ A `crate` statement may be followed by indented attributes:
   whose `test` is `true` can be tested, which it is by default for the host target and a builtin target which the host
   can run, as found by `can-run`. It is `false` by default, and `true` without a value, so `test {target}.test` tests a
   crate where its tests can run
+- `doc`: document the crate with rustdoc in `<build-dir>/<target>/doc/<name>`, which `jig build doc/<name>` builds, or
+  `doc/<name>@<target>` if the target is not the host target, and `jig build doc` builds with the documentation of
+  the other crates. The crates for a target are documented in the same directory, so that they link to each other. It is
+  documented with the options it is checked with, and again when its sources change. It is `false` by default, and
+  `true` without a value
 - `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is

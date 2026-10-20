@@ -1945,6 +1945,52 @@ mod tests {
 }
 
 #[test]
+fn crate_docs() {
+    let project = Project::new("crate-docs", &[
+        ("Jig", "\
+crate util 'util.rs'
+    doc
+crate app 'app.rs'
+    crate-type 'bin'
+    use util
+    cfg 'fancy'
+    doc
+crate plain 'plain.rs'
+crate other 'util.rs'
+    target 'x86_64-unknown-none'
+    doc {plain.doc}
+log note '{app.doc} {plain.doc}'
+"),
+        ("util.rs", "//! Utilities.\n\n/// Returns two.\npub fn two() -> u32 { 2 }\n"),
+        ("app.rs", "//! The app.\n\n/// Four, from [util::two].\npub fn four() -> u32 { util::two() * 2 }\nfn main() {}\n"),
+        ("plain.rs", ""),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    output.stderr("note: true false\n");
+    // the crate is documented as it is checked, with the metadata of the crates it uses, which its documentation is
+    // built again when its sources change, as is the crate's own
+    assert_contains(&output.ninja, &format!("\
+build {host}/doc/app/index.html: rustdoc app.rs | {host}/check/libutil.rmeta {host}/check/libapp.rmeta
+    crate-name = app
+    crate-type = bin
+    flags = --target={host} -L dependency={host}/check --extern util={host}/check/libutil.rmeta --cfg 'fancy'
+    outdir = {host}/doc
+"));
+    assert_contains(&output.ninja, &format!("\nbuild doc/app: phony {host}/doc/app/index.html\n"));
+    assert_contains(&output.ninja, "\nbuild doc: phony doc/app doc/util\n");
+    // and without defaults, it is built with everything else
+    assert!(output.ninja.lines().any(|line| line.starts_with("default ") && line.contains(" doc/util")), "{}", output.ninja);
+    assert!(!output.ninja.contains("doc/plain"), "{}", output.ninja);
+
+    // the crates for a target are documented together, so they link to each other
+    let run = Command::new(configure_path()).args(["build", "doc"]).current_dir(&project.dir).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    let four = std::fs::read_to_string(project.dir.join(format!("build/{host}/doc/app/fn.four.html"))).unwrap();
+    assert_contains(&four, "href=\"../util/fn.two.html\"");
+}
+
+#[test]
 fn crate_test_errors() {
     let project = Project::new("crate-test-errors", &[("Jig", "\
 crate k 'k.rs'

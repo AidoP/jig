@@ -17,6 +17,8 @@ pub struct Crate {
     pub default: bool,
     /// Whether the crate's tests are built as a test harness, and registered as a test named after the crate.
     pub test: bool,
+    /// Whether the crate is documented by rustdoc, in `<build-dir>/<target>/doc/<name>`.
+    pub doc: bool,
     /// The crates for the same target which are passed to this crate with `--extern`.
     pub uses: Vec<Use>,
     /// What is built before the crate and its test harness, and before its test runs, but is not an input.
@@ -74,6 +76,11 @@ impl Crate {
                 std::env::consts::DLL_SUFFIX,
             )),
         }
+    }
+    /// The name of the crate's test and documentation, which is the name of the crate, with its target if that is not
+    /// the host target.
+    pub fn short_name(&self, host: &str) -> String {
+        if self.target == host { self.name.clone() } else { format!("{}@{}", self.name, self.target) }
     }
     /// The test harness of the crate, built with `--test`.
     pub fn test_harness(&self) -> PathBuf {
