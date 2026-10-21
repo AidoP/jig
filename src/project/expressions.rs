@@ -539,6 +539,7 @@ impl Project {
                 return string;
             };
             let first_diagnostic = self.diagnostics.len();
+            let first_later_declared = self.later_declared.len();
             let mut parser = Parser::new(file, &after[..end]);
             match self.parse_expression(&mut parser) {
                 Some(operand) if parser.is_empty() => string.push_str(&operand.data.coerce_string()),
@@ -549,11 +550,14 @@ impl Project {
                 }),
                 None => (),
             }
-            // the parser's spans are relative to the expression
+            // the parser's spans are relative to the expression, as are those of the names which may be declared later
             for diagnostic in &mut self.diagnostics[first_diagnostic..] {
                 if let Some(span) = &mut diagnostic.span {
                     span.offset += offset;
                 }
+            }
+            for (_, span) in &mut self.later_declared[first_later_declared..] {
+                span.offset += offset;
             }
             rest = &after[end + 1..];
         }

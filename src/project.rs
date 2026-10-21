@@ -53,6 +53,8 @@ pub struct Project {
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
     files_idx: HashMap<FileId, usize>,
+    /// The names given to `defined` and `select` which had not been declared, which must be by the end.
+    later_declared: Vec<(String, Span)>,
     /// The names of the properties of clippy's lints which have been declared, in order.
     clippy_lints: std::collections::BTreeSet<String>,
     /// The number of files being processed, each used by the one before.
@@ -107,6 +109,7 @@ impl Project {
             dependencies: Vec::new(),
             missing: Vec::new(),
             files_idx: HashMap::new(),
+            later_declared: Vec::new(),
             clippy_lints: std::collections::BTreeSet::default(),
             use_depth: 0,
             properties: Vec::new(),
@@ -348,6 +351,17 @@ impl Project {
             }
         }
         undeclared.sort_by_key(|undeclared| undeclared.value);
+        // the names which `defined` or `select` were given before they were declared, unless they were set, which is
+        // reported where they were, once for where each was given, as a call in a loop is evaluated several times
+        let mut reported = std::collections::HashSet::new();
+        for (name, span) in std::mem::take(&mut self.later_declared) {
+            let declared = self.properties_idx.get(&name).is_some_and(|&id| self.properties[id].is_some());
+            if declared || self.values_idx.contains_key(&name) || !reported.insert((name.clone(), span.file, span.offset)) {
+                continue;
+            }
+            let message = self.undeclared_property(&name);
+            self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
+        }
         for UndeclaredValue { name, value } in undeclared {
             // a codegen option of a target which is not known
             let message = match codegen::target_of_codegen_option(&name) {

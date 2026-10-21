@@ -124,7 +124,7 @@ impl Project {
                 self.argument_count("defined", expected, names.len(), span);
                 return None;
             };
-            let defined = self.defined(name, *name_span)?;
+            let defined = self.defined(name, *name_span);
             return Some(Operand { data: Data::Bool(defined), span, coerce: Coercion::Strict, origin: None });
         }
         if name == "select" {
@@ -741,49 +741,42 @@ impl Project {
             severity: Severity::Error,
         });
     }
-    /// Returns the value of the first property which has one.
+    /// Returns the value of a property where `span` is, if it has one, as `defined` and `select` take it.
     ///
-    /// Every property must have been declared, or forward declared by a `set`, so that a misspelling is not ignored.
-    /// Returns the value of a property where `span` is, if it has one, which must be declared, or set before it is
-    /// declared, so that a misspelt name is an error rather than not having a value, which is reported.
+    /// A property which has not been declared yet has no value, as it may be declared later, while one which is never
+    /// declared is reported when the configuration ends, so that a misspelt name is an error rather than ignored.
     ///
     /// A crate is a property, which is referred to by its name alone for the `target` property, while one for a target,
     /// `<target>/<name>`, has no value if it has not been declared, as it may be later.
-    fn named_value(&mut self, name: &str, span: Span) -> Result<Option<&Value>, ()> {
+    fn named_value(&mut self, name: &str, span: Span) -> Option<&Value> {
+        // a local, such as the variable of a `@for`, which is not a property
+        if self.files[span.file].locals.contains_key(name) {
+            return self.value(name, span.file);
+        }
         self.declare_on_demand(name);
         if self.properties_idx.contains_key(name) {
-            return Ok(self.value(name, span.file));
+            return self.value(name, span.file);
         }
         let target = self.value("target", span.file).map(|target| target.data.coerce_string());
         if let Some(target) = target && self.value(&format!("{target}/{name}"), span.file).is_some() {
-            return Ok(self.value(&format!("{target}/{name}"), span.file));
+            return self.value(&format!("{target}/{name}"), span.file);
         }
         if let Some((target, _)) = name.split_once('/') && self.target(target).is_some() {
-            return Ok(None);
-        }
-        self.diagnostics.push(Diagnostic {
-            span: Some(span),
-            message: self.undeclared_property(name),
-            severity: Severity::Error,
-        });
-        Err(())
-    }
-    /// Returns whether a property has a value where `span` is, as found by [`Self::named_value`].
-    fn defined(&mut self, name: &str, span: Span) -> Option<bool> {
-        self.named_value(name, span).ok().map(|value| value.is_some())
-    }
-    /// Returns the value of the first of the properties which has one, as found by [`Self::named_value`], reporting
-    /// every name which is not declared.
-    pub(super) fn select(&mut self, names: &[(String, Span)], span: Span) -> Option<Operand> {
-        let mut undeclared = false;
-        for (name, name_span) in names {
-            undeclared |= self.named_value(name, *name_span).is_err();
-        }
-        if undeclared {
             return None;
         }
+        // a property may be declared later, as it may be set before it is, so it has no value yet, and is reported
+        // when the configuration ends if it is not declared by then
+        self.later_declared.push((name.into(), span));
+        None
+    }
+    /// Returns whether a property has a value where `span` is, as found by [`Self::named_value`].
+    fn defined(&mut self, name: &str, span: Span) -> bool {
+        self.named_value(name, span).is_some()
+    }
+    /// Returns the value of the first of the properties which has one, as found by [`Self::named_value`].
+    pub(super) fn select(&mut self, names: &[(String, Span)], span: Span) -> Option<Operand> {
         for (name, name_span) in names {
-            if let Ok(Some(value)) = self.named_value(name, *name_span) {
+            if let Some(value) = self.named_value(name, *name_span) {
                 return Some(Operand { data: value.data.clone(), span, coerce: Coercion::Strict, origin: value.origin });
             }
         }

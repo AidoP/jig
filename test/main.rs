@@ -935,7 +935,9 @@ set a env('BLUEMETAL_CONFIGURE_TEST_UNSET')
 log note 'x'
 ")]);
     project.configure().failed()
-        // a misspelt property is not ignored
+        // a misspelt property is not ignored, which is reported once it is known not to be declared, while it has no
+        // value where it is given
+        .stderr("error[none-selected]: no value for any of the properties \"a\", \"typo\"\n --> Jig:3:7")
         .stderr("error[undeclared-property]: property \"typo\" is undeclared\n --> Jig:3:17")
         .stderr("error[none-selected]: no value for any of the properties \"a\"\n --> Jig:4:7")
         .stderr("error[argument-count]: function \"select\" takes at least 1 argument, but 0 were given\n --> Jig:5:7")
@@ -945,7 +947,7 @@ log note 'x'
         .stderr("error[expected-separator]: expected \", \" or \")\"\n --> Jig:9:16")
         .stderr("error[environment-variable]: environment variable \"BLUEMETAL_CONFIGURE_TEST_UNSET\" is not set\n  --> Jig:10:11")
         .stderr("error[invalid-operand]: str value used where bool is required\n  --> Jig:11:5")
-        .stderr("configuration failed with 9 errors");
+        .stderr("configuration failed with 10 errors");
 }
 
 #[test]
@@ -4905,19 +4907,36 @@ set codegen/{host-target}/opt-level 2
 log note defined(codegen/{host-target}/opt-level)
 @if !defined(board)
 log note 'no board'
+log note 'later {defined(later)} {defined(later-default)} {select(later, ram-size)}'
+@for i in [1]
+log note 'local {defined(i)} {select(i)}'
 declare early
+declare later
+declare later-default
+    default 1
 ")]);
     project.configure().ok()
         // whether a property has a value, where a crate is one, and one which is not declared for a target is not
         .stderr("note: false true true true\n")
         .stderr("note: true false false false\n")
         .stderr("note: true\n")
-        .stderr("note: no board\n");
-    let project = Project::new("defined-errors", &[("Jig", "log note defined(missing)\nlog note defined(a, b)\n")]);
-    project.configure().failed()
-        // a property which is not declared, nor set, is misspelt
+        .stderr("note: no board\n")
+        // a property declared later has no value yet, even with a default, while a local has its own
+        .stderr("note: later false false 4096\n")
+        .stderr("note: local true 1\n");
+    let project = Project::new("defined-errors", &[("Jig", "\
+log note defined(missing)
+log note defined(a, b)
+@for i in [1, 2]
+log note '{defined(nope)}'
+")]);
+    let output = project.configure().failed();
+    output
+        // a property which is never declared, nor set, is misspelt, which is reported where it was given, once
         .stderr("error[undeclared-property]: property \"missing\" is undeclared\n --> Jig:1:18")
-        .stderr("error[argument-count]: function \"defined\" takes 1 argument, but 2 were given");
+        .stderr("error[argument-count]: function \"defined\" takes 1 argument, but 2 were given")
+        .stderr("error[undeclared-property]: property \"nope\" is undeclared\n --> Jig:4:20");
+    assert_eq!(output.stderr.matches("\"nope\" is undeclared").count(), 1, "{}", output.stderr);
 }
 
 #[test]
