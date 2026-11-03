@@ -175,6 +175,55 @@ faster and can hash large files in parallel.
 Scanning is parallel. On a no-op build, most of the time goes to stat calls, so they're spread over the worker pool,
 as hashing is. This is where the engine beats ninja's single thread on large graphs.
 
+### Environment variables
+
+ninja tracks no environment variables. A command inherits the environment that ninja was run with, and changing a
+variable rebuilds nothing. jig works around this in several places, and in others it simply can't track them:
+
+- **The configuration.** `env()` is an error by default (`diagnostic/impure`), because the build isn't reconfigured
+  when the variable changes. A project can only allow it, and then it is not tracked.
+- **Searching `PATH`.** `which` and the program probes depend on the directories they search, but not on `PATH`
+  itself. A program found again after `PATH` changes is found only because a directory changed.
+- **rustc.** rustc writes `# env-dep:NAME=VALUE` lines into its dep-info for the variables that `env!` and
+  `option_env!` read. Cargo rebuilds when those change; ninja ignores the lines.
+- **Custom commands and tests.** They read whatever they like from the inherited environment (`CC`, `CFLAGS`, `LANG`,
+  ...), and none of it is tracked.
+- **Variables jig sets.** A crate's `env` attribute and the toolchain's `RUSTUP_TOOLCHAIN` are tracked only because
+  they're written into the command string, so a change to the command rebuilds the edge.
+
+In `rig`, an environment variable is a kind of input node, `Env(name)`. Its stamp is a hash of its value, or a marker
+that it is unset. It takes part in change detection like a file:
+
+1. **Declared variables.** These are the variables an action sets: a crate's `env`, the toolchain, and `crate-env`.
+   They're part of the action, so they're in the action hash. With argument-vector actions (phase 2), they're no
+   longer spliced into the command through `sh`.
+2. **Discovered variables.** The depfile parser reads rustc's `env-dep` lines, and records each variable as an input
+   of the edge alongside the files it lists. A crate that uses `env!("FOO")` rebuilds when `FOO` changes, as it does
+   with cargo.
+3. **The configuration's variables.**
+   - The configure edge records each variable that `env()` reads, and `PATH` whenever it is searched.
+   - These are stored in `.jig` beside the missing paths and passed to the engine as inputs of the generator edge.
+   - When one of them changes, the project is reconfigured, so `env()` no longer needs to be an error. It becomes as
+     pure as reading a file, and `diagnostic/impure` can stop covering it.
+   - With the ninja backend these variables can still be recorded, and `Configured::locate` can compare them, touching
+     `reconfigure.stamp` as it does for missing paths. That brings the benefit forward to phase 1.
+4. **Variables a command passes through.** `custom` and `test` get an attribute that declares which inherited
+   variables the command reads, such as `pass-env 'CC' 'CFLAGS'`. Their values become inputs.
+5. **Hermetic environments.** An option, required for cacheable and remote actions, runs an action with only its
+   declared, discovered and passed-through variables, plus a fixed minimal set: `PATH`, `HOME` and `TMPDIR`.
+   - Every variable that can affect the output is then in the cache key.
+   - A worker runs the action with the environment it was sent, never its own.
+   - An action that reads an undeclared variable fails the same way locally and remotely, instead of being silently
+     non-reproducible.
+   - `PATH` is a special case. Rather than hashing it, which would rebuild everything when an unrelated directory is
+     added, the engine resolves each action's program when the graph is loaded. It records the resolved path, and in
+     hash mode the program's contents. The program, not `PATH`, is the input.
+
+Tracked variables are shown by `jig build --explain`, which reports why each edge is dirty, such as "`FOO` changed
+from `a` to `b`". The values are kept in the state log in plain text, so the log must stay inside the build directory.
+Variables whose names suggest a secret (`*_TOKEN`, `*_KEY`, `*_PASSWORD`) are stored only as hashes, and are never
+sent to a cache or worker unless the action declares them explicitly.
+
 ### Scheduling and execution
 
 - **Workers.** A `std::thread` worker pool runs `std::process::Command`. Each child gets its own process group, so the
@@ -284,14 +333,24 @@ Distribution reuses the cache's blob store and keys. A remote execution is a cac
 Each phase can be merged and released by itself, and the test suite (`test/main.rs`, `test/perf.rs`) passes at the
 end of each one.
 
-### Phase 0: separate jig from ninja
+### Phase 0: separate jig from ninja (done)
 
-- Replace `NinjaFile` in `generate.rs` with a graph builder, which the ninja writer implements, so `build.ninja` is
-  written exactly as before.
-- Replace `Configured::ninja()` and its six callers with a `Builder` interface: `build(targets)`, `plan(targets)`,
-  `reconfigure()`, plus options for quiet output and for where output goes.
-- Move the "no work to do" filtering and the dry-run check behind that interface.
-- No behaviour changes.
+- `src/graph.rs` defines the graph that `jig generate` describes: typed `Rule`s (command, description, console, gcc
+  depfile, generator), `Edge`s, aliases and defaults, behind a `Graph` trait.
+  - `generate.rs` writes the graph through that trait. `ninja::NinjaFile` implements it, so `build.ninja` is
+    byte-for-byte the same as before.
+  - Retiring a previous build directory moved to `ninja::retire`.
+- `src/builder.rs` defines the `Builder` trait:
+  - `build(Request)`, where a request has targets, quiet output, keep-going, output to stdout or stderr, and arguments
+    passed through for `jig build`;
+  - `regenerate`;
+  - `up_to_date(target)`;
+  - `graph_up_to_date`.
+- `ninja::Ninja` implements `Builder`. `Configured::builder()` returns it, and `Configured::build` turns a failed build
+  into `Error::BuildFailed`.
+- `jig build`, `test`, `check`, `run`, `lint`, `install` and `build --proxy` all go through the trait. Nothing outside
+  `ninja.rs` runs ninja or reads its output.
+- There are no behaviour changes.
 
 ### Phase 1: the local engine, with ninja's behaviour
 
@@ -301,6 +360,9 @@ end of each one.
 - **Differential tests.** Generate random graphs and edit sequences, run both ninja and `rig` on them, and compare
   which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went
   backwards.
+- Add environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and
+  `PATH`, recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
+  reconfigure stamp, after which `env()` stops being an error.
 - Choose the engine with `JIG_ENGINE=rig|ninja`, defaulting to ninja. CI runs the suite with both.
 - Add performance tests to `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
 
@@ -334,6 +396,7 @@ end of each one.
 - Remap paths in jig's rustc, rustdoc and clippy commands, with tests that a second checkout in another directory gets
   every edge from the cache.
 - Add the `cache` attribute for `custom`, and replay cached diagnostics.
+- Add the `pass-env` attribute and hermetic environments for cacheable actions.
 - Add `jig cache stats|gc|clear`.
 
 ### Phase 5: the remote cache
