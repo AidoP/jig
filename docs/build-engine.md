@@ -1,7 +1,7 @@
 # Replacing ninja with an internal build engine
 
 This is a plan for replacing ninja, which `jig build`, `jig test`, `jig check`, `jig lint`, `jig run` and
-`jig install` all run, with a build engine of jig's own. The engine is called `rig` here, as a working name.
+`jig install` all run, with a build engine of jig's own. The engine is called `rig`.
 
 Goals:
 
@@ -38,7 +38,9 @@ remove.
 - **Bootstrapping.** `bootstrap.ninja` builds `build/bootstrap/jig` with a single `rustc` command. CI installs ninja on
   every runner.
 
-jig depends on nothing but `std`, and has no `Cargo.toml`. The engine keeps it that way.
+jig depends on nothing but `std`, and has no `Cargo.toml`. The engine keeps it that way: it has no dependencies either,
+though it may use `unsafe` and `extern "C"` declarations of the system's C library where `std` has no API, kept in one
+platform module (`rig/sys.rs`).
 
 ## Design principles
 
@@ -57,8 +59,8 @@ jig depends on nothing but `std`, and has no `Cargo.toml`. The engine keeps it t
 - **Layered.** The local engine, the cache and distribution are separate layers on one interface: an action and the
   hashes of its inputs go in, and outputs come out. Each layer can be built, tested and turned on by itself.
 - **Crash-safe without signal handlers.** State is written as an append-only log, each record checked when read, and a
-  record is appended as soon as its edge finishes. An interrupted build loses only the edges that were running. No
-  `libc` is needed to catch `SIGINT`.
+  record is appended as soon as its edge finishes. An interrupted build loses only the edges that were running, so
+  stopping a build doesn't depend on catching `SIGINT`.
 
 ## Architecture
 
@@ -88,7 +90,8 @@ jig depends on nothing but `std`, and has no `Cargo.toml`. The engine keeps it t
 - A standalone binary, `rig/main.rs`, reads a text manifest and builds it. The manifest is a subset of ninja's
   syntax, enough for `bootstrap.ninja` and the files jig writes now. That makes it possible to compare the engine
   against ninja in tests, and gives users a direct replacement for simple ninja files.
-- To publish it on crates.io, `rig/` gets a `Cargo.toml` with no dependencies. cargo doesn't build jig itself.
+- `rig/` also has a `Cargo.toml`, with no dependencies and `publish = false`, so that cargo projects can use it as a
+  git or path dependency. It isn't published on crates.io, and cargo doesn't build jig itself.
 
 API sketch:
 
@@ -157,8 +160,9 @@ An edge is dirty if any of these holds:
 
 What a stamp is depends on the mode:
 
-- **`timestamp` (the default).** The stamp is mtime, size, inode and ctime where the platform has them. This is as
-  cheap as ninja, and catches more changes.
+- **`timestamp` (the default, and the only mode until phase 3).** The stamp is the mtime and the size, which come
+  from the same `stat` call, so it's as cheap as ninja. It catches more changes, since a different size or an older
+  mtime counts as a change.
 - **`hash`.** The stamp is a BLAKE3 hash of the contents. The metadata stamp above is a cache key for the hash, so an
   unchanged file is never read twice. A file whose mtime falls in the same tick as when it was recorded is hashed
   again: the "racy git" problem.
@@ -174,6 +178,27 @@ faster and can hash large files in parallel.
 
 Scanning is parallel. On a no-op build, most of the time goes to stat calls, so they're spread over the worker pool,
 as hashing is. This is where the engine beats ninja's single thread on large graphs.
+
+### io_uring
+
+On Linux, io_uring can do this work with far fewer system calls. It's optional: it is detected at run time, through
+`io_uring_setup` called with `extern "C" syscall`, and the thread pool is used instead when it's missing, disabled by
+seccomp (as in many containers), or turned off with `JIG_IO_URING=0`. All of it is behind one interface in
+`rig/sys.rs`, `Stat::batch(paths) -> stamps`, with a thread-pool implementation and an io_uring one.
+
+io_uring is worth having where many small operations dominate:
+
+- **Stat on a no-op build.** Batches of `IORING_OP_STATX` with `STATX_MTIME | STATX_SIZE` replace a system call per
+  file with one submission per few hundred files. It's expected to be the largest gain, especially on network
+  filesystems or with a cold cache, where the requests overlap instead of waiting in turn.
+- **Reading files to hash them (phase 3)** and copying blobs in and out of the cache (phase 4), with
+  `IORING_OP_READ` and fixed buffers.
+- **Waiting.** A single ring can wait for children (`IORING_OP_WAITID`, from Linux 6.7) and on their output pipes,
+  instead of a thread per running command.
+
+It isn't used for spawning processes, and it isn't relied on for correctness. Every operation has the same result
+both ways, which the tests check by running the suite with it on and off. The performance tests decide whether it's on
+by default: if a no-op build of the large graphs in `test/perf.rs` isn't measurably faster, it stays opt-in.
 
 ### Environment variables
 
@@ -255,9 +280,8 @@ and inputs is fetched instead of run.
   - It is content-addressed: blobs are named by their BLAKE3 hash in sharded directories, and action results are
     stored separately.
   - Entries are written to a temporary file and renamed into place, so concurrent builds need no locks.
-  - Outputs are restored by hard link where it's safe (the output is read-only, which jig's are) and by copy
-    otherwise. A reflink through `ioctl(FICLONE)` would need an `extern "C"` declaration, which is a decision listed
-    below.
+  - Outputs are restored by reflink (`ioctl(FICLONE)`) where the filesystem supports it, by hard link where it's
+    safe (the output is read-only, which jig's are), and by copy otherwise.
 - **Keys.** Dependencies discovered from a depfile are only known after the action runs, so lookup takes two steps,
   as in ccache's manifest mode:
   1. `k1 = H(action hash, toolchain identity, hashes of the declared inputs)` leads to a manifest, which lists the
@@ -356,6 +380,9 @@ end of each one.
 
 - Build the `rig` crate: graph, graph format, state log, timestamp scan, scheduler, pools, depfiles, restat,
   generator edges, aliases and defaults.
+- Add `rig/Cargo.toml`, with no dependencies and `publish = false`, and a CI step that builds `rig` with cargo, so
+  that it keeps working as a git or path dependency.
+- Add `rig/sys.rs`, with process groups, the `mkfifo` jobserver, and the batched stat behind `JIG_IO_URING=1`.
 - Add the standalone binary and its ninja-subset reader.
 - **Differential tests.** Generate random graphs and edit sequences, run both ninja and `rig` on them, and compare
   which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went
@@ -366,21 +393,23 @@ end of each one.
 - Choose the engine with `JIG_ENGINE=rig|ninja`, defaulting to ninja. CI runs the suite with both.
 - Add performance tests to `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
 
-### Phase 2: make the engine the default, and remove ninja
+### Phase 2: make the engine the default
 
-- Make `rig` the default, and have jig save `build/graph` in place of `build.ninja`.
-  - `jig generate --ninja` still writes `build.ninja`, for tools and for people who run ninja directly. That export
-    keeps the line-break check; the graph doesn't need it.
+- Make `rig` the default, and have jig save `build/graph` as well as `build.ninja`.
+  - `build.ninja` remains supported for good. It is written beside the graph, so ninja can still be run in the build
+    directory, and `JIG_ENGINE=ninja` (or a `build/engine` property) builds with it as now.
+  - A graph that ninja can't express, such as one with a path containing a line break, is still saved for `rig`.
+    `build.ninja` isn't written for it, and a warning says why.
 - Turn commands into argument vectors.
   - Remove `sh`, `shell_quote`, `ninja_quote` and `toolchain::shell_prefix` from the paths the engine runs. The
     toolchain and crate variables become an action's environment.
-  - Stop treating line breaks in paths as an error (`Message` for newlines, `Error::LineBreak`) when there's no ninja
-    export.
+  - Line breaks in paths become an error only with the ninja engine (`Message` for newlines, `Error::LineBreak`).
+  - `build.ninja` still runs its commands through `sh`, so the ninja writer quotes the argument vectors itself.
 - Remove the missing-path stamp in favour of missing-path inputs, and run the configure edge in the same process.
 - Bootstrap without ninja: `bootstrap.sh` runs `rustc --crate-type=lib rig/lib.rs`, then `rustc --extern rig=...
-  src/main.rs`. `bootstrap.ninja` is kept for one release.
-- Remove ninja from CI, and from the README's requirements (it currently asks for ninja 1.11 or later).
-  - Remove the special cases for old ninja versions in `install.rs`.
+  src/main.rs`. `bootstrap.ninja` is kept as well.
+- Make ninja optional in the README's requirements; it is needed only for the ninja engine. CI installs it for one
+  job that runs the suite with `JIG_ENGINE=ninja`, and the others run without it.
 
 ### Phase 3: hashing and early cutoff
 
@@ -415,6 +444,8 @@ end of each one.
 - **Pipelining.** Start dependents from `.rmeta`, using early outputs.
 - **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
   and what tests need.
+- **io_uring by default**, if the performance tests show it pays off. See [io_uring](#io_uring); its batched stat is
+  added in phase 1 behind `JIG_IO_URING=1`.
 - **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
 - **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
   so Windows can be added later.
@@ -422,23 +453,26 @@ end of each one.
 ## Risks
 
 - **No dependencies.** Everything is written in-house: BLAKE3, a framed wire protocol, an HTTP/1.1 client, the
-  jobserver, and the depfile parser. That's a deliberate cost for staying `std`-only. TLS is avoided by relying on ssh
+  jobserver, the depfile parser, and the system calls (`mkfifo`, `ioctl`, io_uring). That's a deliberate cost for
+  having no dependencies. The `unsafe` code is confined to `rig/sys.rs`, with a safe interface and tests of its own. TLS is avoided by relying on ssh
   or a proxy instead of implementing it.
-- **Matching ninja's behaviour.** jig's users can run ninja in the build directory directly. Keeping
-  `jig generate --ninja` and the differential tests limits what breaks.
+- **Matching ninja's behaviour.** jig's users can run ninja in the build directory directly. Keeping `build.ninja`,
+  and the differential tests, limits what breaks.
+- **io_uring.** It has a history of security issues, and is often disabled. It's only an optimization, detected at run
+  time with a fallback, and the suite runs both ways.
 - **Cache correctness depends on complete inputs.** Only rustc and rustdoc, whose depfiles are complete, are cached by
   default. Toolchain identity and remapped paths are tested by comparing a cached result with a fresh run.
 - **The first build of an edge can't be distributed** until its inputs are known. That makes distribution most useful
   for CI and for rebuilds after a pull, which is where it pays off most anyway.
 
-## Decisions to make
+## Decisions
 
-1. **The name of the crate and binary.** `rig` is a working name.
-2. **`extern "C"`.** Is a small, audited `extern "C"` module (`mkfifo`, `ioctl(FICLONE)`, `setrlimit`) acceptable, or
-   must the engine use only `std`? Without one, the jobserver falls back to anonymous pipes passed as file
-   descriptors, and the cache restores by hard link or copy.
-3. **The default change detection.** Timestamp mode is planned as the default for parity with ninja, and hash mode is
-   needed for the cache. Hash mode could become the default once phase 3 has been measured.
-4. **The ninja export.** Should `jig generate --ninja` stay permanently, or be removed after a deprecation period?
-5. **Publishing.** Should `rig` be published on crates.io, which needs a `Cargo.toml`, or stay a jig crate in this
-   repository?
+1. **Name.** The crate and its binary are called `rig`.
+2. **`unsafe` and `extern "C"`.** Both are allowed, in `rig/sys.rs`: `mkfifo` for the jobserver, `ioctl(FICLONE)` for
+   reflinks, `syscall` for io_uring, and `setpgid` and `kill` for process groups. io_uring is optional; see
+   [io_uring](#io_uring).
+3. **Change detection.** Timestamps, with the mtime and the size from the same `stat` call. Hash mode stays in the
+   plan, as an option for phase 3 and the cache, but isn't the default.
+4. **ninja.** Generating `build.ninja` remains supported, permanently, as a second engine.
+5. **Packaging.** `rig/` has a `Cargo.toml`, so cargo projects can use it from git or a local path. It isn't
+   published on crates.io.
