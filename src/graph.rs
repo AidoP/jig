@@ -1,7 +1,8 @@
-//! The build graph which `jig generate` describes, apart from the file it is written to, which [`crate::ninja`] writes.
+//! The build graph which `jig generate` describes, apart from what it is written to: `build.ninja`, which
+//! [`crate::ninja`] writes, and rig's graph, which [`crate::rig_graph`] saves.
 //!
-//! The commands of rules are still templates, which refer to `$in`, `$out` and the variables of their edges, and run
-//! with `sh`.
+//! The commands of rules are still templates, which refer to `$in`, `$out` and the variables of their edges, as ninja
+//! evaluates them, and run with `sh`.
 
 use std::path::Path;
 
@@ -20,6 +21,23 @@ pub struct Rule<'a> {
     pub depfile: Option<&'a str>,
     /// Whether an edge generates the graph, so that it is not rebuilt when its command changes.
     pub generator: bool,
+}
+
+impl Rule<'_> {
+    /// Returns the bindings of the rule as ninja's, in the order they are written.
+    pub fn bindings(&self) -> Vec<(&str, &str)> {
+        let mut bindings = vec![("command", self.command), ("description", self.description)];
+        if self.console {
+            bindings.push(("pool", "console"));
+        }
+        if let Some(depfile) = self.depfile {
+            bindings.extend([("deps", "gcc"), ("depfile", depfile)]);
+        }
+        if self.generator {
+            bindings.push(("generator", "1"));
+        }
+        bindings
+    }
 }
 
 /// An edge, which builds its outputs from its inputs by its rule.
@@ -50,4 +68,33 @@ pub trait Graph {
     fn default(&mut self, targets: &[&Path]) -> Result<(), Error>;
     /// Finish writing the graph, which is only then used.
     fn finish(&mut self) -> Result<(), Error>;
+}
+
+/// Writes a graph to two others, each call to the first and then the second.
+pub struct Tee<'a>(pub &'a mut dyn Graph, pub &'a mut dyn Graph);
+impl Graph for Tee<'_> {
+    fn variable(&mut self, name: &str, value: &str) -> Result<(), Error> {
+        self.0.variable(name, value)?;
+        self.1.variable(name, value)
+    }
+    fn rule(&mut self, rule: &Rule) -> Result<(), Error> {
+        self.0.rule(rule)?;
+        self.1.rule(rule)
+    }
+    fn edge(&mut self, edge: &Edge) -> Result<(), Error> {
+        self.0.edge(edge)?;
+        self.1.edge(edge)
+    }
+    fn alias(&mut self, name: &Path, targets: &[&Path]) -> Result<(), Error> {
+        self.0.alias(name, targets)?;
+        self.1.alias(name, targets)
+    }
+    fn default(&mut self, targets: &[&Path]) -> Result<(), Error> {
+        self.0.default(targets)?;
+        self.1.default(targets)
+    }
+    fn finish(&mut self) -> Result<(), Error> {
+        self.0.finish()?;
+        self.1.finish()
+    }
 }

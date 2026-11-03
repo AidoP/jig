@@ -1,5 +1,5 @@
-//! Generation of the files which build a project: the specifications of its custom targets, `build.ninja` and its
-//! depfile in the build directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`,
+//! Generation of the files which build a project: the specifications of its custom targets, `build.ninja`, its depfile
+//! and rig's graph in the build directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`,
 //! `jig test` and `jig install`, at the project root.
 //!
 //! Ninja runs in the build directory, so the paths in `build.ninja` are relative to it, while the project's paths are
@@ -9,10 +9,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::graph::{Edge, Graph, Rule};
+use crate::graph::{Edge, Graph, Rule, Tee};
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
+use crate::rig_graph::{self, RigGraph};
 use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -33,8 +34,11 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     let units = units(&project, &crates, sysroot, &build_dir);
-    let mut graph = NinjaFile::new(build_dir.join(ninja::FILE))?;
-    write_graph(&mut graph, &project, &crates, &units, &installed, input, &at)?;
+    // `build.ninja` and rig's graph are written from the same description, `build.ninja` first, so that rig's can be
+    // compared with it
+    let mut ninja_file = NinjaFile::new(build_dir.join(ninja::FILE))?;
+    let mut rig_graph = RigGraph::new(build_dir.join(rig_graph::FILE), &build_dir.join(ninja::FILE));
+    write_graph(&mut Tee(&mut ninja_file, &mut rig_graph), &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
     retire_build_dir(&build_dir)?;
     write_database(&project, &units, &installed, input, &at, &build_dir)

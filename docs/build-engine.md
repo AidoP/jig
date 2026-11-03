@@ -378,20 +378,63 @@ end of each one.
 
 ### Phase 1: the local engine, with ninja's behaviour
 
-- Build the `rig` crate: graph, graph format, state log, timestamp scan, scheduler, pools, depfiles, restat,
-  generator edges, aliases and defaults.
-- Add `rig/Cargo.toml`, with no dependencies and `publish = false`, and a CI step that builds `rig` with cargo, so
-  that it keeps working as a git or path dependency.
-- Add `rig/sys.rs`, with process groups, the `mkfifo` jobserver, and the batched stat behind `JIG_IO_URING=1`.
-- Add the standalone binary and its ninja-subset reader.
-- **Differential tests.** Generate random graphs and edit sequences, run both ninja and `rig` on them, and compare
-  which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went
-  backwards.
-- Add environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and
-  `PATH`, recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
-  reconfigure stamp, after which `env()` stops being an error.
-- Choose the engine with `JIG_ENGINE=rig|ninja`, defaulting to ninja. CI runs the suite with both.
-- Add performance tests to `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
+#### How the graph is built
+
+jig keeps describing the build exactly as it does now, through the `Graph` trait from phase 0. Phase 1 adds a second
+implementation of that trait, so `generate.rs` doesn't change.
+
+- **Two writers from one description.**
+  - `RigGraph` implements `Graph` by building a `rig::Graph`, and saves it as `build/graph`.
+  - `Tee` passes each call to both `NinjaFile` and `RigGraph`.
+  - `jig generate` therefore writes `build.ninja` and `build/graph` from the same calls. Any difference between the
+    two engines comes from the engine, not from the description.
+- **Templates are expanded when the graph is generated, as ninja does.** Phase 0 rules are still ninja templates
+  (`... $flags $in`), and the values of edges are ninja strings (`$$` for `$`). `rig::Graph` has no rules or variables.
+  Instead, `rig::ninja::Manifest` evaluates each edge as ninja would:
+  - The variables of edges are evaluated where they're defined.
+  - A rule's `command`, `description`, `depfile` and `pool` are evaluated for each edge, looking variables up in the
+    edge, then the rule, then the top level.
+  - `$in` and `$out` are the explicit paths, escaped for the shell as ninja escapes them.
+
+  Each edge becomes an `Action::Shell` command, still run by `sh`. `pool = console`, `deps = gcc`, `depfile`,
+  `generator` and `restat` become fields of the edge, and `phony` edges become aliases. Both `RigGraph` and the reader
+  of ninja files use the same `Manifest`, so there is one implementation of ninja's string rules.
+- **`rig::Graph`.**
+  - Paths are interned as `u32` IDs.
+  - Edges and nodes are flat arrays, and each node records the edge that produces it.
+  - An output with two producers is an error when it's added, as it is when ninja loads a file. Cycles are found by
+    `validate`, as ninja finds them only when building.
+  - The saved format is magic bytes, a version, the paths, the edges and the defaults, then a checksum. A version
+    mismatch means "regenerate".
+- **Checked against ninja on every configuration in the suite.** With `JIG_VERIFY_GRAPH=1`, which the integration
+  tests set, `jig generate` reads the `build.ninja` it wrote back with `rig::ninja::read`. If the result differs from
+  the graph it built directly, generation fails and the first difference is reported. Every project the integration
+  tests configure therefore checks the translation, including paths with spaces, `$` and `:`.
+- **What stays as it is.**
+  - The configure edge stays an ordinary generator edge, with its inputs in `build.ninja.d`.
+  - Missing paths keep using `reconfigure.stamp`, which is just a file input to `rig`.
+  - Line breaks are still an error, because `build.ninja` is still written.
+  - Native inputs for missing paths and environment variables come with the executor.
+- **Phase 2** makes a rule's command an `Action` with a program, arguments and environment variables. `RigGraph` then
+  passes actions through unchanged, and `NinjaFile` takes on the quoting that `generate.rs` does now.
+
+#### Steps
+
+1. **Done:** the graph, its format, `Manifest`, the ninja reader, `RigGraph` and `Tee`, `JIG_VERIFY_GRAPH`, `rig` as
+   a crate that jig uses (and the bootstrap builds), and `rig/Cargo.toml` with a CI step that tests it with cargo.
+2. The state log and the timestamp scan (mtime and size), with `Engine::plan` for dry runs.
+3. The scheduler and executor: the worker pool, pools, depfiles, restat, generator edges, and output capture.
+4. `rig/sys.rs`: process groups, the `mkfifo` jobserver, and the batched stat behind `JIG_IO_URING=1`.
+5. `JIG_ENGINE=rig`, which `Configured::builder()` uses to return the `rig` builder. CI runs the suite with both
+   engines.
+6. The standalone `rig` binary, which builds ninja files with the reader.
+7. **Differential tests.** Generate random graphs and sequences of edits, run both ninja and `rig` on them, and compare
+   which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went
+   backwards.
+8. Environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and `PATH`,
+   recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
+   reconfigure stamp, after which `env()` stops being an error.
+9. Performance tests in `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
 
 ### Phase 2: make the engine the default
 

@@ -32,6 +32,12 @@ The unit tests, run by `jig test jig`, include micro-benchmarks of parts of `jig
 finding the crates passed to each crate, which fail if one grows much faster than its input. Their times are shown by
 running the test harness with `--nocapture`, as in `build/<target>/test/jig benches --nocapture`.
 
+`rig/` is rig, the build engine which is replacing ninja, as `docs/build-engine.md` plans. It is a crate which `jig`
+uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. For now, `jig generate`
+writes rig's graph to `graph` in the build directory beside `build.ninja`, from the same description, and ninja still
+builds the project. With `JIG_VERIFY_GRAPH=1`, as the integration tests set, `jig generate` reads `build.ninja` back
+with rig and fails if it differs from rig's graph.
+
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
 
 ```
@@ -54,7 +60,7 @@ which runs ninja in the build directory, and tested with `jig test`.
 ./build/bootstrap/jig test
 ```
 
-`jig generate` evaluates `Jig`, writes `build.ninja` to the build directory and records the build directory in `.jig`,
+`jig generate` evaluates `Jig`, writes `build.ninja` and rig's `graph` to the build directory and records the build directory in `.jig`,
 at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install` find `.jig` in the
 working directory or its parents, so they can be run from anywhere in the project. They configure the project first if
 it is not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its

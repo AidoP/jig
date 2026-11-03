@@ -72,3 +72,6 @@ jobs:
       - name: Lint
         # any warning fails, as the levels of the lints, set in `Jig`, are those the project keeps to
         run: build/bootstrap/jig lint -D
+      - name: Test rig with cargo
+        # so that cargo projects can use rig as a git or path dependency
+        run: cargo test --manifest-path rig/Cargo.toml
