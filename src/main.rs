@@ -12,6 +12,7 @@ mod install;
 mod lint;
 mod ninja;
 mod project;
+mod rig_graph;
 mod run;
 mod rust_analyzer;
 mod target_spec;
@@ -328,6 +329,10 @@ enum Error {
     /// A diagnostic reported once the project is configured was an error, as its property set it to be.
     Reported(String),
     ProxyNotInstalled(PathBuf),
+    /// rig could not build, save or read a graph.
+    Rig(rig::Error),
+    /// The graph rig read from a ninja file differs from the one it was built from, with the first difference.
+    GraphMismatch(PathBuf, String),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -388,6 +393,10 @@ impl core::fmt::Display for Error {
             ),
             Self::Reported(id) => write!(f, "stopped, as `diagnostic/{id}` makes it an error"),
             Self::ProxyOutOfDate => write!(f, "not building or running the program"),
+            Self::Rig(error) => write!(f, "rig: {error}"),
+            Self::GraphMismatch(path, difference) => {
+                write!(f, "the graph rig reads from {path:?} differs from the one it was built from: {difference}")
+            },
         }
     }
 }

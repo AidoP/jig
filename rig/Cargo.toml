@@ -1,0 +1,12 @@
+# rig is built by jig, as a crate in the `Jig` of this repository, while this manifest lets cargo projects use it as a
+# git or path dependency. It is not published.
+[package]
+name = "rig"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A build engine, which builds a graph of files from the edges which produce them"
+publish = false
+
+[lib]
+path = "lib.rs"

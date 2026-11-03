@@ -44,8 +44,10 @@ impl Project {
         {
             command.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
         }
+        // rig's graph is compared with the `build.ninja` written beside it, so that they describe the same build
         let output = command
             .args(["generate", "Jig"])
+            .env("JIG_VERIFY_GRAPH", "1")
             .envs(env.iter().copied())
             .current_dir(&self.dir)
             .output()

@@ -3,3 +3,5 @@
 !.gitignore
 /Jig.local
 /build*
+/rig/target
+/rig/Cargo.lock

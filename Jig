@@ -40,10 +40,17 @@ target {target}
     override
     linker 'rust-lld'
 
+# the build engine, which is usable on its own
+@for target in targets
+@if {target}.has-std
+crate rig 'rig/lib.rs'
+    test {target}.test
+
 @for target in targets
 @if {target}.has-std
 crate jig 'src/main.rs'
     crate-type 'bin'
+    use rig
     # statically linked for musl, which `riscv64gc-unknown-linux-musl` is not by default
     codegen/target-feature get([{host-target}: []], target, ['+crt-static'])
     # where the tests of the target can run

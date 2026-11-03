@@ -50,16 +50,7 @@ impl Graph for NinjaFile {
     ///
     /// The command, description and depfile are written verbatim, so that other variables can be referenced with `$`.
     fn rule(&mut self, rule: &Rule) -> Result<(), Error> {
-        let mut variables = vec![("command", rule.command), ("description", rule.description)];
-        if rule.console {
-            variables.push(("pool", "console"));
-        }
-        if let Some(depfile) = rule.depfile {
-            variables.extend([("deps", "gcc"), ("depfile", depfile)]);
-        }
-        if rule.generator {
-            variables.push(("generator", "1"));
-        }
+        let variables = rule.bindings();
         self.check_variables(&variables)?;
         let mut statement = format!("\nrule {}\n", rule.name).into_bytes();
         push_variables(&mut statement, &variables);
