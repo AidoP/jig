@@ -270,7 +270,9 @@ impl Graph {
         if self.edges.len() != other.edges.len() {
             return Some(format!("{} edges rather than {}", self.edges.len(), other.edges.len()));
         }
-        let defaults = |graph: &Graph| graph.defaults.iter().map(|&node| graph.path(node).to_string()).collect::<Vec<_>>();
+        let defaults = |graph: &Graph| {
+            graph.defaults.iter().map(|&node| graph.path(node).to_string()).collect::<Vec<_>>()
+        };
         if defaults(self) != defaults(other) {
             return Some(format!("defaults {:?} rather than {:?}", defaults(self), defaults(other)));
         }
@@ -392,7 +394,8 @@ mod tests {
     fn command(graph: &mut Graph, outputs: &[&str], inputs: &[&str]) -> Result<EdgeId, Error> {
         let outputs = outputs.iter().map(|path| graph.file(path)).collect();
         let inputs = inputs.iter().map(|path| graph.file(path)).collect();
-        graph.add_edge(Edge { kind: EdgeKind::Command(Action::Shell("true".into())), outputs, inputs, ..Edge::default() })
+        let kind = EdgeKind::Command(Action::Shell("true".into()));
+        graph.add_edge(Edge { kind, outputs, inputs, ..Edge::default() })
     }
 
     #[test]

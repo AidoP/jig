@@ -514,7 +514,8 @@ mod tests {
     fn evaluates_as_ninja_does() {
         let graph = read(
             "flags = -O\n\
-             rule cc\n  command = cc $flags $extra -o $out $in\n  description = CC $out\n  depfile = $out.d\n  deps = gcc\n\
+             rule cc\n  command = cc $flags $extra -o $out $in\n  description = CC $out\n  \
+             depfile = $out.d\n  deps = gcc\n\
              flags = -O2\n\
              build a$ b.o | a.d: cc a.c b$:c.c | h.h || gen\n  extra = $$x $flags\n  flags = -g\n",
         )
@@ -566,7 +567,8 @@ mod tests {
         assert_eq!(error("rule r\n  depfile = d\n"), "line 1: rule \"r\" has no command");
         assert_eq!(error("rule r\n  command = c\n  wat = 1\n"), "line 1: unexpected variable \"wat\" in rule \"r\"");
         assert_eq!(error("include other.ninja\n"), "line 1: `include` is not supported");
-        assert_eq!(error("rule r\n  command = c\n  pool = link\nbuild o: r\n"), "line 4: pool \"link\" is not supported");
+        let pool = "rule r\n  command = c\n  pool = link\nbuild o: r\n";
+        assert_eq!(error(pool), "line 4: pool \"link\" is not supported");
         assert_eq!(error("rule r\n  command = c\nbuild o: r\nbuild o: r\n"), "\"o\" is produced by more than one edge");
         assert_eq!(error("  x = 1\n"), "line 1: unexpected indentation");
         assert_eq!(error("build o\n"), "line 1: expected a rule in `build`");
