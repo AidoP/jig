@@ -309,13 +309,11 @@ pub fn read(text: &str) -> Result<Graph, Error> {
             if binding.is_empty() || binding.starts_with('#') {
                 continue;
             }
-            match split_binding(binding) {
-                Some(binding) => bindings.push(binding),
-                None => {
-                    let message = format!("expected a binding, not {binding:?}");
-                    return Err(Error::Ninja { line: *number, message });
-                },
-            }
+            let Some(binding) = split_binding(binding) else {
+                let message = format!("expected a binding, not {binding:?}");
+                return Err(Error::Ninja { line: *number, message });
+            };
+            bindings.push(binding);
         }
         let (keyword, rest) = line.split_once([' ', '\t']).unwrap_or((line.as_str(), ""));
         match keyword {
