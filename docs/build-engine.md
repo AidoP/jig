@@ -422,7 +422,30 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 1. **Done:** the graph, its format, `Manifest`, the ninja reader, `RigGraph` and `Tee`, `JIG_VERIFY_GRAPH`, `rig` as
    a crate that jig uses (and the bootstrap builds), and `rig/Cargo.toml` with a CI step that tests it with cargo.
-2. The state log and the timestamp scan (mtime and size), with `Engine::plan` for dry runs.
+2. **Done:** the state log, the timestamp scan and dry-run plans.
+   - **State log.** `rig::state::State` opens `log` in a directory, and holds an exclusive lock on `lock` beside it
+     while it's open.
+     - Each record is checked against a hash when it's read. A torn record at the end is dropped and overwritten.
+     - A log of another version is started again, and the log is rewritten once most of its records have been
+       replaced.
+     - Records are keyed by the edge's first output. They hold the stamps of its outputs, of its declared inputs (with
+       the inputs of aliases in their place), and of the inputs it discovered, plus its action hash, start time and
+       duration.
+   - **Stamps.** `rig::Stamp` is the mtime in nanoseconds and the size, from one `stat`, or "missing". `Stamps` finds
+     each file's stamp once per build.
+   - **Plans.** `rig::plan::plan` returns the edges that must run, in dependency order, each with a `Reason`, which is
+     what `--explain` will show. It covers:
+     - order-only inputs;
+     - generator edges, whose command may change without them running;
+     - aliases, including always-dirty aliases with no inputs, and aliases taken as inputs;
+     - discovered inputs, whose producers are built first, as ninja does with its deps log;
+     - missing sources, and cycles;
+     - defaults, or ninja's root nodes when there are none.
+
+     A plan is a dry run: it replaces `ninja -n` once the executor records what it runs. Stamps are found one at a
+     time for now; batching them is step 4.
+   - Like ninja, a file changed twice within one tick of the filesystem's clock, to the same size, isn't noticed. A
+     fix, if one is needed, is to stamp again any input whose mtime is in the same tick as the edge's start.
 3. The scheduler and executor: the worker pool, pools, depfiles, restat, generator edges, and output capture.
 4. `rig/sys.rs`: process groups, the `mkfifo` jobserver, and the batched stat behind `JIG_IO_URING=1`.
 5. `JIG_ENGINE=rig`, which `Configured::builder()` uses to return the `rig` builder. CI runs the suite with both

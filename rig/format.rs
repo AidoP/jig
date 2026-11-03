@@ -5,9 +5,9 @@
 //! followed by their UTF-8 bytes, and a list of nodes is its length followed by each node's index.
 //!
 //! An edge is its kind, `0` for an alias or `1` for a shell command followed by the command, then its description, its
-//! depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console, its flags, `1` if it is a generator
-//! and `2` if it is restat, then its lists of nodes: outputs, implicit outputs, inputs, implicit inputs and order-only
-//! inputs.
+//! depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console, its flags, `1` if it is a
+//! generator and `2` if it is restat, then its lists of nodes: outputs, implicit outputs, inputs, implicit inputs and
+//! order-only inputs.
 
 use std::path::Path;
 
