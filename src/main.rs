@@ -2,10 +2,12 @@ use std::{io::IsTerminal, path::{Path, PathBuf}};
 
 #[cfg(test)]
 mod bench;
+mod builder;
 mod check;
 mod configured;
 mod database;
 mod generate;
+mod graph;
 mod install;
 mod lint;
 mod ninja;
@@ -91,13 +93,8 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
                 return Ok(if reinstalled { ExitCode::from(install::REINSTALLED) } else { ExitCode::SUCCESS });
             }
             let project = configured::Configured::find(configured::Output::Stdout)?;
-            let mut ninja = project.ninja();
-            ninja.args(args);
-            match ninja.status() {
-                Ok(status) if status.success() => Ok(ExitCode::SUCCESS),
-                Ok(_) => Err(Error::BuildFailed),
-                Err(error) => Err(Error::Exec(Box::new(ninja), error)),
-            }
+            let args: Vec<_> = args.collect();
+            project.build(&builder::Request { args: &args, ..Default::default() }).map(|()| ExitCode::SUCCESS)
         },
         "check" => {
             let Some(label) = args.next() else {

@@ -4,6 +4,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::builder::Request;
 use crate::configured::{Configured, Output};
 use crate::generate::shell_quote;
 use crate::project::{self, Message, Severity};
@@ -12,13 +13,13 @@ use crate::{Error, database};
 /// Install the files of the crates and custom commands with `install` in a prefix, or the `install-prefix` property if
 /// none is given, without evaluating the configuration.
 ///
-/// What is installed is built by ninja first, then each file is copied into its directory within the prefix, replacing
+/// What is installed is built first, then each file is copied into its directory within the prefix, replacing
 /// any file there, with its permissions, followed by a summary. With `proxy`, a program is installed as a wrapper which
 /// builds it if needed then runs it, and any other file as a link to it, so that what is installed follows the build.
 pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
-    build(&project, &["install"])?;
-    // read after ninja, which reconfigures if needed, so that it is current
+    project.build(&Request { targets: &["install"], ..Default::default() })?;
+    // read after building, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     // a prefix which is given is relative to the working directory, and the property to the project root
@@ -192,9 +193,10 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
             Some(file) => format!("{:?}", file.target),
             None => format!("{:?}", wrapper.display().to_string()),
         };
-        let message = if !up_to_date(&project, "build.ninja")? {
+        let builder = project.builder();
+        let message = if !builder.graph_up_to_date()? {
             Some(Message::ProxyBuild { program, configuration: true })
-        } else if let Some(file) = file && !up_to_date(&project, file.target)? {
+        } else if let Some(file) = file && !builder.up_to_date(file.target)? {
             Some(Message::ProxyBuild { program, configuration: false })
         } else {
             None
@@ -216,10 +218,10 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
     let Some(file) = find_program(&database, prefix, wrapper) else {
         return Err(Error::ProxyNotInstalled(wrapper.into()));
     };
-    // ninja is not run when nothing is out of date, as before 1.12, it reports that there is nothing to do even when
-    // it is quiet
+    // nothing is built when nothing is out of date, as before 1.12, ninja reports that there is nothing to do even
+    // when it is quiet
     if stale {
-        build(&project, &["--quiet", file.target])?;
+        project.build(&Request { targets: &[file.target], quiet: true, ..Default::default() })?;
     }
     let source = project.root.join(file.path);
     let jig = match proxy_jig(&project.root, prefix, &database.installs) {
@@ -241,24 +243,3 @@ fn find_program<'a>(
     database.installs.iter().find(|file| file.program && destination(prefix, file) == wrapper)
 }
 
-/// Returns whether ninja has no work to do for a target, from a dry run, which does not regenerate `build.ninja`.
-fn up_to_date(project: &Configured, target: &str) -> Result<bool, Error> {
-    let mut dry_run = project.ninja();
-    dry_run.args(["-n", target]);
-    let output = match dry_run.output() {
-        Ok(output) => output,
-        Err(error) => return Err(Error::Exec(Box::new(dry_run), error)),
-    };
-    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("ninja: no work to do."))
-}
-
-/// Run ninja in the build directory with arguments.
-fn build(project: &Configured, args: &[&str]) -> Result<(), Error> {
-    let mut ninja = project.ninja();
-    ninja.args(args);
-    match ninja.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(_) => Err(Error::BuildFailed),
-        Err(error) => Err(Error::Exec(Box::new(ninja), error)),
-    }
-}

@@ -3,14 +3,15 @@
 use std::io::{IsTerminal, Write};
 
 use crate::Error;
+use crate::builder::Request;
 use crate::configured::{Configured, Output};
 
 /// Lint the crates which are edited, or only those named, without evaluating the configuration.
 ///
-/// The lints are brought up to date by ninja, which lints every crate it can even if one fails, then the diagnostics
-/// each saved are shown, so that they are shown even when nothing needed linting. It fails if a lint did, such as for a
-/// lint which is denied, or with `deny_warnings`, if there is a warning, which is found in what was saved, so that the
-/// lints are not run again.
+/// The lints are brought up to date by building them, which lints every crate it can even if one fails, then the
+/// diagnostics each saved are shown, so that they are shown even when nothing needed linting. It fails if a lint did,
+/// such as for a lint which is denied, or with `deny_warnings`, if there is a warning, which is found in what was saved,
+/// so that the lints are not run again.
 pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
     let targets: Vec<_> = if names.is_empty() {
@@ -18,16 +19,12 @@ pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
     } else {
         names.iter().map(|name| format!("lint/{name}")).collect()
     };
-    let mut ninja = project.ninja();
-    ninja.args(["-k", "0"]).args(&targets);
-    let linted = match ninja.status() {
-        Ok(status) => status.success(),
-        Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
-    };
-    // read after ninja, which reconfigures if needed, so that it is current
+    let targets: Vec<_> = targets.iter().map(String::as_str).collect();
+    let linted = project.builder().build(&Request { targets: &targets, keep_going: true, ..Default::default() })?;
+    // read after building, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
-    // an unknown crate also fails ninja, as it has no target, but is the more useful error
+    // an unknown crate also fails the build, as it has no target, but is the more useful error
     let mut lints = Vec::new();
     for name in names {
         match database.lints.iter().find(|lint| lint.name == name) {
