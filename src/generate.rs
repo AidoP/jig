@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use crate::graph::{Edge, Graph, Rule};
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
@@ -32,7 +33,8 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     let units = units(&project, &crates, sysroot, &build_dir);
-    write_build_ninja(&project, &crates, &units, &installed, input, &at, &build_dir)?;
+    let mut graph = NinjaFile::new(build_dir.join(ninja::FILE))?;
+    write_graph(&mut graph, &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
     retire_build_dir(&build_dir)?;
     write_database(&project, &units, &installed, input, &at, &build_dir)
@@ -263,7 +265,7 @@ fn write_reconfigure_stamp(build_dir: &Path) -> Result<(), Error> {
 /// Write the depfile of `build.ninja`, which is regenerated when a file the configuration read changes, or the
 /// reconfigure stamp is touched.
 fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(), Error> {
-    let path = build_dir.join("build.ninja.d");
+    let path = build_dir.join(format!("{}.d", ninja::FILE));
     // a line break cannot be escaped in a depfile, as in `build.ninja`
     let files = project.files.iter().map(|file| &file.path);
     if let Some(broken) = files.chain(&project.dependencies).find(|path| has_line_break(&path.to_string_lossy())) {
@@ -280,7 +282,7 @@ fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(),
 }
 
 fn write_dependencies(w: &mut dyn std::io::Write, project: &Project, at: &Rebase, stamp: &Path) -> Result<(), std::io::Error> {
-    write!(w, "build.ninja:")?;
+    write!(w, "{}:", ninja::FILE)?;
     let stamp = stamp.to_path_buf();
     // builtin files change with jig, which the configuration already depends on, and a file processed again is listed
     // once
@@ -332,16 +334,18 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
     units
 }
 
-fn write_build_ninja(
+/// Write the build graph of a project.
+fn write_graph(
+    graph: &mut dyn Graph,
     project: &Project,
     crates: &[Crate],
     units: &[Unit],
     installed: &[Installed],
     input: &Path,
     at: &Rebase,
-    build_dir: &Path,
 ) -> Result<(), Error> {
-    let mut build_ninja = NinjaFile::new(build_dir.join("build.ninja"))?;
+    // the specifications of custom targets are found in the build directory, and rebased
+    let build_dir = &at.build_dir;
     // the configure tool and custom commands run from the project root, as their arguments are relative to it
     let cd = format!("cd {} &&", ninja_quote(&at.root.display().to_string()));
 
@@ -359,57 +363,62 @@ fn write_build_ninja(
     );
     // rustc and custom commands run with the toolchain, even when ninja is run directly
     let env = toolchain::shell_prefix(toolchain).replace('$', "$$");
-    build_ninja.rule("configure", &[
-        ("command", &command),
-        ("description", "CONFIGURE $out"),
-        ("pool", "console"),
-        ("deps", "gcc"),
-        ("depfile", "$out.d"),
-        ("generator", "1"),
-    ])?;
+    graph.rule(&Rule {
+        name: "configure",
+        command: &command,
+        description: "CONFIGURE $out",
+        console: true,
+        depfile: Some("$out.d"),
+        generator: true,
+    })?;
     let exe = at.paths(&exe);
-    build_ninja.build(&ninja::Build {
+    graph.edge(&Edge {
         rule: "configure",
-        outputs: &[Path::new("build.ninja")],
+        outputs: &[Path::new(ninja::FILE)],
         inputs: &[&at.path(input)],
         implicit: &as_paths(&exe),
         ..Default::default()
     })?;
 
-    build_ninja.variable("edition", "2024")?;
+    graph.variable("edition", "2024")?;
     // the temporary files rustc writes to `--out-dir` are kept in the build directory, in a directory for each edge, as
     // they are named after the crate, which may be compiled for several targets, or as a test harness, at once
     // `crate-env` is the environment variables of a crate, before rustc, as `sh` takes them
     let rustc = &format!("{env}$crate-env rustc --color=always --out-dir=$tmpdir --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
-    build_ninja.rule("rustc", &[
-        ("command", rustc),
-        ("description", "RUSTC $out"),
-        ("deps", "gcc"),
-        ("depfile", "$out.d"),
-    ])?;
+    graph.rule(&Rule {
+        name: "rustc",
+        command: rustc,
+        description: "RUSTC $out",
+        depfile: Some("$out.d"),
+        ..Default::default()
+    })?;
 
     // rustdoc only writes dep-info with unstable options, so the documentation depends on the crate's check instead,
     // which is built again when its sources change, and the crates for a target are documented together, as rustdoc
     // locks the files they share
-    build_ninja.rule("rustdoc", &[
-        ("command", &format!("{env}$crate-env rustdoc --color=always --out-dir=$outdir --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in")),
-        ("description", "RUSTDOC $out"),
-    ])?;
+    graph.rule(&Rule {
+        name: "rustdoc",
+        command: &format!("{env}$crate-env rustdoc --color=always --out-dir=$outdir --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in"),
+        description: "RUSTDOC $out",
+        ..Default::default()
+    })?;
 
     // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to date
-    build_ninja.rule("clippy", &[
-        ("command", &format!("{env}$crate-env clippy-driver --color=always --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
-        ("description", "CLIPPY $out"),
-        ("deps", "gcc"),
-        ("depfile", "$out.d"),
-    ])?;
+    graph.rule(&Rule {
+        name: "clippy",
+        command: &format!("{env}$crate-env clippy-driver --color=always --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics"),
+        description: "CLIPPY $out",
+        depfile: Some("$out.d"),
+        ..Default::default()
+    })?;
 
-    build_ninja.rule("rustc-check", &[
-        ("command", &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics")),
-        ("description", "CHECK $out"),
-        ("deps", "gcc"),
-        ("depfile", "$out.d"),
-    ])?;
+    graph.rule(&Rule {
+        name: "rustc-check",
+        command: &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics"),
+        description: "CHECK $out",
+        depfile: Some("$out.d"),
+        ..Default::default()
+    })?;
 
     // the targets built by `ninja` without any, which are all targets if there are none
     let mut defaults: Vec<PathBuf> = Vec::new();
@@ -421,7 +430,12 @@ fn write_build_ninja(
     let mut lints: Vec<PathBuf> = Vec::new();
 
     // the command of an edge is `command-line`, as its `command` would replace the rule's
-    build_ninja.rule("custom", &[("command", &format!("{cd} {env}$command-line")), ("description", "CUSTOM $name")])?;
+    graph.rule(&Rule {
+        name: "custom",
+        command: &format!("{cd} {env}$command-line"),
+        description: "CUSTOM $name",
+        ..Default::default()
+    })?;
     let mut tests = Vec::new();
     for custom in &project.customs {
         // a test is run by `jig test`, which builds its inputs and program with this target first
@@ -429,7 +443,7 @@ fn write_build_ninja(
             let phony = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
             let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
-            build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &as_paths(&inputs), ..Default::default() })?;
+            graph.alias(&phony, &as_paths(&inputs))?;
             tests.push(phony);
             continue;
         };
@@ -437,7 +451,7 @@ fn write_build_ninja(
         let command: Vec<_> = custom.command.iter().map(|argument| shell_quote(argument)).collect();
         let command = command.join(" ").replace('$', "$$");
         let outputs = at.paths(outputs);
-        build_ninja.build(&ninja::Build {
+        graph.edge(&Edge {
             rule: "custom",
             outputs: &as_paths(&outputs),
             inputs: &as_paths(&at.paths(&custom.inputs)),
@@ -448,12 +462,7 @@ fn write_build_ninja(
         })?;
         // so that the outputs can be built by name
         let phony = Path::new("custom").join(&custom.name);
-        build_ninja.build(&ninja::Build {
-            rule: "phony",
-            outputs: &[&phony],
-            inputs: &as_paths(&outputs),
-            ..Default::default()
-        })?;
+        graph.alias(&phony, &as_paths(&outputs))?;
         everything.push(phony.clone());
         if *default {
             defaults.push(phony);
@@ -488,7 +497,7 @@ fn write_build_ninja(
         let input = at.path(&c.path);
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
         let linked = c.kind != Kind::Lib;
-        build_ninja.build(&ninja::Build {
+        graph.edge(&Edge {
             rule: "rustc",
             outputs: &[&output],
             inputs: &[&input],
@@ -507,7 +516,7 @@ fn write_build_ninja(
         if c.test {
             everything.push(at.path(&c.test_harness()));
             let tmpdir = Path::new("tmp").join(&c.target).join("test").join(&c.name);
-            build_ninja.build(&ninja::Build {
+            graph.edge(&Edge {
                 rule: "rustc",
                 outputs: &[&at.path(&c.test_harness())],
                 inputs: &[&input],
@@ -554,7 +563,7 @@ fn write_build_ninja(
         if let Some(name) = &unit.doc {
             let index = at.path(&unit.doc_index());
             let implicit: Vec<_> = deps.iter().copied().chain([output.as_path()]).collect();
-            build_ninja.build(&ninja::Build {
+            graph.edge(&Edge {
                 rule: "rustdoc",
                 outputs: &[&index],
                 inputs: &[&at.path(&unit.root)],
@@ -569,7 +578,7 @@ fn write_build_ninja(
                 ..Default::default()
             })?;
             let phony = Path::new("doc").join(name);
-            build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &[&index], ..Default::default() })?;
+            graph.alias(&phony, &[&index])?;
             everything.push(phony.clone());
             docs.push(phony);
         }
@@ -588,7 +597,7 @@ fn write_build_ninja(
             if unit.harness && !unit.test {
                 lint_flags.push_str(" --test");
             }
-            build_ninja.build(&ninja::Build {
+            graph.edge(&Edge {
                 rule: "clippy",
                 outputs: &[&output],
                 implicit_outputs: &[&diagnostics],
@@ -605,11 +614,11 @@ fn write_build_ninja(
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
-            build_ninja.build(&ninja::Build { rule: "phony", outputs: &[&phony], inputs: &[&output], ..Default::default() })?;
+            graph.alias(&phony, &[&output])?;
             lints.push(phony);
         }
         let diagnostics = at.path(&unit.diagnostics());
-        build_ninja.build(&ninja::Build {
+        graph.edge(&Edge {
             rule: "rustc-check",
             outputs: &[&output],
             implicit_outputs: &[&diagnostics],
@@ -625,31 +634,26 @@ fn write_build_ninja(
             ],
             ..Default::default()
         })?;
-        build_ninja.build(&ninja::Build {
-            rule: "phony",
-            outputs: &[&Path::new("check").join(&unit.label)],
-            inputs: &[&output],
-            ..Default::default()
-        })?;
+        graph.alias(&Path::new("check").join(&unit.label), &[&output])?;
     }
 
     // lints every crate which is edited
-    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("lint")], inputs: &as_paths(&lints), ..Default::default() })?;
+    graph.alias(Path::new("lint"), &as_paths(&lints))?;
     // builds the documentation of every crate with `doc`
-    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("doc")], inputs: &as_paths(&docs), ..Default::default() })?;
+    graph.alias(Path::new("doc"), &as_paths(&docs))?;
     // builds what all of the tests need
-    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("test")], inputs: &as_paths(&tests), ..Default::default() })?;
+    graph.alias(Path::new("test"), &as_paths(&tests))?;
     // builds what `jig install` installs
     let installed = at.paths(installed.iter().map(|file| &file.path));
-    build_ninja.build(&ninja::Build { rule: "phony", outputs: &[Path::new("install")], inputs: &as_paths(&installed), ..Default::default() })?;
+    graph.alias(Path::new("install"), &as_paths(&installed))?;
 
     // without a `default` statement, ninja would build every target, including the checks
     let defaults = if defaults.is_empty() { everything } else { defaults };
     if !defaults.is_empty() {
-        build_ninja.default(&as_paths(&defaults))?;
+        graph.default(&as_paths(&defaults))?;
     }
 
-    build_ninja.sync_all()
+    graph.finish()
 }
 
 /// Returns paths borrowed as the `Path`s of a ninja statement.
@@ -686,18 +690,7 @@ fn retire_build_dir(build_dir: &Path) -> Result<(), Error> {
     if absolute(previous) == absolute(build_dir) {
         return Ok(());
     }
-    let path = previous.join("build.ninja");
-    if !path.is_file() {
-        return Ok(());
-    }
-    let stub = format!(
-        "# `build-dir` is now {:?}, where `jig generate` writes `build.ninja`\nbuild build.ninja: phony\n",
-        build_dir.display().to_string(),
-    );
-    if let Err(error) = std::fs::write(&path, stub) {
-        return Err(Error::Write(path, error));
-    }
-    Ok(())
+    ninja::retire(previous, build_dir)
 }
 
 /// The command of a test, which the database borrows.

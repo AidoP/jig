@@ -5,11 +5,12 @@ use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use crate::Error;
+use crate::builder::Request;
 use crate::configured::{Configured, Output};
 
 /// Run tests, or all of them if no names are given, without evaluating the configuration.
 ///
-/// What the tests need is built by ninja first, then each is run in turn from the project root with its output captured,
+/// What the tests need is built first, then each is run in turn from the project root with its output captured,
 /// which is shown if it fails, with how long each took. With `verbose`, the output of every test is shown below its
 /// result, such as the results of the tests in a crate's test harness, rather than only those which fail at the end.
 pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
@@ -19,13 +20,9 @@ pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
     } else {
         names.iter().map(|name| format!("test/{name}")).collect()
     };
-    let mut ninja = project.ninja();
-    ninja.args(&targets);
-    let built = match ninja.status() {
-        Ok(status) => status.success(),
-        Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
-    };
-    // read after ninja, which reconfigures if needed, so that it is current
+    let targets: Vec<_> = targets.iter().map(String::as_str).collect();
+    let built = project.builder().build(&Request { targets: &targets, ..Default::default() })?;
+    // read after building, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     // an unknown test also fails the build, as it has no target, but is the more useful error
@@ -45,7 +42,7 @@ pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
 
     let style = Style::new(std::io::stdout().is_terminal());
     let plural = if tests.len() == 1 { "" } else { "s" };
-    // after what ninja printed
+    // after what the build printed
     println!("\nrunning {} test{plural}", tests.len());
     // the results line up after the longest name
     let width = tests.iter().map(|test| test.name.chars().count()).max().unwrap_or(0);

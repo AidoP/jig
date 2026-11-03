@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::Error;
+use crate::builder::{self, Request};
 use crate::configured::{Configured, Output};
 use crate::database::Program;
 
@@ -18,13 +19,7 @@ pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, 
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     let program = find(&database.programs, name)?;
-    let mut ninja = project.ninja();
-    ninja.arg(program.target).stdout(std::io::stderr());
-    match ninja.status() {
-        Ok(status) if status.success() => (),
-        Ok(_) => return Err(Error::BuildFailed),
-        Err(error) => return Err(Error::Exec(Box::new(ninja), error)),
-    }
+    project.build(&Request { targets: &[program.target], output: builder::Output::Stderr, ..Default::default() })?;
     let binary = project.root.join(program.path);
     let mut command = match program.runner.split_first() {
         // a runner which is a path, such as one which is built, is relative to the project root

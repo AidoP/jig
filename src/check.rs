@@ -1,5 +1,6 @@
 //! `jig check`, the flycheck of rust-analyzer, which replays saved diagnostics.
 
+use crate::builder::{self, Request};
 use crate::configured::{Configured, Output};
 use crate::database::Flycheck;
 
@@ -27,9 +28,9 @@ pub fn replayed<'a>(flycheck: &Flycheck<'a>, flychecks: &[Flycheck<'a>]) -> Vec<
 
 /// Run a flycheck for rust-analyzer, without evaluating the configuration.
 ///
-/// The checks are brought up to date by ninja, then their saved diagnostics are copied to stdout, so that diagnostics
-/// are shown even when nothing needed checking. Problems are reported on stderr, which rust-analyzer ignores, as is the
-/// exit status.
+/// The checks are brought up to date by building them, then their saved diagnostics are copied to stdout, so that
+/// diagnostics are shown even when nothing needed checking. Problems are reported on stderr, which rust-analyzer
+/// ignores, as is the exit status.
 pub fn check(label: &str) {
     let project = match Configured::find(Output::Stderr) {
         Ok(project) => project,
@@ -38,15 +39,13 @@ pub fn check(label: &str) {
             return;
         },
     };
-    // ninja's output is not JSON, so it is kept out of stdout
-    let status = project.ninja()
-        .args(["--quiet", &format!("check/{label}")])
-        .stdout(std::io::stderr())
-        .status();
-    if let Err(error) = status {
-        eprintln!("failed to run ninja: {error}");
+    // the build's output is not JSON, so it is kept out of stdout
+    let target = format!("check/{label}");
+    let request = Request { targets: &[&target], quiet: true, output: builder::Output::Stderr, ..Default::default() };
+    if let Err(error) = project.builder().build(&request) {
+        eprintln!("{error}");
     }
-    // read after ninja, which reconfigures if needed, so that it is current
+    // read after building, which reconfigures if needed, so that it is current
     let bytes = match project.read() {
         Ok(bytes) => bytes,
         Err(error) => {
