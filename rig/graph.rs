@@ -138,6 +138,7 @@ impl Graph {
     pub fn edge(&self, edge: EdgeId) -> EdgeRef<'_> {
         EdgeRef { graph: self, data: &self.edges[edge.0 as usize] }
     }
+    #[must_use]
     pub fn edges(&self) -> impl ExactSizeIterator<Item = EdgeRef<'_>> {
         self.edges.iter().map(|data| EdgeRef { graph: self, data })
     }
