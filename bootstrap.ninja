@@ -1,11 +1,5 @@
-rule rustc-lib
-    command = rustc --color=always --out-dir=build/tmp/lib -O --emit=link=$out --emit=dep-info=$out.d --crate-type=lib --crate-name=$crate-name --edition=2024 $in
-    description = RUSTC $out
-    deps = gcc
-    depfile = $out.d
-
 rule rustc
-    command = rustc --color=always --out-dir=build/tmp -O --emit=link=$out --emit=dep-info=$out.d --crate-type=bin --crate-name=jig --edition=2024 --extern rig=build/bootstrap/librig.rlib $in
+    command = rustc --color=always --out-dir=build/tmp/$crate-name -O --emit=link=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=2024 $flags $in
     description = RUSTC $out
     deps = gcc
     depfile = $out.d
@@ -18,9 +12,13 @@ rule jig
     depfile = $out.d
     generator = 1
 
-build build/bootstrap/librig.rlib: rustc-lib rig/lib.rs
+build build/bootstrap/librig.rlib: rustc rig/lib.rs
+    crate-type = lib
     crate-name = rig
 
 build build/bootstrap/jig: rustc src/main.rs | build/bootstrap/librig.rlib
+    crate-type = bin
+    crate-name = jig
+    flags = --extern rig=build/bootstrap/librig.rlib
 
 build build/build.ninja: jig Jig | build/bootstrap/jig
