@@ -126,7 +126,8 @@ mod tests {
     #[test]
     fn takes_the_variables_rustc_lists() {
         // as rustc writes, with the variables `env!` and `option_env!` read, which are set or not
-        let text = "lib.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:FOO=bar=baz\n# env-dep:UNSET\n# a comment\n# env-dep:FOO\n";
+        let text = "lib.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n\
+                    # env-dep:FOO=bar=baz\n# env-dep:UNSET\n# a comment\n# env-dep:FOO\n";
         let discovered = parse(text).unwrap();
         assert_eq!(discovered.inputs, ["src/lib.rs"]);
         assert_eq!(discovered.env, ["FOO", "UNSET"]);

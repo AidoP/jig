@@ -1,11 +1,11 @@
 //! Running a build: the edges a [`plan`](crate::plan::plan) finds must run, in parallel, each once those it depends on
 //! have run.
 //!
-//! Each edge runs its command with `sh -c` in the build's directory, on a thread of its own, at most
-//! [`Options::jobs`] at once. Its output, stdout and stderr together, is captured and given to an [`Observer`] once it
-//! finishes, while an edge in the console pool runs alone among console edges with the terminal, and the output of
-//! the others is held until it finishes. An edge which succeeds is recorded as soon as it does, with the inputs its
-//! depfile lists, so that an interrupted build loses only the edges which were running.
+//! Each edge runs its command with `sh -c` in the build's directory, on one of a thread for each of the
+//! [`Options::jobs`], which is the most which run at once. Its output, stdout and stderr together, is captured and
+//! given to an [`Observer`] once it finishes, while an edge in the console pool runs alone among console edges with the
+//! terminal, and the output of the others is held until it finishes. An edge which succeeds is recorded as soon as it
+//! does, with the inputs its depfile lists, so that an interrupted build loses only the edges which were running.
 //!
 //! The outputs of a restat edge are found again once it has run, and if none of them changed, an edge which would run
 //! only because it depends on them is checked again, and does not run if it is otherwise up to date.
@@ -45,11 +45,16 @@ pub struct Options {
     pub env: Vec<(String, String)>,
 }
 impl Options {
-    /// Options for a build in a directory, with as many jobs as the machine runs at once, which stops at the first
-    /// failure.
+    /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
+    /// default: two more than the machine runs at once, as commands wait on files and processes, or one more with two,
+    /// or two with one.
     #[must_use]
     pub fn new(dir: &Path) -> Self {
-        let jobs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let jobs = match std::thread::available_parallelism().map_or(1, std::num::NonZero::get) {
+            1 => 2,
+            2 => 3,
+            threads => threads + 2,
+        };
         Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(), env: Vec::new() }
     }
 }
@@ -125,6 +130,13 @@ enum Message {
     Finished(Finished),
 }
 
+/// An edge for a thread to run: its index in the plan, its command, and whether it is in the console pool.
+struct Job {
+    index: usize,
+    command: String,
+    console: bool,
+}
+
 /// An edge which has finished.
 struct Finished {
     /// The index of the edge in the plan.
@@ -190,6 +202,8 @@ pub fn build(
         error: None,
         jobserver: None,
         tokens: HashMap::new(),
+        implicit: None,
+        directories: HashSet::new(),
         processes: HashMap::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
@@ -261,6 +275,10 @@ struct Run<'g, 's> {
     jobserver: Option<Jobserver>,
     /// The token each running edge holds, which each but one does.
     tokens: HashMap<usize, u8>,
+    /// The edge running in the job the build holds without a token, if one is.
+    implicit: Option<usize>,
+    /// The directories of outputs which have been created, relative to the build's directory.
+    directories: HashSet<PathBuf>,
     /// The process group of each running edge which is not in the console pool.
     processes: HashMap<usize, u32>,
 }
@@ -272,7 +290,28 @@ impl Run<'_, '_> {
         let makeflags = self.jobserver.as_ref().and_then(Jobserver::makeflags).map(String::from);
         // when the build was interrupted, until its processes are killed
         let mut interrupted_at = None;
+        // the edges are run by a thread for each job, rather than a thread for each edge
+        let (jobs, work) = std::sync::mpsc::channel::<Job>();
+        let work = std::sync::Mutex::new(work);
+        let (dir, env) = (self.options.dir.clone(), self.options.env.clone());
         std::thread::scope(|scope| {
+            for _ in 0..self.options.jobs.max(1) {
+                let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
+                scope.spawn(move || {
+                    // the lock is held while waiting for a job, which the other threads wait for in turn
+                    while let Ok(Ok(Job { index, command, console })) = work.lock().map(|work| work.recv()) {
+                        let start = SystemTime::now();
+                        let clock = Instant::now();
+                        let spawned = |pid| {
+                            let _ = sender.send(Message::Spawned(index, pid));
+                        };
+                        let environment = Environment { makeflags, env };
+                        let (outcome, output) = run_command(&command, dir, console, &environment, &spawned);
+                        let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
+                        let _ = sender.send(Message::Finished(finished));
+                    }
+                });
+            }
             loop {
                 let cancelled = self.options.cancel.load(Ordering::SeqCst).then_some(sys::SIGINT);
                 let interrupted = interrupts.interrupted().or(cancelled);
@@ -302,31 +341,24 @@ impl Run<'_, '_> {
                         self.done(index, false);
                         continue;
                     }
-                    // each edge but the first running takes a token
-                    if self.progress.running > 0 && let Some(jobserver) = &self.jobserver {
-                        let Some(token) = jobserver.try_acquire() else {
-                            self.ready.insert(index);
-                            waiting_for_token = true;
-                            break;
-                        };
-                        self.tokens.insert(index, token);
+                    // an edge runs in the job the build holds without a token if it is free, and any other takes a
+                    // token
+                    match &self.jobserver {
+                        Some(jobserver) if self.implicit.is_some() => {
+                            let Some(token) = jobserver.try_acquire() else {
+                                self.ready.insert(index);
+                                waiting_for_token = true;
+                                break;
+                            };
+                            self.tokens.insert(index, token);
+                        },
+                        _ => self.implicit = Some(index),
                     }
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let Action::Shell(command) = self.action(index).clone();
-                    let (dir, sender, makeflags) = (self.options.dir.clone(), sender.clone(), makeflags.clone());
-                    let env = self.options.env.clone();
-                    scope.spawn(move || {
-                        let start = SystemTime::now();
-                        let clock = Instant::now();
-                        let spawned = |pid| {
-                            let _ = sender.send(Message::Spawned(index, pid));
-                        };
-                        let environment = Environment { makeflags: makeflags.as_deref(), env: &env };
-                        let (outcome, output) = run_command(&command, &dir, console, &environment, &spawned);
-                        let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
-                        let _ = sender.send(Message::Finished(finished));
-                    });
+                    // a thread for each job takes it, as no more run than there are jobs
+                    let _ = jobs.send(Job { index, command, console });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -350,12 +382,17 @@ impl Run<'_, '_> {
                         {
                             jobserver.release(token);
                         }
+                        if self.implicit == Some(finished.index) {
+                            self.implicit = None;
+                        }
                         self.finish(finished, observer);
                     },
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
+            // the threads stop once there are no more jobs
+            drop(jobs);
         });
         match self.error.take() {
             Some(error) => Err(error),
@@ -404,7 +441,10 @@ impl Run<'_, '_> {
         // fails without if it needs them
         let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
         for path in outputs.chain(data.depfile()) {
-            if let Some(dir) = Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            // each directory once, as many outputs share one
+            if let Some(dir) = Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty())
+                && self.directories.insert(dir.to_path_buf())
+            {
                 let _ = std::fs::create_dir_all(self.options.dir.join(dir));
             }
         }
@@ -775,7 +815,10 @@ mod tests {
         // as rustc lists the variables `env!` reads, in the environment the command is given
         let graph = graph()
             .rule("cc", &[
-                ("command", "echo \"$$RIG_TEST_VARIABLE\" > $out && printf '$out:\\n# env-dep:RIG_TEST_VARIABLE\\n' > $out.d"),
+                (
+                    "command",
+                    "echo \"$$RIG_TEST_VARIABLE\" > $out && printf '$out:\\n# env-dep:RIG_TEST_VARIABLE\\n' > $out.d",
+                ),
                 ("depfile", "$out.d"),
             ])
             .edge("cc", &["a.o"], &[]);
@@ -919,6 +962,22 @@ mod tests {
         build.options.jobs = 3;
         assert_eq!(build.ran(&[]), ["a"]);
         assert_eq!(build.read("a"), "++");
+    }
+
+    #[test]
+    fn reuses_the_job_without_a_token() {
+        // `a` runs in the job without a token and finishes first, which `c` then runs in, rather than waiting for `b`
+        // to give back the only token
+        let graph = graph()
+            .rule("sleep", &[("command", "sleep $time && touch $out")])
+            .edge_with("sleep", &["a"], &[], &[("time", "0.05")])
+            .edge_with("sleep", &["b"], &[], &[("time", "0.6")])
+            .edge_with("sleep", &["c"], &[], &[("time", "0.3")]);
+        let mut build = Build::new("implicit-job", graph.finish(), &[]);
+        build.options.jobs = 2;
+        let start = Instant::now();
+        assert_eq!(build.ran(&[]).len(), 3);
+        assert!(start.elapsed() < Duration::from_millis(800), "{:?}", start.elapsed());
     }
 
     #[test]

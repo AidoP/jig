@@ -333,6 +333,8 @@ fn rig_builds_as_ninja_does() {
         eprintln!("ninja is not installed, so rig is not compared with it");
         return;
     }
+    // the builds would slow the micro-benchmarks, which run beside the test
+    let _timing = crate::bench::TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // one seed, to look into a difference
     if let Ok(seed) = std::env::var("JIG_DIFFERENTIAL_SEED") {
         compare(seed.parse().unwrap(), true);

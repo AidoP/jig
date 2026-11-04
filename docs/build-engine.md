@@ -252,7 +252,8 @@ value. A variable is never sent to a cache or worker unless the action declares 
   whole tree can be stopped when the build fails or is interrupted.
 - **Priority.** Ready edges are ordered by the longest path from them to the end of the build, weighted by durations
   from the log. Edges with no history count as 1, so a deep chain of crates isn't started last.
-- **Jobs.** The default number of jobs is `std::thread::available_parallelism`.
+- **Jobs.** The default number of jobs is ninja's: two more than `std::thread::available_parallelism` when there are
+  more than two, or one more with two, or two with one, as commands spend time waiting on files and processes.
 - **Jobserver.** The engine runs a GNU make jobserver, using the `fifo:` form on Unix, and passes it to children in
   `MAKEFLAGS` and `CARGO_MAKEFLAGS`. rustc then shares tokens for its codegen threads instead of oversubscribing the
   machine, and so do `make` and `cargo` run as custom commands. When `jig` itself runs under a jobserver, it joins that
@@ -565,7 +566,36 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Under rig, `jig run` rebuilds a crate whose `env!` variable changed, and nothing else. It fails if rig's
        variable check is disabled.
      - `impure_functions` now uses `run()`, the remaining impure function.
-8. Performance tests in `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
+8. **Done:** performance tests comparing rig with ninja, in `test/perf.rs`.
+   - **The graph.** `copies(n)` is `n` custom commands, each copying a file of its own into `out/` in the build
+     directory, with an order-only link from every tenth to the one before. Its time is that of the engine and of
+     spawning processes, not of compilers. Each engine builds its own copy of the project, so neither sees the other's
+     outputs or state.
+   - **`rig_builds_as_fast_as_ninja`** times a full build and an up-to-date build of 1,000 copies with each engine,
+     best of 3. It fails if rig takes more than 1.3 times as long as ninja for either, retrying once first. The test
+     is skipped where ninja isn't installed.
+   - **`rig_up_to_date_scales`** fails if an up-to-date rig build of 4,000 copies takes more than 10 times as long as
+     one of 1,000.
+   - **Measured** on 4 cores with Linux 6.18, best of 3:
+
+     | | ninja | rig |
+     |---|---|---|
+     | full build, 1,000 copies | 0.89–1.08 s | 0.97–1.07 s |
+     | full build, 4,000 copies | 3.8–4.2 s | 4.0–4.1 s |
+     | up to date, 1,000 copies | 20–22 ms | 12–13 ms |
+     | up to date, 4,000 copies | 59–64 ms | 42–50 ms |
+
+     Up-to-date builds are about 1.3 to 1.7 times faster than ninja's, as files are stamped together on threads.
+     Full builds are within noise of ninja's, since spawning a process for each edge dominates them. The larger gains
+     on full builds are pipelining and priority by critical path, which are later phases.
+   - **What the measurements fixed.** Full builds were at first about 1.4 times slower than ninja's:
+     - **Fewer jobs.** rig ran as many jobs as cores, while ninja runs two more. rig now defaults to the same number.
+     - **A lost job slot.** An edge which started while nothing else ran held the build's job without a token. When
+       it finished, the next edge still waited for a token. With 4 jobs, rig mostly ran 3 at once. It now tracks
+       which edge holds that job, and a regression test checks it is reused.
+     - **A thread for each edge.** That cost about a dozen more system calls per edge than ninja. Edges now run on a
+       thread for each job, and each output directory is created once. A full build of 2,000 copies made 459,000
+       system calls against ninja's 416,000; it now makes 430,000.
 
 ### Phase 2: make the engine the default
 
