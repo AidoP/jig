@@ -957,7 +957,7 @@ mod benches {
             }
             crates(&source)
         };
-        assert_linear("externs-chain", 2000, chain, |crates| {
+        assert_linear("externs-chain", 8000, chain, |crates| {
             std::hint::black_box(externs(crates));
         });
     }
