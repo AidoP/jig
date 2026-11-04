@@ -17,13 +17,16 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::time::{Instant, SystemTime};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::graph::{Action, EdgeId, EdgeKind, Graph, NodeId, Pool};
 use crate::plan::{self, Reason};
 use crate::stamp::{Stamp, Stamps};
 use crate::state::State;
-use crate::{Error, depfile};
+use crate::jobserver::Jobserver;
+use crate::{Error, depfile, sys};
 
 /// How a build runs.
 #[derive(Clone, Debug)]
@@ -34,6 +37,10 @@ pub struct Options {
     pub jobs: usize,
     /// The number of edges which may fail before no more are started, or `0` for no limit, as ninja's `-k`.
     pub keep_going: usize,
+    /// Whether the commands share the jobs through a jobserver, which rig joins if it is run by one.
+    pub jobserver: bool,
+    /// Set to stop the build, as an interrupt does: no more edges start, and those running are sent `SIGINT`.
+    pub cancel: Arc<AtomicBool>,
 }
 impl Options {
     /// Options for a build in a directory, with as many jobs as the machine runs at once, which stops at the first
@@ -41,7 +48,7 @@ impl Options {
     #[must_use]
     pub fn new(dir: &Path) -> Self {
         let jobs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        Self { dir: dir.into(), jobs, keep_going: 1 }
+        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default() }
     }
 }
 
@@ -53,6 +60,8 @@ pub enum Outcome {
     Failed(ExitStatus),
     /// The command could not be run, or its depfile could not be read.
     Error(String),
+    /// The command did not succeed, once the build was interrupted, which is not counted as a failure.
+    Interrupted,
 }
 impl Outcome {
     #[must_use]
@@ -93,16 +102,28 @@ pub struct Report {
     pub not_run: usize,
     /// The edges which did not run, as the restat edges they depend on did not change their outputs.
     pub restat_skipped: usize,
+    /// Whether the build was interrupted, by a signal or [`Options::cancel`].
+    pub interrupted: bool,
 }
 impl Report {
     /// Whether every edge which had to run succeeded.
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        self.failed == 0 && self.not_run == 0
+        self.failed == 0 && self.not_run == 0 && !self.interrupted
     }
 }
 
-/// What a thread which ran an edge sends back.
+/// How long the processes of an interrupted build have to stop before they are killed.
+const KILL_AFTER: Duration = Duration::from_secs(1);
+
+/// What a thread which runs an edge sends back.
+enum Message {
+    /// The command of an edge has started, as the process with an id, which leads its process group.
+    Spawned(usize, u32),
+    Finished(Finished),
+}
+
+/// An edge which has finished.
 struct Finished {
     /// The index of the edge in the plan.
     index: usize,
@@ -165,7 +186,13 @@ pub fn build(
         console: false,
         held: Vec::new(),
         error: None,
+        jobserver: None,
+        tokens: HashMap::new(),
+        processes: HashMap::new(),
     };
+    if options.jobserver && !run.edges.is_empty() {
+        run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
+    }
     run.status = vec![Status::Waiting; run.edges.len()];
     run.progress.total = run.edges.len();
     run.ready = (0..run.edges.len()).filter(|&index| run.waiting[index] == 0).collect();
@@ -229,13 +256,40 @@ struct Run<'g, 's> {
     held: Vec<(usize, Outcome, Vec<u8>)>,
     /// The first error writing the state, which stops the build.
     error: Option<Error>,
+    jobserver: Option<Jobserver>,
+    /// The token each running edge holds, which each but one does.
+    tokens: HashMap<usize, u8>,
+    /// The process group of each running edge which is not in the console pool.
+    processes: HashMap<usize, u32>,
 }
 
 impl Run<'_, '_> {
     fn run(&mut self, observer: &mut dyn Observer) -> Result<(), Error> {
-        let (sender, receiver) = std::sync::mpsc::channel::<Finished>();
+        let (sender, receiver) = std::sync::mpsc::channel::<Message>();
+        let interrupts = sys::Interrupts::catch();
+        let makeflags = self.jobserver.as_ref().and_then(Jobserver::makeflags).map(String::from);
+        // when the build was interrupted, until its processes are killed
+        let mut interrupted_at = None;
         std::thread::scope(|scope| {
             loop {
+                let cancelled = self.options.cancel.load(Ordering::SeqCst).then_some(sys::SIGINT);
+                let interrupted = interrupts.interrupted().or(cancelled);
+                if let Some(signal) = interrupted && !self.report.interrupted {
+                    self.report.interrupted = true;
+                    interrupted_at = Some(Instant::now());
+                    for &group in self.processes.values() {
+                        sys::signal_group(group, signal);
+                    }
+                }
+                // a process which ignores the signal, as a shell's background job ignores `SIGINT`, is killed
+                if let Some(at) = interrupted_at && at.elapsed() >= KILL_AFTER {
+                    interrupted_at = None;
+                    for &group in self.processes.values() {
+                        sys::signal_group(group, sys::SIGKILL);
+                    }
+                }
+                // whether an edge is ready but waits for a token
+                let mut waiting_for_token = false;
                 while self.progress.running < self.options.jobs.max(1) && !self.stopping() {
                     let Some(index) = self.next_ready() else {
                         break;
@@ -246,25 +300,57 @@ impl Run<'_, '_> {
                         self.done(index, false);
                         continue;
                     }
+                    // each edge but the first running takes a token
+                    if self.progress.running > 0 && let Some(jobserver) = &self.jobserver {
+                        let Some(token) = jobserver.try_acquire() else {
+                            self.ready.insert(index);
+                            waiting_for_token = true;
+                            break;
+                        };
+                        self.tokens.insert(index, token);
+                    }
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let Action::Shell(command) = self.action(index).clone();
-                    let (dir, sender) = (self.options.dir.clone(), sender.clone());
+                    let (dir, sender, makeflags) = (self.options.dir.clone(), sender.clone(), makeflags.clone());
                     scope.spawn(move || {
                         let start = SystemTime::now();
                         let clock = Instant::now();
-                        let (outcome, output) = run_command(&command, &dir, console);
+                        let spawned = |pid| {
+                            let _ = sender.send(Message::Spawned(index, pid));
+                        };
+                        let (outcome, output) = run_command(&command, &dir, console, makeflags.as_deref(), &spawned);
                         let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
-                        let _ = sender.send(finished);
+                        let _ = sender.send(Message::Finished(finished));
                     });
                 }
                 if self.progress.running == 0 {
                     break;
                 }
-                let Ok(finished) = receiver.recv() else {
-                    break;
-                };
-                self.finish(finished, observer);
+                // tokens are given back by the commands as well as the edges, so they are looked for again soon,
+                // while an interrupt is looked for less often
+                let timeout = Duration::from_millis(if waiting_for_token { 5 } else { 50 });
+                match receiver.recv_timeout(timeout) {
+                    Ok(Message::Spawned(index, pid)) => {
+                        if self.graph.edge(self.edges[index]).pool() != Pool::Console {
+                            self.processes.insert(index, pid);
+                            if self.report.interrupted {
+                                sys::signal_group(pid, sys::SIGINT);
+                            }
+                        }
+                    },
+                    Ok(Message::Finished(finished)) => {
+                        self.processes.remove(&finished.index);
+                        if let Some(token) = self.tokens.remove(&finished.index)
+                            && let Some(jobserver) = &self.jobserver
+                        {
+                            jobserver.release(token);
+                        }
+                        self.finish(finished, observer);
+                    },
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => (),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
             }
         });
         match self.error.take() {
@@ -275,7 +361,7 @@ impl Run<'_, '_> {
     /// Whether no more edges are started, as too many have failed or the state could not be written.
     fn stopping(&self) -> bool {
         let failed = self.options.keep_going != 0 && self.report.failed >= self.options.keep_going;
-        failed || self.error.is_some()
+        failed || self.error.is_some() || self.report.interrupted
     }
     /// Returns the first edge which is ready to run, other than one in the console pool while another runs.
     fn next_ready(&mut self) -> Option<usize> {
@@ -348,9 +434,14 @@ impl Run<'_, '_> {
                 Err(error) => outcome = Outcome::Error(error),
             }
         }
+        if !outcome.succeeded() && self.report.interrupted {
+            outcome = Outcome::Interrupted;
+        }
         if !outcome.succeeded() {
             self.status[index] = Status::Failed;
-            self.report.failed += 1;
+            if !matches!(outcome, Outcome::Interrupted) {
+                self.report.failed += 1;
+            }
         }
         if data.pool() == Pool::Console {
             self.console = false;
@@ -408,14 +499,31 @@ fn read_depfile(path: &Path) -> Result<Vec<String>, String> {
     }
 }
 
-/// Run a command with `sh -c` in a directory, returning how it finished and its output, stdout and stderr together.
+/// Run a command with `sh -c` in a directory, returning how it finished and its output, stdout and stderr together,
+/// with the jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
 ///
-/// A console command has the terminal, and no output is captured, while any other has no stdin.
-fn run_command(command: &str, dir: &Path, console: bool) -> (Outcome, Vec<u8>) {
+/// A console command has the terminal, and no output is captured, and is in rig's process group, so that it is sent
+/// what the terminal sends, such as `SIGINT`. Any other has no stdin, and leads a process group of its own, which the
+/// build signals when it is interrupted.
+fn run_command(
+    command: &str,
+    dir: &Path,
+    console: bool,
+    makeflags: Option<&str>,
+    spawned: &dyn Fn(u32),
+) -> (Outcome, Vec<u8>) {
+    use std::os::unix::process::CommandExt;
     let mut sh = Command::new("/bin/sh");
     sh.arg("-c").arg(command).current_dir(dir);
+    if let Some(makeflags) = makeflags {
+        sh.env("MAKEFLAGS", makeflags).env("CARGO_MAKEFLAGS", makeflags);
+    }
     if console {
-        return match sh.status() {
+        let child = sh.spawn().and_then(|mut child| {
+            spawned(child.id());
+            child.wait()
+        });
+        return match child {
             Ok(status) if status.success() => (Outcome::Succeeded, Vec::new()),
             Ok(status) => (Outcome::Failed(status), Vec::new()),
             Err(error) => (Outcome::Error(format!("failed to run `sh`: {error}")), Vec::new()),
@@ -426,7 +534,7 @@ fn run_command(command: &str, dir: &Path, console: bool) -> (Outcome, Vec<u8>) {
         Ok(pipe) => pipe,
         Err(error) => return (Outcome::Error(format!("failed to create a pipe: {error}")), Vec::new()),
     };
-    sh.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+    sh.stdin(Stdio::null()).stdout(stdout).stderr(stderr).process_group(0);
     let child = sh.spawn();
     // the command holds the pipe's writers, which must be closed for the output to end
     drop(sh);
@@ -434,6 +542,7 @@ fn run_command(command: &str, dir: &Path, console: bool) -> (Outcome, Vec<u8>) {
         Ok(child) => child,
         Err(error) => return (Outcome::Error(format!("failed to run `sh`: {error}")), Vec::new()),
     };
+    spawned(child.id());
     let mut output = Vec::new();
     let read = reader.read_to_end(&mut output);
     let outcome = match (child.wait(), read) {
@@ -476,7 +585,7 @@ impl<W: std::io::Write> Observer for Console<W> {
         if data.pool() != Pool::Console {
             self.status(graph, edge, progress);
         }
-        if !outcome.succeeded() {
+        if !outcome.succeeded() && !matches!(outcome, Outcome::Interrupted) {
             let outputs = data.outputs().iter().chain(data.implicit_outputs());
             let outputs: Vec<&str> = outputs.map(|&node| graph.path(node)).collect();
             let _ = writeln!(self.out, "FAILED: {}", outputs.join(" "));
@@ -596,14 +705,14 @@ mod tests {
         build.options.jobs = 1;
         let (report, finished) = build.build(&[]);
         assert_eq!(finished, [("bad".to_string(), "failing\n".to_string())]);
-        assert_eq!(report, Report { ran: 1, failed: 1, not_run: 3, restat_skipped: 0 });
+        assert_eq!(report, Report { ran: 1, failed: 1, not_run: 3, ..Report::default() });
         // with `-k 0`, what does not depend on the failure is built
         build.options.keep_going = 0;
         let (report, finished) = build.build(&[]);
         assert_eq!(finished.len(), 3);
-        assert_eq!(report, Report { ran: 3, failed: 1, not_run: 1, restat_skipped: 0 });
+        assert_eq!(report, Report { ran: 3, failed: 1, not_run: 1, ..Report::default() });
         // the failed edge is not recorded, so it runs again
-        assert_eq!(build.build(&[]).0, Report { ran: 1, failed: 1, not_run: 1, restat_skipped: 0 });
+        assert_eq!(build.build(&[]).0, Report { ran: 1, failed: 1, not_run: 1, ..Report::default() });
     }
 
     #[test]
@@ -671,5 +780,59 @@ mod tests {
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         let out = String::from_utf8(console.out).unwrap();
         assert_eq!(out, "[1/2] cat a b > ab\n[2/2] FAIL bad\nFAILED: bad\necho why && false\nwhy\n");
+    }
+
+    #[test]
+    fn cancelling_stops_the_commands() {
+        // a command whose process starts another, which is in its process group
+        let ninja = "rule wait\n  command = sleep 30 & echo $$! > $out.pid; wait; touch $out\n\
+                     build a: wait\nbuild b: wait\n";
+        let mut build = Build::new("cancel", ninja, &[]);
+        build.options.jobs = 2;
+        let cancel = build.options.cancel.clone();
+        let start = Instant::now();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            cancel.store(true, Ordering::SeqCst);
+        });
+        let (report, _) = build.build(&[]);
+        canceller.join().unwrap();
+        assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+        assert!(report.interrupted && !report.succeeded(), "{report:?}");
+        // the edges which were stopped are not failures
+        assert_eq!((report.ran, report.failed), (2, 0));
+        // the sleeps were stopped too, rather than left running
+        for pid in ["a.pid", "b.pid"] {
+            // a process which has stopped may not have been reaped yet, as its parent is now the system's
+            let pid = build.read(pid);
+            let ps = Command::new("ps").args(["-o", "stat=", "-p", pid.trim()]).output().unwrap();
+            let state = String::from_utf8_lossy(&ps.stdout);
+            let stopped = state.trim().is_empty() || state.trim().starts_with('Z');
+            assert!(stopped, "{} is still running: {state}", pid.trim());
+        }
+        assert!(!build.dir.join("a").exists());
+    }
+
+    #[test]
+    fn commands_share_the_jobs() {
+        // the only edge running takes the tokens of the other jobs, as a compiler's threads would, and gives them back
+        let ninja = "rule hold\n  command = f=$${MAKEFLAGS#*fifo:}; head -c 2 \"$$f\" > $out && printf ++ > \"$$f\"\n\
+                     build a: hold\n";
+        let mut build = Build::new("jobserver", ninja, &[]);
+        build.options.jobs = 3;
+        assert_eq!(build.ran(&[]), ["a"]);
+        assert_eq!(build.read("a"), "++");
+    }
+
+    #[test]
+    fn runs_without_a_jobserver() {
+        let ninja = "rule check\n  command = echo \"[$$MAKEFLAGS]\" > $out\nbuild a: check\n";
+        let mut build = Build::new("no-jobserver", ninja, &[]);
+        build.options.jobserver = false;
+        // a jobserver which rig is run by is in the environment either way
+        if std::env::var_os("MAKEFLAGS").is_none() {
+            build.ran(&[]);
+            assert_eq!(build.read("a"), "[]\n");
+        }
     }
 }
