@@ -231,7 +231,7 @@ fn build_rig(dir: &Path, targets: &[&str]) -> Ran {
     let mut options = rig::exec::Options::new(dir);
     options.jobs = 4;
     options.keep_going = 0;
-    let mut console = rig::exec::Console { out: Vec::new(), quiet: true, verbose: false };
+    let mut console = rig::exec::Console { out: Vec::new(), quiet: true, verbose: false, colour: false };
     let report = rig::exec::build(&graph, &mut state, &options, targets, &mut console);
     let report = report.unwrap_or_else(|error| panic!("{error}"));
     Ran { succeeded: report.succeeded(), edges: take_log(dir) }

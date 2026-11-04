@@ -89,11 +89,13 @@ impl Rig<'_> {
     ) -> Result<bool, Error> {
         let graph = self.graph()?;
         let mut state = self.state()?;
-        let mut out: Box<dyn std::io::Write> = match output {
-            Output::Stdout => Box::new(std::io::stdout()),
-            Output::Stderr => Box::new(std::io::stderr()),
+        // rustc and clippy print in colour, which is left out where the output is not in colour, as ninja does
+        let (mut out, colour): (Box<dyn std::io::Write>, bool) = match output {
+            Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout())),
+            Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr())),
         };
-        let mut observer = rig::exec::Console { out: &mut out, quiet: console.quiet, verbose: console.verbose };
+        let (quiet, verbose) = (console.quiet, console.verbose);
+        let mut observer = rig::exec::Console { out: &mut out, quiet, verbose, colour };
         let built = rig::exec::build(&graph, &mut state, options, targets, &mut observer);
         // once a day, the cache is collected after a build
         if let Some(cache) = &options.cache {

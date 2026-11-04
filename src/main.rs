@@ -349,6 +349,13 @@ fn declare_builtins(
     project.declare_diagnostic_overrides();
 }
 
+/// Whether what is written to a stream is in colour: where it is a terminal, unless `NO_COLOR` is set and not empty,
+/// or wherever it is if `CLICOLOR_FORCE` is set and not `0`, as other tools take them.
+pub fn colour(stream: &impl IsTerminal) -> bool {
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0");
+    set("CLICOLOR_FORCE") || stream.is_terminal() && !set("NO_COLOR")
+}
+
 /// Write the diagnostics of a project to stderr, failing if there are errors.
 ///
 /// Warnings alone do not fail, but are followed by a warning which counts them.
@@ -359,7 +366,7 @@ fn report_diagnostics(project: &project::Project) -> Result<(), Error> {
     let mut errors = 0;
     let mut warnings = 0;
     let mut stderr = std::io::stderr().lock();
-    let pretty = stderr.is_terminal();
+    let pretty = colour(&stderr);
     for diagnostic in &project.diagnostics {
         match diagnostic.severity {
             project::Severity::Fatal | project::Severity::Error => errors += 1,

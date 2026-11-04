@@ -233,7 +233,6 @@ pub fn same_file(lhs: &Path, rhs: &Path) -> bool {
 /// Report a diagnostic found once the project is configured, such as while building it, unless it is allowed, with the
 /// severity recorded when configuring, failing if it is an error.
 pub fn report(root: &Path, message: Message, severity: Severity) -> Result<(), Error> {
-    use std::io::IsTerminal;
     if severity == Severity::Allow {
         return Ok(());
     }
@@ -242,7 +241,7 @@ pub fn report(root: &Path, message: Message, severity: Severity) -> Result<(), E
     // a diagnostic without a span needs nothing from the configuration
     let empty = project::Project::new(root.to_path_buf(), Vec::new());
     let mut stderr = std::io::stderr().lock();
-    let pretty = stderr.is_terminal();
+    let pretty = crate::colour(&stderr);
     if let Err(error) = empty.write_diagnostic(&mut stderr, &diagnostic, pretty) {
         return Err(Error::Stderr(error));
     }
