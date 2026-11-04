@@ -352,6 +352,7 @@ impl Project {
             kind: CustomKind::Test { runner: None, harness: true },
             tags,
             change_detection: None,
+            cache: None,
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their

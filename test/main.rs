@@ -1456,6 +1456,74 @@ fn rig_fetches_from_the_cache() {
 }
 
 #[test]
+fn rig_caches_custom_commands() {
+    if !rig_engine() {
+        return;
+    }
+    // a command with `cache` is fetched from the cache, by the contents of its inputs and of its program, which here is
+    // found in `PATH`, while one without it runs again
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-custom-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let cache_dir = cache.display().to_string();
+    let files = [
+        ("Jig", "\
+custom copy
+    input 'in.txt'
+    output 'out.txt'
+    command 'jig-test-gen' input output
+    cache
+custom plain
+    input 'in.txt'
+    output 'plain.txt'
+    command 'sh' '-c' 'echo plain >> runs.txt && cp \"$1\" \"$2\"' 'sh' input output
+"),
+        ("in.txt", "in\n"),
+        ("tools/jig-test-gen", "#!/bin/sh\necho copy >> runs.txt && cat \"$1\" > \"$2\"\n"),
+    ];
+    let path = |project: &Project| format!("{}/tools:{}", project.dir.display(), std::env::var("PATH").unwrap());
+    let build = |project: &Project| {
+        let mut command = Command::new(configure_path());
+        command.arg("build").env("JIG_CACHE", &cache_dir).env("PATH", path(project)).current_dir(&project.dir);
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let runs = |project: &Project, name: &str| {
+        let runs = std::fs::read_to_string(project.dir.join("runs.txt")).unwrap_or_default();
+        runs.lines().filter(|line| *line == name).count()
+    };
+    let project = Project::new("custom-cache", &files);
+    let tool = project.dir.join("tools/jig-test-gen");
+    make_executable(&tool, &tool);
+    project.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&project))]).ok();
+    build(&project);
+    assert_eq!((runs(&project, "copy"), runs(&project, "plain")), (1, 1));
+    for output in ["out.txt", "plain.txt"] {
+        std::fs::remove_file(project.dir.join("build").join(output)).unwrap();
+    }
+    build(&project);
+    assert_eq!((runs(&project, "copy"), runs(&project, "plain")), (1, 2));
+    assert_eq!(std::fs::read_to_string(project.dir.join("build/out.txt")).unwrap(), "in\n");
+    // as it is in another checkout, whose program is in another directory, but the same
+    let other = Project::new("custom-cache-other", &files);
+    let tool = other.dir.join("tools/jig-test-gen");
+    make_executable(&tool, &tool);
+    other.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&other))]).ok();
+    build(&other);
+    assert_eq!((runs(&other, "copy"), runs(&other, "plain")), (0, 1));
+    assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\n");
+    // a program which changes configures the project again, and runs
+    std::fs::write(&tool, "#!/bin/sh\necho copy >> runs.txt && cat \"$1\" \"$1\" > \"$2\"\n").unwrap();
+    assert_contains(&build(&other), "CONFIGURE build.ninja");
+    assert_eq!(runs(&other, "copy"), 1);
+    assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\nin\n");
+    // and a test cannot be cached, as it runs to be seen to pass
+    let project = Project::new("custom-cache-test", &[("Jig", "test t\n    command 'true'\n    cache\n")]);
+    project.configure().failed().stderr("cache");
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn rig_rebuilds_when_a_crate_variable_changes() {
     // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info
     let project = Project::new("rig-env", &[
