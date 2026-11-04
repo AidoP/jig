@@ -14,10 +14,6 @@ use crate::{Error, ninja, rig_graph};
 /// The directory of the state of the build, in the build directory.
 pub const STATE: &str = ".rig";
 
-/// The environment variable which gives the directory of the cache, which rig keeps the results of rustc and clippy
-/// in, and fetches them from rather than running them again, if it is set when the project is configured.
-pub const CACHE: &str = "JIG_CACHE";
-
 /// rig, which builds in the build directory, with the toolchain the project is configured with.
 pub struct Rig<'a> {
     pub build_dir: &'a Path,
@@ -67,8 +63,7 @@ impl Rig<'_> {
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }
-    /// The options of a build, with the cache in the directory `JIG_CACHE` gives, relative to the working directory, if
-    /// it is set.
+    /// The options of a build, with the cache, unless it is off, as [`crate::cache::dir`] finds it.
     fn options(&self) -> Result<rig::exec::Options, Error> {
         let mut options = rig::exec::Options::new(self.build_dir);
         if let Some(toolchain) = self.toolchain {
@@ -76,10 +71,7 @@ impl Rig<'_> {
         }
         // rustup's proxies, such as `rustc`, find the toolchain with these, which is identified by its contents instead
         options.locating.extend(["RUSTUP_HOME", "CARGO_HOME"].map(String::from));
-        if let Some(dir) = std::env::var_os(CACHE).filter(|dir| !dir.is_empty()) {
-            let dir = std::path::absolute(&dir).map_err(|error| Error::Rig(rig::Error::Io(dir.into(), error)))?;
-            options.cache = Some(rig::cache::Cache::open(&dir).map_err(Error::Rig)?);
-        }
+        options.cache = crate::cache::open()?;
         Ok(options)
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.
@@ -100,7 +92,12 @@ impl Rig<'_> {
             Output::Stderr => Box::new(std::io::stderr()),
         };
         let mut observer = rig::exec::Console { out: &mut out, quiet: console.quiet, verbose: console.verbose };
-        match rig::exec::build(&graph, &mut state, options, targets, &mut observer) {
+        let built = rig::exec::build(&graph, &mut state, options, targets, &mut observer);
+        // once a day, the cache is collected after a build
+        if let Some(cache) = &options.cache {
+            crate::cache::collect_if_due(cache)?;
+        }
+        match built {
             Ok(report) => Ok(report.succeeded()),
             Err(error @ (rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_))) => {
                 eprintln!("{error}");

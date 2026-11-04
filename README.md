@@ -112,19 +112,28 @@ if they are given a different toolchain. Without rustup, a toolchain cannot be s
 ./build/bootstrap/jig +nightly build
 ```
 
-With rig, the results of rustc and clippy are kept in a cache, and fetched from it rather than run again, when the
-`JIG_CACHE` environment variable gives its directory, relative to the working directory, as the project is configured.
-A crate which is built again with what it was built with before, such as once a change to it is undone, or another
+With rig, the results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from
+it rather than run again. The cache is `$XDG_CACHE_HOME/jig`, or `~/.cache/jig`, or the directory the `JIG_CACHE`
+environment variable gives, relative to the working directory, while a `JIG_CACHE` which is empty or `off` turns it
+off, as the project is configured. A crate which is built again with what it was built with before, such as once a change to it is undone, or another
 branch is checked out and back, or once the build directory is removed, is restored from the cache, with what rustc
 printed. The cache is found by the contents of each crate's sources, the crates it uses and the variables it read, and
 by the identity of the toolchain, from `rustc -vV` and the files rustup writes when it installs or updates it, so
-that the project is configured again when the toolchain is updated in place. Setting or unsetting `JIG_CACHE`
-configures the project again too. The cache is shared between checkouts of a project in different directories, as what
-rustc is given and writes does not depend on where the project is. Nothing is removed from the cache yet, so it grows until it is removed. The cache has no
-effect with ninja.
+that the project is configured again when the toolchain is updated in place. Turning the cache on or off configures
+the project again too. The cache is shared between checkouts of a project in different directories, as what rustc is
+given and writes does not depend on where the project is. A crate or command which is cached runs in a hermetic
+environment, inheriting only the variables it passes on, with `pass-env`, and those which locate tools. The cache has
+no effect with ninja.
+
+`jig cache stats` shows where the cache is and what it holds, `jig cache gc [--max-size <size>]` removes what was used
+longest ago until it is no larger than a size, such as `512M` or `10G`, and `jig cache clear` removes everything in it.
+After a build, once a day, the cache is collected as by `jig cache gc`, down to the `JIG_CACHE_SIZE` environment
+variable, or 10 GiB without it.
 
 ```
-JIG_CACHE=~/.cache/jig ./build/bootstrap/jig build
+./build/bootstrap/jig cache stats
+JIG_CACHE_SIZE=2G ./build/bootstrap/jig cache gc
+JIG_CACHE=off ./build/bootstrap/jig build
 ```
 
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
@@ -534,7 +543,7 @@ A `crate` statement may be followed by indented attributes:
   part of its command
 - `pass-env <names>`: the environment variables rustc inherits for the crate, which `env!` reads, as a name or a list
   of them, such as `pass-env 'GIT_HASH'`. With rig, the crate is built again when one of their values changes, as
-  it is when a variable `env!` reads changes, and a crate which is cached, when `JIG_CACHE` is set, inherits only
+  it is when a variable `env!` reads changes, and a crate which is cached, when the cache is on, inherits only
   these and those which locate tools: `PATH`, `HOME`, `TMPDIR`, `RUSTUP_HOME` and `CARGO_HOME`. So a cached crate
   whose `env!` reads any other variable from the environment fails to compile, rather than being cached without it
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
@@ -642,7 +651,7 @@ A `custom` statement is followed by indented attributes:
 - `change-detection <str>`: how rig finds that the command's files have changed, `'timestamp'` or `'hash'`, in place
   of the `change-detection` property, such as to hash the small file a generator writes, so that what reads it is not
   rebuilt when it is written again unchanged
-- `cache <bool>`: keep the command's outputs, and what it printed, in rig's cache when `JIG_CACHE` is set, as rustc's
+- `cache <bool>`: keep the command's outputs, and what it printed, in rig's cache when it is on, as rustc's
   are, so that it is fetched rather than run when it has run with the same inputs before, in this checkout or another.
   It is for a command whose outputs depend only on its inputs, its arguments and its program, and not on the time, the
   directory it is in, or files which are not inputs. A program found in `PATH` is identified by its contents, and the

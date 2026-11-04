@@ -746,8 +746,8 @@ implementation of that trait, so `generate.rs` doesn't change.
        project again and identifies the toolchain afresh.
      - `JIG_CACHE` is read as one of the configuration's variables, so setting or unsetting it configures the project
        again. A relative path is relative to the working directory of the build.
-   - **Opt-in for now.** The cache is used only with `JIG_CACHE`, not by default in `~/.cache/jig`, until
-     `jig cache gc` can bound its size.
+   - **Opt-in at first.** The cache was used only with `JIG_CACHE` until `jig cache gc` could bound its size, in
+     step 5.
    - **Measured.** In one checkout, `librig.rlib` takes 4.3 s to compile.
      - Undoing an edit fetches it in 0.05 s.
      - After the build directory is removed, configuring and fetching it takes 0.16 s.
@@ -857,7 +857,44 @@ implementation of that trait, so `generate.rs` doesn't change.
        - The command runs again and the crate compiles again when a passed value changes.
        - Cached, the command doesn't see a variable it doesn't pass on.
        - An invalid name is an error.
-5. Add `jig cache stats|gc|clear`, then use `~/.cache/jig` by default.
+5. **Done:** `jig cache stats|gc|clear`, and the cache on by default.
+   - **Last use.** A hit touches its result and its first key's manifest (`Cache::used`), so their modification times
+     are when they were last used. A result or manifest which is added is new anyway.
+   - **`Cache::gc(max)`.**
+     - Results are removed, used longest ago first, until the cache's files total no more than `max` bytes.
+     - Each blob is removed once no result which is kept refers to it.
+     - Manifests are removed if not used since the latest result removed was.
+     - A blob which no result refers to, and a file in `tmp`, is removed once it is an hour old. Until then a build
+       may be adding the result which refers to it, or writing it.
+     - A corrupted result is removed.
+     - A build which adds a result while blobs are collected at worst misses later, never restores a wrong output, as
+       a result whose blobs are missing is a miss.
+   - **`Cache::gc_if_due`.** It collects the cache if the `collected` file in it is at least a given age, marking it
+     first so that builds which finish at once don't each collect. A new cache is only marked.
+   - **jig.**
+     - `src/cache.rs` finds the cache: `JIG_CACHE`, or `$XDG_CACHE_HOME/jig`, or `$HOME/.cache/jig`. A `JIG_CACHE`
+       which is empty or `off`, or neither of the others, turns it off.
+     - Configuring reads only the variables which decide whether it is on, as configuration variables, so turning it
+       on or off configures again.
+     - `jig cache stats` shows the directory, and the number of results, manifests and blobs and their size.
+     - `jig cache gc [--max-size <size>]` defaults to `JIG_CACHE_SIZE`, or 10 GiB. Sizes take binary multiples: `512`,
+       `100K`, `1.5G`, `10GiB`.
+     - `jig cache clear` removes everything.
+     - After every rig build, the cache is collected down to `JIG_CACHE_SIZE` once a day.
+   - **On by default.** Every rustc, check and clippy edge is therefore cached and hermetic by default. A crate whose
+     `env!` reads a variable from the environment must pass it on with `pass-env`, or the cache must be turned off.
+   - **Tests.**
+     - The integration tests run jig with a cache of their own, `jig-test-cache` in the temporary directory, collected
+       down to 256 MiB. Every test shares it, as concurrent builds may, which checks that projects in different
+       directories share results correctly.
+     - The perf tests turn the cache off, so that what they time is built.
+     - The depfile tests leave out the toolchain's identifying files, which the cache's test checks.
+     - The test of a crate's discovered variables turns the cache off.
+     - rig: collection by last use, with shared blobs, back to empty; new unreferenced blobs and `tmp` files kept, old
+       ones removed; collecting when due, and clearing.
+     - jig: the cache's directory from each variable, and sizes parsed and shown.
+     - Integration: `jig cache` with the default and XDG directories and off; invalid sizes and commands; stats after a
+       build; collection keeping everything under a large limit and nothing at 0; clearing.
 
 ### Phase 5: the remote cache
 

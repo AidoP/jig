@@ -15,6 +15,10 @@
 //! to the sets of inputs it discovered when it ran with them before. The second, by [`second_key`], is of the first and
 //! the contents of the inputs of one of those sets, as they are now, and leads to a result.
 //!
+//! A hit makes its result and manifest the latest used, by their modification times, so that [`Cache::gc`] removes
+//! the results which were used longest ago first, then the blobs which no result refers to, and the manifests which
+//! were not used since.
+//!
 //! A file is written to `tmp` and renamed into place, so that a build which reads the cache while another writes to
 //! it never sees a file half written, and builds need not lock it. A blob is checked against its hash when it is read,
 //! and a manifest or result against the hash which ends it, so that a cache which is corrupted is a miss, and the file
@@ -37,6 +41,13 @@ const RESULT: u8 = 2;
 /// The most sets of discovered inputs a manifest keeps, the latest first, so that one which is looked up is not read
 /// in full after many changes.
 const MANIFEST_MAX: usize = 16;
+
+/// How long a blob which no result refers to, or a file in `tmp`, is kept, as a build may be adding the result which
+/// refers to it, or writing it.
+const GRACE: std::time::Duration = std::time::Duration::from_hours(1);
+
+/// The file whose modification time is when the cache was last collected, by [`Cache::gc_if_due`].
+const COLLECTED: &str = "collected";
 
 /// The files written to `tmp`, so that each is named differently from others the process writes at once.
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
@@ -68,6 +79,51 @@ pub struct Output {
     pub path: String,
     pub blob: Hash,
     pub executable: bool,
+}
+
+/// What a cache holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stats {
+    pub results: usize,
+    pub manifests: usize,
+    pub blobs: usize,
+    /// The size of its files, in bytes.
+    pub bytes: u64,
+}
+
+/// What [`Cache::gc`] removed, and what it kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Collected {
+    pub removed: Stats,
+    pub kept: Stats,
+}
+
+/// A file of one of the stores, with its size and when it was last modified, or used.
+struct Stored {
+    path: PathBuf,
+    size: u64,
+    modified: std::time::SystemTime,
+}
+
+/// Returns the files in a directory, which is empty if it cannot be read.
+fn stored(dir: &Path) -> Vec<Stored> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let files = entries.filter_map(|entry| {
+        let entry = entry.ok()?;
+        let metadata = entry.metadata().ok().filter(std::fs::Metadata::is_file)?;
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        Some(Stored { path: entry.path(), size: metadata.len(), modified })
+    });
+    files.collect()
+}
+
+/// Make a file the latest used, as its modification time.
+fn touch(path: &Path) {
+    if let Ok(file) = std::fs::File::options().write(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
 }
 
 impl Cache {
@@ -272,6 +328,155 @@ fn read(kind: u8, path: &Path) -> Option<Vec<u8>> {
         return None;
     }
     Some(body[header..].to_vec())
+}
+
+impl Cache {
+    /// Make the result found by a second key, and the manifest of its first, the latest used, so that they are the
+    /// last to be collected.
+    pub fn used(&self, first: &Hash, second: &Hash) {
+        touch(&self.keyed("mf", first));
+        touch(&self.keyed("ac", second));
+    }
+    /// Returns the blobs of the cache, by their hash in hexadecimal.
+    fn blobs(&self) -> Vec<(String, Stored)> {
+        let shards = std::fs::read_dir(self.dir.join("cas")).into_iter().flatten().filter_map(Result::ok);
+        let mut blobs = Vec::new();
+        for shard in shards {
+            let prefix = shard.file_name().to_string_lossy().into_owned();
+            for blob in stored(&shard.path()) {
+                let name = blob.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+                blobs.push((format!("{prefix}{name}"), blob));
+            }
+        }
+        blobs
+    }
+    /// Returns what the cache holds.
+    #[must_use]
+    pub fn stats(&self) -> Stats {
+        let (results, manifests, blobs) = (stored(&self.dir.join("ac")), stored(&self.dir.join("mf")), self.blobs());
+        let sizes = results.iter().chain(&manifests).chain(blobs.iter().map(|(_, blob)| blob)).map(|file| file.size);
+        Stats { results: results.len(), manifests: manifests.len(), blobs: blobs.len(), bytes: sizes.sum() }
+    }
+    /// Remove what was used longest ago until the cache is no larger than `max` bytes.
+    ///
+    /// The results which were used longest ago are removed first, with each blob once no result which is kept refers
+    /// to it, then the manifests which were not used since the latest result removed was. A blob which no result
+    /// refers to, and a file in `tmp`, is removed once it is older than an hour, as a build may be adding the result
+    /// which refers to it, or writing it. A result which is corrupted is removed. A file which cannot be removed is
+    /// kept, as another build may have removed it, or the cache may be read-only.
+    #[must_use]
+    pub fn gc(&self, max: u64) -> Collected {
+        let now = std::time::SystemTime::now();
+        let old = |file: &Stored| now.duration_since(file.modified).is_ok_and(|age| age >= GRACE);
+        let mut collected = Collected::default();
+        let mut remove = |file: &Stored, count: &mut dyn FnMut(&mut Stats)| {
+            if std::fs::remove_file(&file.path).is_ok() {
+                count(&mut collected.removed);
+                collected.removed.bytes += file.size;
+                true
+            } else {
+                false
+            }
+        };
+        // the results, oldest first, with the blobs each refers to
+        let mut results: Vec<(Stored, Vec<String>)> = Vec::new();
+        let mut corrupted = 0;
+        for result in stored(&self.dir.join("ac")) {
+            match read(RESULT, &result.path).and_then(|bytes| read_result(&bytes)) {
+                Some(entry) => {
+                    let blobs = std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob));
+                    results.push((result, blobs.map(hex).collect()));
+                },
+                // `read` removed it
+                None => corrupted += 1,
+            }
+        }
+        results.sort_by_key(|(result, _)| result.modified);
+        let mut references: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for blob in results.iter().flat_map(|(_, blobs)| blobs) {
+            *references.entry(blob.clone()).or_default() += 1;
+        }
+        let mut blobs: std::collections::HashMap<String, Stored> = std::collections::HashMap::new();
+        for (hash, blob) in self.blobs() {
+            if !references.contains_key(&hash) && old(&blob) {
+                remove(&blob, &mut |stats| stats.blobs += 1);
+            } else {
+                blobs.insert(hash, blob);
+            }
+        }
+        let manifests = stored(&self.dir.join("mf"));
+        let sizes = results.iter().map(|(result, _)| result.size);
+        let mut size: u64 = sizes.chain(manifests.iter().map(|manifest| manifest.size)).sum();
+        size += blobs.values().map(|blob| blob.size).sum::<u64>();
+        // the latest use of a result which was removed
+        let mut cutoff = None;
+        let mut kept = results.len();
+        for (result, refers) in &results {
+            if size <= max {
+                break;
+            }
+            if !remove(result, &mut |stats| stats.results += 1) {
+                continue;
+            }
+            kept -= 1;
+            size -= result.size;
+            cutoff = Some(result.modified);
+            for hash in refers {
+                let count = references.get_mut(hash).map_or(0, |count| {
+                    *count -= 1;
+                    *count
+                });
+                if count == 0 && let Some(blob) = blobs.remove(hash) {
+                    size -= blob.size;
+                    remove(&blob, &mut |stats| stats.blobs += 1);
+                }
+            }
+        }
+        let mut kept_manifests = 0;
+        for manifest in &manifests {
+            if cutoff.is_some_and(|cutoff| manifest.modified <= cutoff) && remove(manifest, &mut |stats| stats.manifests += 1) {
+                size -= manifest.size;
+            } else {
+                kept_manifests += 1;
+            }
+        }
+        for file in stored(&self.dir.join("tmp")).iter().filter(|file| old(file)) {
+            let _ = std::fs::remove_file(&file.path);
+        }
+        collected.removed.results += corrupted;
+        collected.kept = Stats { results: kept, manifests: kept_manifests, blobs: blobs.len(), bytes: size };
+        collected
+    }
+    /// Collect the cache as [`Self::gc`] does, if it was last collected at least `every` ago, returning what was removed
+    /// and kept if it was collected. A cache which has not been is only marked as collected now, as it is new.
+    #[must_use]
+    pub fn gc_if_due(&self, max: u64, every: std::time::Duration) -> Option<Collected> {
+        let path = self.dir.join(COLLECTED);
+        let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified());
+        let due = modified.as_ref().is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed >= every));
+        if modified.is_err() || due {
+            // marked first, so that builds which finish at once do not each collect it
+            let _ = std::fs::write(&path, "");
+        }
+        due.then(|| self.gc(max))
+    }
+    /// Remove everything the cache holds.
+    ///
+    /// # Errors
+    ///
+    /// If its stores cannot be removed, or created again.
+    pub fn clear(&self) -> Result<(), Error> {
+        for store in ["cas", "mf", "ac", "tmp"] {
+            let path = self.dir.join(store);
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(Error::Io(path, error)),
+            }
+        }
+        let _ = std::fs::remove_file(self.dir.join(COLLECTED));
+        Self::open(&self.dir).map(|_| ())
+    }
 }
 
 fn corrupted(path: &Path) -> std::io::Error {
@@ -524,6 +729,88 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         assert_eq!(cache.result(&key), None);
         assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Make a file as old as it would be `seconds` ago.
+    fn age(path: &Path, seconds: u64) {
+        let time = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(time).unwrap();
+    }
+
+    /// Add a result by a key, with its manifest, of an output with contents, returning its second key.
+    fn add(cache: &Cache, key: &str, contents: &str) -> Hash {
+        let (first, second) = (blake3::hash(format!("{key} first").as_bytes()), blake3::hash(key.as_bytes()));
+        let blob = cache.put_bytes(contents.as_bytes()).unwrap();
+        let printed = cache.put_bytes(b"").unwrap();
+        let entry = Entry { outputs: vec![Output { path: "out".into(), blob, executable: false }], printed };
+        cache.put_result(&second, &entry).unwrap();
+        cache.add_to_manifest(&first, Discovery::default()).unwrap();
+        second
+    }
+
+    #[test]
+    fn collects_what_was_used_longest_ago() {
+        let dir = dir("gc");
+        let cache = Cache::open(&dir).unwrap();
+        let (old, used, new) = (add(&cache, "old", "old output"), add(&cache, "used", "used output"), add(&cache, "new", "x"));
+        for (key, seconds) in [("old", 300), ("used", 200), ("new", 100)] {
+            let first = blake3::hash(format!("{key} first").as_bytes());
+            // the manifest first, so that it is not newer than its result
+            age(&cache.keyed("mf", &first), seconds);
+            age(&cache.keyed("ac", &blake3::hash(key.as_bytes())), seconds);
+        }
+        // the oldest is used, so the next oldest is removed first
+        cache.used(&blake3::hash(b"old first"), &old);
+        let stats = cache.stats();
+        assert_eq!((stats.results, stats.manifests, stats.blobs), (3, 3, 4));
+        // nothing is removed while it fits
+        assert_eq!(cache.gc(stats.bytes).removed, Stats::default());
+        let collected = cache.gc(stats.bytes - 1);
+        assert_eq!((collected.removed.results, collected.removed.manifests, collected.removed.blobs), (1, 1, 1));
+        assert!(cache.result(&used).is_none());
+        assert!(cache.result(&old).is_some() && cache.result(&new).is_some());
+        assert_eq!(collected.kept, cache.stats());
+        // the blob of what was printed is shared, so it is kept while a result refers to it
+        let collected = cache.gc(0);
+        assert_eq!((collected.kept.results, collected.kept.blobs, collected.kept.bytes), (0, 0, 0));
+        assert_eq!(cache.stats(), Stats::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn keeps_new_blobs_which_nothing_refers_to() {
+        let dir = dir("gc-grace");
+        let cache = Cache::open(&dir).unwrap();
+        // as a build may be adding the result which refers to it
+        let new = cache.put_bytes(b"new").unwrap();
+        let old = cache.put_bytes(b"old").unwrap();
+        age(&cache.blob_path(&old), 2 * 60 * 60);
+        std::fs::write(cache.dir.join("tmp/stale"), "").unwrap();
+        age(&cache.dir.join("tmp/stale"), 2 * 60 * 60);
+        let collected = cache.gc(u64::MAX);
+        assert_eq!(collected.removed.blobs, 1);
+        assert!(cache.has_blob(&new) && !cache.has_blob(&old));
+        assert!(!cache.dir.join("tmp/stale").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collects_when_due_and_clears() {
+        let dir = dir("gc-due");
+        let cache = Cache::open(&dir).unwrap();
+        add(&cache, "a", "a");
+        let day = std::time::Duration::from_hours(24);
+        // a new cache is only marked, then collected once a day has passed
+        assert!(cache.gc_if_due(0, day).is_none());
+        assert!(cache.gc_if_due(0, day).is_none());
+        age(&cache.dir.join(COLLECTED), day.as_secs() + 1);
+        assert_eq!(cache.gc_if_due(0, day).map(|collected| collected.removed.results), Some(1));
+        assert!(cache.gc_if_due(0, day).is_none());
+        add(&cache, "b", "b");
+        cache.clear().unwrap();
+        assert_eq!(cache.stats(), Stats::default());
+        assert!(cache.dir.join("cas").is_dir());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -37,7 +37,7 @@ impl Project {
     /// rustup finds its toolchains in `HOME` unless `RUSTUP_HOME` is set, so it is kept where `HOME` is replaced.
     fn configure_with(&self, env: &[(&str, &str)]) -> Output {
         let configure = configure_path();
-        let mut command = Command::new(&configure);
+        let mut command = jig_command();
         if env.iter().any(|&(name, _)| name == "HOME")
             && std::env::var_os("RUSTUP_HOME").is_none()
             && let Some(home) = std::env::var_os("HOME")
@@ -59,7 +59,7 @@ impl Project {
     /// Run `configure check` for a label, returning stdout and stderr.
     #[track_caller]
     fn check(&self, label: &str) -> (String, String) {
-        let output = Command::new(configure_path()).args(["check", label]).current_dir(&self.dir).output().unwrap();
+        let output = jig_command().args(["check", label]).current_dir(&self.dir).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         // a failed check is still a successful flycheck
@@ -84,6 +84,7 @@ impl Project {
     /// Returns `build/build.ninja.d`, with its paths made relative to the project as by [`Self::ninja`].
     fn depfile(&self) -> String {
         let depfile = std::fs::read_to_string(self.dir.join("build/build.ninja.d")).unwrap();
+        let depfile = without_toolchain_files(&depfile);
         depfile.replace(&format!("{}/", self.dir.display()), "")
     }
     /// The host triple, as seen by `rustc` from the project directory.
@@ -130,6 +131,29 @@ fn without_remaps(ninja: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Returns a depfile without the files rustup writes to the toolchain's sysroot, which a project depends on while rig
+/// caches, as they identify the toolchain, which `rig_fetches_from_the_cache` checks.
+fn without_toolchain_files(depfile: &str) -> String {
+    let lines = depfile.lines().map(|line| {
+        let identifying = |path: &&str| path.ends_with("/multirust-channel-manifest.toml") || path.ends_with("/rustlib/components");
+        let paths = line.split(' ').filter(|path| !identifying(path));
+        paths.collect::<Vec<_>>().join(" ")
+    });
+    lines.map(|line| line + "\n").collect()
+}
+
+/// Returns a command which runs `jig`, with the tests' cache.
+fn jig_command() -> Command {
+    with_test_cache(Command::new(configure_path()))
+}
+
+/// Run a command with the tests' own cache, rather than the user's, which every test shares, as builds may, and which
+/// is collected down to 256 MiB.
+fn with_test_cache(mut command: Command) -> Command {
+    command.env("JIG_CACHE", std::env::temp_dir().join("jig-test-cache")).env("JIG_CACHE_SIZE", "256M");
+    command
 }
 
 /// Whether `jig` builds with rig, as it does unless `JIG_ENGINE=ninja`.
@@ -1373,7 +1397,7 @@ fn environment_variables_reconfigure() {
     let project = Project::new("env-reconfigure", &[("Jig", jig)]);
     project.configure_with(&[("JIG_TEST_VALUE", "one")]).ok().stderr("note: value is one\n");
     let build = |value: Option<&str>| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         command.arg("build").current_dir(&project.dir);
         match value {
             Some(value) => command.env("JIG_TEST_VALUE", value),
@@ -1395,7 +1419,7 @@ fn environment_variables_reconfigure() {
     let project = Project::new("path-reconfigure", &[("Jig", "log note which('sh')\n")]);
     project.configure().ok();
     let build = |path: &str| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         let output = command.arg("build").env("PATH", path).current_dir(&project.dir).output().unwrap();
         String::from_utf8(output.stdout).unwrap()
     };
@@ -1422,8 +1446,11 @@ fn rig_fetches_from_the_cache() {
     ];
     let project = Project::new("rig-cache", &files);
     project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    // the configuration depends on the files which identify the toolchain, which rustup writes when it updates it
+    let depfile = std::fs::read_to_string(project.dir.join("build/build.ninja.d")).unwrap();
+    assert!(depfile.contains("/rustlib/components") || depfile.contains("/bin/rustc"), "{depfile}");
     let build_in = |project: &Project, path: Option<&str>| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
         if let Some(path) = path {
             command.env("PATH", path);
@@ -1448,11 +1475,55 @@ fn rig_fetches_from_the_cache() {
     assert_contains(&build_in(&other, Some("/nonexistent")), "unused variable");
     let output = Command::new(other.dir.join(format!("build/{host}/app"))).output().unwrap();
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
-    // and unsetting it configures the project again, without the cache
-    let mut command = Command::new(configure_path());
-    let output = command.arg("build").env_remove("JIG_CACHE").current_dir(&project.dir).output().unwrap();
+    // and turning it off configures the project again, without the cache
+    let mut command = jig_command();
+    let output = command.arg("build").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
     assert_contains(&String::from_utf8(output.stdout).unwrap(), "CONFIGURE build.ninja");
     let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn cache_command() {
+    // the cache is in `XDG_CACHE_HOME`, or else `HOME`, unless `JIG_CACHE` gives it or turns it off
+    let home = std::env::temp_dir().join(format!("jig-test-{}-cache-home", std::process::id()));
+    let cache = |env: &[(&str, &str)], args: &[&str]| {
+        let mut command = jig_command();
+        command.arg("cache").args(args).env_remove("JIG_CACHE").env_remove("XDG_CACHE_HOME").env("HOME", &home);
+        let output = command.envs(env.iter().copied()).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        (output.status.success(), stdout + &String::from_utf8(output.stderr).unwrap())
+    };
+    let (ok, output) = cache(&[], &["stats"]);
+    assert!(ok, "{output}");
+    assert!(output.starts_with(&format!("{}/.cache/jig\n0 results, 0 manifests and 0 blobs, 0 B\n", home.display())), "{output}");
+    let xdg = home.join("xdg").display().to_string();
+    assert!(cache(&[("XDG_CACHE_HOME", &xdg)], &["stats"]).1.starts_with(&format!("{xdg}/jig\n")));
+    let (ok, output) = cache(&[("JIG_CACHE", "off")], &["stats"]);
+    assert!(!ok);
+    assert_contains(&output, "the cache is off");
+    assert_contains(&cache(&[], &["gc", "--max-size", "lots"]).1, "\"lots\" is not a size");
+    assert_contains(&cache(&[], &["prune"]).1, "unknown cache command \"prune\"");
+    // what a build adds, which is collected, then cleared, as rig fills it
+    if !rig_engine() {
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
+    let dir = home.join("cache").display().to_string();
+    let project = Project::new("cache-command", &[("Jig", "crate a 'a.rs'\n"), ("a.rs", "")]);
+    project.configure_with(&[("JIG_CACHE", &dir)]).ok();
+    let output = jig_command().arg("build").env("JIG_CACHE", &dir).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success());
+    let (_, output) = cache(&[("JIG_CACHE", &dir)], &["stats"]);
+    assert!(!output.contains("\n0 results"), "{output}");
+    let (ok, output) = cache(&[("JIG_CACHE", &dir)], &["gc", "--max-size=1G"]);
+    assert!(ok && output.starts_with("removed 0 results, 0 manifests and 0 blobs, 0 B\n"), "{output}");
+    let (ok, output) = cache(&[("JIG_CACHE", &dir)], &["gc", "--max-size", "0"]);
+    assert!(ok && output.ends_with("kept 0 results, 0 manifests and 0 blobs, 0 B\n"), "{output}");
+    let output = jig_command().arg("build").env("JIG_CACHE", &dir).current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success());
+    assert!(cache(&[("JIG_CACHE", &dir)], &["clear"]).0);
+    assert_contains(&cache(&[("JIG_CACHE", &dir)], &["stats"]).1, "\n0 results, 0 manifests and 0 blobs, 0 B\n");
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
@@ -1482,7 +1553,7 @@ custom plain
     ];
     let path = |project: &Project| format!("{}/tools:{}", project.dir.display(), std::env::var("PATH").unwrap());
     let build = |project: &Project| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         command.arg("build").env("JIG_CACHE", &cache_dir).env("PATH", path(project)).current_dir(&project.dir);
         let output = command.output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -1543,7 +1614,7 @@ log note app.pass-env
 ");
     let files = |cached: &str| [("Jig", jig(cached)), ("app.rs", "fn main() { print!(\"{}\", env!(\"JIG_TEST_PASSED\")); }\n".into())];
     let run = |project: &Project, cached: bool, passed: &str| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         command.arg("build").env("JIG_TEST_PASSED", passed).env("JIG_TEST_HIDDEN", "hidden").current_dir(&project.dir);
         if cached {
             command.env("JIG_CACHE", &cache_dir);
@@ -1576,15 +1647,17 @@ log note app.pass-env
 
 #[test]
 fn rig_rebuilds_when_a_crate_variable_changes() {
-    // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info
+    // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info, without the cache,
+    // in which a crate inherits only the variables it passes on
     let project = Project::new("rig-env", &[
         ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n"),
         ("app.rs", "fn main() { print!(\"{}\", env!(\"JIG_TEST_CRATE_VALUE\")); }\n"),
     ]);
-    project.configure().ok();
+    project.configure_with(&[("JIG_CACHE", "off")]).ok();
     let run = |value: &str| {
-        let output = Command::new(configure_path())
+        let output = jig_command()
             .arg("run")
+            .env("JIG_CACHE", "off")
             .env("JIG_ENGINE", "rig")
             .env("JIG_TEST_CRATE_VALUE", value)
             .current_dir(&project.dir)
@@ -1627,7 +1700,7 @@ log note 'data read'
 ")]);
     project.configure().ok();
     let build = || {
-        let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
     };
@@ -1940,7 +2013,7 @@ build ../out/tool.txt: custom | ../sub/tool.sh
     command-line = './sub/tool.sh' 'out/tool.txt' 'a b' '8'");
     // a command's outputs can be built by its name
     assert_contains(&output.ninja, "\nbuild custom/copy: phony ../out/copy.txt\n");
-    let ninja = Command::new(configure_path()).args(["build", "custom/copy", "custom/tool"]).current_dir(&project.dir).output().unwrap();
+    let ninja = jig_command().args(["build", "custom/copy", "custom/tool"]).current_dir(&project.dir).output().unwrap();
     assert!(ninja.status.success(), "{}", String::from_utf8_lossy(&ninja.stdout));
     assert_eq!(std::fs::read_to_string(project.dir.join("out/copy.txt")).unwrap(), "hello\na  b\n");
     assert_eq!(std::fs::read_to_string(project.dir.join("out/tool.txt")).unwrap(), "tool: out/tool.txt a b 8\n");
@@ -2013,7 +2086,7 @@ custom skipped
     ]);
     let output = project.configure().ok();
     assert_contains(&output.ninja, &format!("\ndefault custom/data {host}/libother.rlib {host}/test/other\n"));
-    let build = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+    let build = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
     let build = String::from_utf8(build.stdout).unwrap();
     assert_contains(&build, &format!("RUSTC {host}/libother.rlib"));
     assert!(!build.contains("CHECK"), "{build}");
@@ -2148,7 +2221,7 @@ log note '{kernel-link.output} {len(kernel-link.content)} {empty.output}'
     project.configure().ok();
     assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), modified);
     std::fs::remove_file(&path).unwrap();
-    let run = Command::new(configure_path()).args(["build", "custom/copy"]).current_dir(&project.dir).output().unwrap();
+    let run = jig_command().args(["build", "custom/copy"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(std::fs::read_to_string(project.dir.join("build/copy")).unwrap(), std::fs::read_to_string(&path).unwrap());
 }
@@ -2186,7 +2259,7 @@ log note '{tool.install-mode}'
     std::fs::set_permissions(project.dir.join("build/run-app"), std::fs::Permissions::from_mode(0o600)).unwrap();
     project.configure().ok();
     assert_eq!(mode("build/run-app"), 0o755);
-    let install = Command::new(configure_path()).args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
+    let install = jig_command().args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(install.status.success(), "{}", String::from_utf8_lossy(&install.stderr));
     assert_eq!(mode("stage/bin/run-app"), 0o755);
     assert_eq!(mode("stage/share/config"), 0o600);
@@ -2307,7 +2380,7 @@ custom after
         let project = Project::new("change-detection", &[("Jig", &jig(global, after)), ("gen.in", "abc\n")]);
         project.configure().ok();
         let build = || {
-            let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+            let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
             String::from_utf8(output.stdout).unwrap()
         };
@@ -2353,7 +2426,7 @@ crate unit 'unit.rs'
     project.configure().ok();
     // the names of the tests which ran, in the order they did
     let run = |args: &[&str]| {
-        let output = Command::new(configure_path()).arg("test").args(args).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("test").args(args).current_dir(&project.dir).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         let ran: Vec<String> = stdout
             .lines()
@@ -2409,7 +2482,7 @@ test arguments
     assert_contains(&output.ninja, "\nbuild test: phony test/generated test/fails test/passes test/arguments\n");
 
     let run = |names: &[&str]| {
-        let output = Command::new(configure_path()).arg("test").args(names).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("test").args(names).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
     // the inputs are built before the tests run, and the output of a failed test is shown
@@ -2515,7 +2588,7 @@ mod tests {
         "--extern util={host}/libutil.rlib --test",
     ));
     assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app\n"));
-    let run = Command::new(configure_path()).arg("test").current_dir(&project.dir).output().unwrap();
+    let run = jig_command().arg("test").current_dir(&project.dir).output().unwrap();
     let stdout = String::from_utf8(run.stdout).unwrap();
     assert!(!run.status.success());
     let stdout = without_durations(&stdout);
@@ -2525,7 +2598,7 @@ mod tests {
     assert_contains(&stdout, "test tests::broken ... FAILED\n");
     assert_contains(&stdout, "\ntest result: FAILED. 0 passed; 1 failed\n");
     // the results of the harness's tests are shown below its own with `-v`
-    let run = Command::new(configure_path()).args(["test", "--verbose"]).current_dir(&project.dir).output().unwrap();
+    let run = jig_command().args(["test", "--verbose"]).current_dir(&project.dir).output().unwrap();
     let stdout = without_durations(&String::from_utf8(run.stdout).unwrap());
     assert_contains(&stdout, "\ntest app ... FAILED\n    exit status: 101\n\n    running 2 tests\n");
     assert_contains(&stdout, "\n    test tests::works ... ok\n");
@@ -2574,7 +2647,7 @@ build {host}/doc/app/index.html: rustdoc ../app.rs | {host}/check/libutil.rmeta 
     assert!(!output.ninja.contains("doc/plain"), "{}", output.ninja);
 
     // the crates for a target are documented together, so they link to each other
-    let run = Command::new(configure_path()).args(["build", "doc"]).current_dir(&project.dir).output().unwrap();
+    let run = jig_command().args(["build", "doc"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     let four = std::fs::read_to_string(project.dir.join(format!("build/{host}/doc/app/fn.four.html"))).unwrap();
     assert_contains(&four, "href=\"../util/fn.two.html\"");
@@ -2617,7 +2690,7 @@ build {host}/lint/libapp.rmeta | {host}/lint/app.txt: clippy ../app.rs | {host}/
     assert!(!output.ninja.lines().any(|line| line.starts_with("default ") && line.contains("lint/")), "{}", output.ninja);
 
     let lint = |names: &[&str]| {
-        let output = Command::new(configure_path()).arg("lint").args(names).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("lint").args(names).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
     // every crate is linted, even if one fails, and their diagnostics are shown without colour, as stdout is not a
@@ -2683,7 +2756,7 @@ fn main() {
     ]);
     project.configure().ok();
     let run = |dir: &str, args: &[&str]| {
-        let mut command = Command::new(configure_path());
+        let mut command = jig_command();
         let output = command.arg("run").args(args).current_dir(project.dir.join(dir)).output().unwrap();
         (output.status.code(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
@@ -2718,11 +2791,11 @@ target {host}
     ]);
     make_executable(&project.dir.join("wrap.sh"), &project.dir.join("wrap.sh"));
     project.configure().ok();
-    let output = Command::new(configure_path()).args(["run", "other", "x"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["run", "other", "x"]).current_dir(&project.dir).output().unwrap();
     let expected = format!("wrapped --tag\nhello [\"x\"] in {}\n", project.dir.display());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
     // of several, the one built by default is run without a name
-    let output = Command::new(configure_path()).args(["run", "--", "y"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["run", "--", "y"]).current_dir(&project.dir).output().unwrap();
     let expected = format!("wrapped --tag\nhello [\"y\"] in {}\n", project.dir.display());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
 }
@@ -2751,7 +2824,7 @@ test app
 fn commands() {
     let project = Project::new("commands", &[("Jig", "log note 'generated'\n")]);
     let run = |args: &[&str]| {
-        let output = Command::new(configure_path()).args(args).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
     // the input of `generate` is `Jig` by default
@@ -2804,11 +2877,11 @@ custom image
     // `jig build` finds it from within the project, and runs ninja in the build directory, while the custom command
     // runs from the project root
     std::fs::create_dir_all(project.dir.join("sub")).unwrap();
-    let build = Command::new(configure_path()).args(["build", "image"]).current_dir(project.dir.join("sub")).output().unwrap();
+    let build = jig_command().args(["build", "image"]).current_dir(project.dir.join("sub")).output().unwrap();
     assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stdout));
     assert!(project.dir.join("out/image").exists());
     // and fails when ninja does
-    let build = Command::new(configure_path()).args(["build", "nope"]).current_dir(&project.dir).output().unwrap();
+    let build = jig_command().args(["build", "nope"]).current_dir(&project.dir).output().unwrap();
     assert!(!build.status.success());
     assert_contains(&String::from_utf8(build.stderr).unwrap(), "the build failed");
 
@@ -2859,7 +2932,7 @@ fn rebased_paths() {
     let tool = project.dir.join("build/jig");
     std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
     make_executable(&configure_path(), &tool);
-    let output = Command::new(&tool).args(["generate", "Jig"]).current_dir(&project.dir).output().unwrap();
+    let output = with_test_cache(Command::new(&tool)).args(["generate", "Jig"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let ninja = project.raw_ninja();
     assert_contains(&ninja, &format!("\nrule configure\n    command = cd '{dir}' && '{dir}/build/jig' generate 'Jig'\n"));
@@ -2870,7 +2943,7 @@ fn rebased_paths() {
     // its dep-info, which ninja reads
     assert_contains(&ninja, &format!("flags = '--remap-path-prefix={dir}/build=.' '--remap-path-prefix=..=' --target="));
     let depfile = std::fs::read_to_string(project.dir.join("build/build.ninja.d")).unwrap();
-    assert_eq!(depfile, "build.ninja: ../Jig reconfigure.stamp\n");
+    assert_eq!(without_toolchain_files(&depfile), "build.ninja: ../Jig reconfigure.stamp\n");
 }
 
 #[test]
@@ -2892,7 +2965,7 @@ fn reproducible_outputs() {
     let mut outputs = Vec::new();
     for project in [&first, &second] {
         project.configure().ok();
-        let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(output.status.success(), "{stdout}");
         // without the colours rustc writes, which ninja leaves out where its output is not a terminal
@@ -3482,7 +3555,7 @@ pub fn answer(_: TokenStream) -> TokenStream { \"42\".parse().unwrap() }
     ));
     assert_contains(output.build(&format!("{host}/app")), "crate-type = bin");
     // the binary is built and runs, using the procedural macro directly and through a library
-    let built = Command::new(configure_path()).args(["build", &format!("{host}/app")]).current_dir(&project.dir).output().unwrap();
+    let built = jig_command().args(["build", &format!("{host}/app")]).current_dir(&project.dir).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stdout));
     let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
     assert_eq!(String::from_utf8(app.stdout).unwrap(), "42 84\n");
@@ -4447,7 +4520,7 @@ custom doc
     ]);
     project.configure().ok();
     let install = |args: &[&str]| {
-        let output = Command::new(configure_path()).arg("install").args(args).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("install").args(args).current_dir(&project.dir).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(output.status.success(), "install failed:\n{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
         stdout
@@ -4484,13 +4557,13 @@ custom doc
         ("app.rs", "fn main() { println!(\"one {:?}\", std::env::args().skip(1).collect::<Vec<_>>()); }\n"),
     ]);
     project.configure().ok();
-    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8(output.stdout).unwrap().ends_with("\ninstalled 1 wrapper and 1 link in stage\n"));
     let stage = project.dir.join("stage");
     // a program is a wrapper, which runs it with its arguments, from any directory, with only its output on stdout
     let run_with_stderr = || {
-        let output = Command::new(stage.join("bin/app")).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
+        let output = with_test_cache(Command::new(stage.join("bin/app"))).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{stderr}");
         (String::from_utf8(output.stdout).unwrap(), stderr)
@@ -4520,7 +4593,7 @@ custom doc
     let doc = stage.join("share/doc.txt");
     assert_eq!(std::fs::read_link(&doc).unwrap(), project.dir.join("build/doc.txt"));
     // installing without `--proxy` replaces the wrapper and the link with copies
-    let output = Command::new(configure_path()).args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["install", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     assert!(!std::fs::symlink_metadata(&doc).unwrap().is_symlink());
     assert_eq!(run(), "two\n");
@@ -4530,7 +4603,7 @@ custom doc
 fn install_nothing() {
     let project = Project::new("install-nothing", &[("Jig", "crate util 'util.rs'\n"), ("util.rs", "")]);
     project.configure().ok();
-    let output = Command::new(configure_path()).arg("install").current_dir(&project.dir).output().unwrap();
+    let output = jig_command().arg("install").current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(stdout.lines().last(), Some("nothing to install"), "{stdout}");
@@ -4548,9 +4621,9 @@ crate app 'app.rs'
         ("app.rs", "fn main() { println!(\"one\"); }\n"),
     ]);
     project.configure().ok();
-    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
-    let run = || Command::new(project.dir.join("stage/bin/app")).output().unwrap();
+    let run = || with_test_cache(Command::new(project.dir.join("stage/bin/app"))).output().unwrap();
     // as an error, an out of date program is neither built nor run
     std::fs::write(project.dir.join("app.rs"), "fn main() { println!(\"two\"); }\n").unwrap();
     let output = run();
@@ -4581,11 +4654,11 @@ custom tool
 ");
     let project = Project::new("proxy-reinstall", &[("Jig", &tool("tool", "0o755"))]);
     project.configure().ok();
-    let output = Command::new(configure_path()).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     let wrapper = project.dir.join("stage/bin/tool");
     let run = || {
-        let output = Command::new(&wrapper).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
+        let output = with_test_cache(Command::new(&wrapper)).arg("a b").current_dir(std::env::temp_dir()).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), stderr)
     };
@@ -4642,7 +4715,7 @@ test passes
     ]);
     project.configure().ok();
     let jig = |args: &[&str]| {
-        let output = Command::new(configure_path()).args(args).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{args:?} failed:\n{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
     };
@@ -4686,14 +4759,14 @@ custom jig
     ]);
     project.configure().ok();
     let built = project.dir.join("build/jig");
-    let output = Command::new(&configure).args(["build", "custom/jig"]).current_dir(&project.dir).output().unwrap();
+    let output = with_test_cache(Command::new(&configure)).args(["build", "custom/jig"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
-    let output = Command::new(&built).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
+    let output = with_test_cache(Command::new(&built)).args(["install", "--proxy", "stage"]).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     let wrapper = project.dir.join("stage/bin/jig");
     let installed = std::fs::read_to_string(&wrapper).unwrap();
     std::fs::write(project.dir.join("stamp"), "changed").unwrap();
-    let output = Command::new(&wrapper).arg("help").output().unwrap();
+    let output = with_test_cache(Command::new(&wrapper)).arg("help").output().unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{stderr}");
     assert_contains(&String::from_utf8(output.stdout).unwrap(), "usage: jig");
@@ -4738,7 +4811,7 @@ log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
     assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app data\n"));
     assert_contains(&output.ninja, &format!("\nbuild test/runs: phony {host}/app\n"));
     // so that the test of the crate finds what it depends on
-    let run = Command::new(configure_path()).args(["test", "app"]).current_dir(&project.dir).output().unwrap();
+    let run = jig_command().args(["test", "app"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
 }
 
@@ -4898,7 +4971,7 @@ custom version
     default
 ")]);
     let jig = |args: &[&str]| {
-        let output = Command::new(configure_path()).args(args).current_dir(&project.dir).output().unwrap();
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap() + &stderr)
     };
@@ -5132,7 +5205,7 @@ custom jig
 "))]);
     project.configure().ok();
     let run = |program: &std::path::Path, args: &[&str]| {
-        let output = Command::new(program).args(args).current_dir(&project.dir).output().unwrap();
+        let output = with_test_cache(Command::new(program)).args(args).current_dir(&project.dir).output().unwrap();
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{program:?} {args:?} failed:\n{stderr}");
         String::from_utf8(output.stdout).unwrap()
@@ -5155,7 +5228,7 @@ fn generates_when_needed() {
     ]);
     let host = project.host();
     let build = |dir: &str| {
-        let output = Command::new(configure_path()).arg("build").current_dir(project.dir.join(dir)).output().unwrap();
+        let output = jig_command().arg("build").current_dir(project.dir.join(dir)).output().unwrap();
         assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     };
     let app = project.dir.join(format!("build/{host}/app"));
@@ -5172,7 +5245,7 @@ fn generates_when_needed() {
     assert!(std::fs::read(project.dir.join(".jig")).unwrap() != b"JIGD\x01\x00\x00\x00");
     // while without a project, there is nothing to configure
     let outside = std::env::temp_dir();
-    let output = Command::new(configure_path()).arg("build").current_dir(&outside).output().unwrap();
+    let output = jig_command().arg("build").current_dir(&outside).output().unwrap();
     if !outside.ancestors().any(|dir| dir.join("Jig").is_file() || dir.join(".jig").is_file()) {
         assert!(!output.status.success());
         assert_contains(&String::from_utf8(output.stderr).unwrap(), "no `.jig` or `Jig` in the working directory or its parents");
@@ -5286,7 +5359,7 @@ log note '{{app.cfg}} | {{app.env}}'
     // a name, or names with values, as rustc reads them
     output.stderr("note: virt board=\"virt\" feature=\"uart\" feature=\"plic\" | UART_BASE: 4096\n");
     let build = || {
-        let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
         String::from_utf8(app.stdout).unwrap()
@@ -5487,7 +5560,7 @@ fn other_jig_warning() {
     std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
     make_executable(&configure_path(), &copy);
     let build = |jig: &std::path::Path| {
-        let output = Command::new(jig).arg("build").current_dir(&project.dir).output().unwrap();
+        let output = with_test_cache(Command::new(jig)).arg("build").current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stderr).unwrap())
     };
     // the `jig` which configured the project is not warned about
