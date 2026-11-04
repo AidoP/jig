@@ -151,7 +151,14 @@ in the local cache is looked for in the remote one, and fetched from it into the
 authenticates and encrypts the connection, so a key in `authorized_keys` can be limited to reading the cache with
 `command="jig serve --stdio"`, or allowed to push with `--push`. A remote cache which fails, as it cannot be reached,
 is warned of, and the build goes on with the local cache. `JIG_REMOTE_CACHE` can also be a command, split at spaces,
-which serves the cache on its stdin and stdout, such as `ssh -i key cache jig serve --stdio`. As the remote cache is
+which serves the cache on its stdin and stdout, such as `ssh -i key cache jig serve --stdio`.
+
+On a private network, a remote cache can instead be served over TCP, by `jig serve --listen <address> --token-file
+<path> [--push]`, and reached as `tcp://<host>:<port>`, with the `cache/token-file` property giving the file of the
+same token. A client proves it has the token by the hash of it and a random nonce the server sends, so the token is
+not sent, but the connection is not encrypted, so it is for networks which are trusted, while ssh both authenticates
+and encrypts. The token is read from its file when the cache is connected to, so it is not recorded with the
+project. As the remote cache is
 part of how a project is configured, changing it configures the project again.
 
 ```
@@ -817,6 +824,8 @@ target bluemetal-riscv64
   collected down to, `'10G'` by default; the remote cache it is in front of, empty by default; and whether it pushes
   to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE`, `JIG_CACHE_SIZE`,
   `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH`
+- `cache/token-file`: the file of the token which proves rig to a remote cache which needs one, as one reached over
+  TCP does, empty by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no

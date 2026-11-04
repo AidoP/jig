@@ -1039,7 +1039,40 @@ implementation of that trait, so `generate.rs` doesn't change.
      - A blob corrupted after its first part ended with `NOT_FOUND`, removed from the server, and not added to the
        client.
      - The tests which fetched blobs into memory now fetch them into a cache.
-5. A TCP transport for `jig serve`, with a shared token for private networks.
+5. **Done:** a TCP transport for `jig serve`, with a shared token, for private networks (protocol version 4).
+   - **The token.** It is proved without being sent.
+     - The server's `HELLO` says whether it needs a token, and if it does, carries a random nonce of 32 bytes from
+       `/dev/urandom`.
+     - The client answers with `AUTH` and the BLAKE3 hash of the token and the nonce. The server compares it in
+       constant time.
+     - The server answers nothing else until then, and ends the connection with `ERROR` if the proof is wrong.
+     - An overheard answer is no use with another nonce. The connection isn't encrypted, so it belongs on a trusted
+       network; ssh both authenticates and encrypts.
+   - **`rig::remote::listen`** accepts connections and serves each on a thread of its own, running a callback after
+     each, which jig uses to collect the cache. A client that fails or is refused ends only its own connection.
+     `serve_with_token` serves one stream with a token.
+   - **`Remote::tcp(address)`** connects lazily to each address the host resolves to in turn, with a 10 second
+     timeout, and `TCP_NODELAY`, as requests are small and waited for. `Remote::with_token` gives the token.
+     - The connection keeps a handle to the socket, which it shuts down when it ends. Closing the writer alone left
+       the socket open while the reader thread held its clone.
+   - **jig.**
+     - `jig serve --listen <address> --token-file <path> [--push]` requires a token, and prints the address it is
+       bound to, so that port `0` can be used.
+     - `cache/remote` takes `tcp://<host>:<port>`.
+     - The property `cache/token-file` gives the client's token file. Its path is recorded in `.jig` (version 20),
+       and the token is read when the build connects, so the token itself is never recorded.
+   - **Tests.**
+     - rig: the right token is served, a server without a token serves a client with one, and another token or none
+       is refused, with why.
+     - rig, over TCP:
+       - Two clients at once, one pushing.
+       - A client without the token refused while the server goes on.
+       - The callback run after each client.
+       - An address nothing listens at fails.
+     - jig: `tcp://` addresses, with and without a host or port.
+     - Integration: `jig serve --listen 127.0.0.1:0`, with the user's configuration naming it and the token file.
+       One checkout pushes, another with an empty local cache and no `rustc` fetches every edge, and a client with
+       another token is warned of and builds without it.
 6. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
 
 ### Phase 6: distributed execution

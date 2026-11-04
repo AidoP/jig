@@ -328,6 +328,7 @@ impl Project {
             size: string("cache/size"),
             remote: string("cache/remote"),
             push: matches!(value("cache/push"), Some(Data::Bool(true))),
+            token_file: string("cache/token-file"),
         }
     }
     pub fn install_prefix(&self) -> String {

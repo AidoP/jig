@@ -10,7 +10,8 @@
 //! tests which are run by default, the install prefix,
 //! the severities of `proxy-build` and `other-jig`, the `jig` which configured it, then how rig caches: the directory of
 //! the cache, or empty without one, the size it is collected down to as a decimal string, the remote cache, or empty
-//! without one, and whether it is pushed to, followed by each section: the
+//! without one, whether it is pushed to, and the file of the token for it, or empty without one, followed by each
+//! section: the
 //! flychecks, the tests, the lints, the programs, then the installed files. A section is the number of its records
 //! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
 //! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
@@ -23,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 19;
+const VERSION: u32 = 20;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -60,6 +61,8 @@ pub struct Database<'a> {
     pub remote_cache: &'a str,
     /// Whether what is built is pushed to the remote cache.
     pub push: bool,
+    /// The file of the token for the remote cache, or empty without one.
+    pub token_file: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -152,6 +155,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.cache_size)?;
     write_str(w, database.remote_cache)?;
     write_u32(w, u32::from(database.push))?;
+    write_str(w, database.token_file)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -212,6 +216,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         cache_size: r.str()?,
         remote_cache: r.str()?,
         push: r.bool()?,
+        token_file: r.str()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -332,6 +337,7 @@ mod tests {
             cache_size: "1024",
             remote_cache: "ssh://cache",
             push: true,
+            token_file: "/home/user/.config/jig/token",
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
