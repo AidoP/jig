@@ -35,11 +35,11 @@ pub enum Engine {
     Rig,
 }
 impl Engine {
-    /// Returns the engine `JIG_ENGINE` names, which is ninja by default.
+    /// Returns the engine `JIG_ENGINE` names, which is rig by default.
     pub fn from_env() -> Result<Self, Error> {
         match std::env::var("JIG_ENGINE").as_deref() {
-            Err(_) | Ok("" | "ninja") => Ok(Self::Ninja),
-            Ok("rig") => Ok(Self::Rig),
+            Err(_) | Ok("" | "rig") => Ok(Self::Rig),
+            Ok("ninja") => Ok(Self::Ninja),
             Ok(other) => Err(Error::UnknownEngine(other.into())),
         }
     }

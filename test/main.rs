@@ -87,9 +87,14 @@ impl Project {
         String::from_utf8(output.stdout).unwrap().trim().into()
     }
 }
-/// Whether `jig` builds with rig, as `JIG_ENGINE=rig` has it, rather than ninja.
+/// Whether `jig` builds with rig, as it does unless `JIG_ENGINE=ninja`.
 fn rig_engine() -> bool {
-    std::env::var_os("JIG_ENGINE").is_some_and(|engine| engine == "rig")
+    std::env::var_os("JIG_ENGINE").is_none_or(|engine| engine != "ninja")
+}
+
+/// Whether ninja is installed, which the tests of what ninja does with `build.ninja` on its own need.
+fn has_ninja() -> bool {
+    Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success())
 }
 
 fn configure_path() -> PathBuf {
@@ -1778,12 +1783,14 @@ custom skipped
     let output = project.configure().ok();
     assert_contains(&output.ninja, &format!("\ndefault custom/made {host}/libkept.rlib\n"));
     // `ninja` without targets only builds the defaults, once it has recorded how `build.ninja` was generated
-    Command::new("ninja").arg("build.ninja").current_dir(project.dir.join("build")).output().unwrap();
-    let ninja = Command::new("ninja").arg("-n").current_dir(project.dir.join("build")).output().unwrap();
-    let ninja = String::from_utf8(ninja.stdout).unwrap();
-    assert_contains(&ninja, "CUSTOM made");
-    assert_contains(&ninja, &format!("RUSTC {host}/libkept.rlib"));
-    assert!(!ninja.contains("skipped") && !ninja.contains("other"), "{ninja}");
+    if has_ninja() {
+        Command::new("ninja").arg("build.ninja").current_dir(project.dir.join("build")).output().unwrap();
+        let ninja = Command::new("ninja").arg("-n").current_dir(project.dir.join("build")).output().unwrap();
+        let ninja = String::from_utf8(ninja.stdout).unwrap();
+        assert_contains(&ninja, "CUSTOM made");
+        assert_contains(&ninja, &format!("RUSTC {host}/libkept.rlib"));
+        assert!(!ninja.contains("skipped") && !ninja.contains("other"), "{ninja}");
+    }
 
     // without defaults, everything is built but the checks, which are for rust-analyzer
     let project = Project::new("no-default", &[
@@ -2566,11 +2573,14 @@ rule configure
     // and ninja can use it on its own, in the build directory, regenerating it first as it has not recorded how it was
     // made
     let host = project.host();
-    let ninja = Command::new("ninja").arg(format!("{host}/libapp.rlib")).current_dir(project.dir.join("build")).output().unwrap();
-    let stdout = String::from_utf8_lossy(&ninja.stdout);
-    assert!(ninja.status.success(), "{stdout}");
-    assert_contains(&stdout, "CONFIGURE build.ninja");
-    assert!(project.dir.join(format!("build/{host}/libapp.rlib")).exists());
+    if has_ninja() {
+        let mut ninja = Command::new("ninja");
+        let ninja = ninja.arg(format!("{host}/libapp.rlib")).current_dir(project.dir.join("build")).output().unwrap();
+        let stdout = String::from_utf8_lossy(&ninja.stdout);
+        assert!(ninja.status.success(), "{stdout}");
+        assert_contains(&stdout, "CONFIGURE build.ninja");
+        assert!(project.dir.join(format!("build/{host}/libapp.rlib")).exists());
+    }
 }
 
 #[test]
@@ -3167,8 +3177,8 @@ pub fn answer(_: TokenStream) -> TokenStream { \"42\".parse().unwrap() }
     ));
     assert_contains(output.build(&format!("{host}/app")), "crate-type = bin");
     // the binary is built and runs, using the procedural macro directly and through a library
-    let ninja = Command::new("ninja").arg(format!("{host}/app")).current_dir(project.dir.join("build")).output().unwrap();
-    assert!(ninja.status.success(), "{}", String::from_utf8_lossy(&ninja.stdout));
+    let built = Command::new(configure_path()).args(["build", &format!("{host}/app")]).current_dir(&project.dir).output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stdout));
     let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
     assert_eq!(String::from_utf8(app.stdout).unwrap(), "42 84\n");
     // checking uses the procedural macro itself, as rustc runs it
@@ -4340,8 +4350,10 @@ test passes
     // the previous build directory has a stub, which is up to date for ninja
     let stub = std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap();
     assert_contains(&stub, "`build-dir` is now \"out\"");
-    let ninja = Command::new("ninja").current_dir(project.dir.join("build")).output().unwrap();
-    assert!(ninja.status.success());
+    if has_ninja() {
+        let ninja = Command::new("ninja").current_dir(project.dir.join("build")).output().unwrap();
+        assert!(ninja.status.success());
+    }
     // and changing it back regenerates it there again
     std::fs::write(project.dir.join("Jig"), config).unwrap();
     jig(&["test"]);

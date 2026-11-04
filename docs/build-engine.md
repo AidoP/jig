@@ -599,21 +599,35 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ### Phase 2: make the engine the default
 
-- Make `rig` the default, and have jig save `build/graph` as well as `build.ninja`.
-  - `build.ninja` remains supported for good. It is written beside the graph, so ninja can still be run in the build
-    directory, and `JIG_ENGINE=ninja` (or a `build/engine` property) builds with it as now.
-  - A graph that ninja can't express, such as one with a path containing a line break, is still saved for `rig`.
-    `build.ninja` isn't written for it, and a warning says why.
-- Turn commands into argument vectors.
-  - Remove `sh`, `shell_quote`, `ninja_quote` and `toolchain::shell_prefix` from the paths the engine runs. The
-    toolchain and crate variables become an action's environment.
-  - Line breaks in paths become an error only with the ninja engine (`Message` for newlines, `Error::LineBreak`).
-  - `build.ninja` still runs its commands through `sh`, so the ninja writer quotes the argument vectors itself.
-- Remove the missing-path stamp in favour of missing-path inputs, and run the configure edge in the same process.
-- Bootstrap without ninja: `bootstrap.sh` runs `rustc --crate-type=lib rig/lib.rs`, then `rustc --extern rig=...
-  src/main.rs`. `bootstrap.ninja` is kept as well.
-- Make ninja optional in the README's requirements; it is needed only for the ninja engine. CI installs it for one
-  job that runs the suite with `JIG_ENGINE=ninja`, and the others run without it.
+#### Steps
+
+1. **Done:** rig is the default, and nothing needs ninja.
+   - **The default engine.** `JIG_ENGINE` defaults to `rig`, and `ninja` chooses ninja. jig still writes
+     `build.ninja` beside `build/graph`, so ninja can also be run in the build directory on its own.
+   - **Bootstrapping without ninja.** `bootstrap.sh` builds `librig.rlib` and then `jig` with rustc alone, into
+     `build/bootstrap`, and configures the project. `bootstrap.ninja` does the same with ninja, and is kept.
+   - **ninja is optional.** The README lists it as optional, needed only for the ninja engine and for the tests that
+     compare the two.
+     - The tests that run ninja on `build.ninja` directly, the differential test, and the performance comparison skip
+       themselves where ninja isn't installed.
+     - One proc-macro test now builds with `jig build` rather than ninja.
+   - **CI.**
+     - The test matrix and the lint job bootstrap with `bootstrap.sh` and don't install ninja.
+     - The test matrix runs every test with rig.
+     - A new `ninja` job installs ninja, bootstraps with `bootstrap.ninja`, and runs every test with
+       `JIG_ENGINE=ninja`. That includes the differential and comparison tests.
+   - **Checked.** Every test passes with no working ninja on `PATH`, and with `JIG_ENGINE=ninja` after bootstrapping
+     with ninja.
+2. **Argument vectors.** Turn commands into argument vectors.
+   - Remove `sh`, `shell_quote`, `ninja_quote` and `toolchain::shell_prefix` from what rig runs. The toolchain and
+     crate variables become an action's environment, and redirections such as clippy's `2> $diagnostics` become
+     fields of the action.
+   - Line breaks in paths become an error only with the ninja engine (`Message` for newlines, `Error::LineBreak`). A
+     graph which ninja can't express is still saved for rig, and `build.ninja` isn't written for it, with a warning
+     that says why.
+   - `build.ninja` still runs its commands through `sh`, so the ninja writer quotes the argument vectors itself.
+3. **Configuring natively.** Remove the missing-path stamp in favour of missing-path inputs, and run the configure
+   edge in the same process.
 
 ### Phase 3: hashing and early cutoff
 
