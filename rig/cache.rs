@@ -89,6 +89,45 @@ pub struct Output {
     pub executable: bool,
 }
 
+/// A blob being written in parts, as it is received, hashed as it is written, to a file in `tmp`, which is removed
+/// unless it is finished.
+pub struct BlobWriter {
+    cache: Cache,
+    tmp: PathBuf,
+    file: Option<std::io::BufWriter<std::fs::File>>,
+    hasher: Hasher,
+    /// Whether a part could not be written, so that the blob is not added.
+    failed: bool,
+}
+impl BlobWriter {
+    /// Write the next part of the blob.
+    pub fn write(&mut self, part: &[u8]) {
+        use std::io::Write;
+        self.hasher.update(part);
+        let written = self.file.as_mut().map(|file| file.write_all(part));
+        self.failed |= !matches!(written, Some(Ok(())));
+    }
+    /// Add the blob to the cache, if every part was written and it has its hash, returning whether it was added.
+    #[must_use]
+    pub fn finish(mut self, hash: &Hash) -> bool {
+        use std::io::Write;
+        let flushed = self.file.take().is_some_and(|mut file| file.flush().is_ok());
+        if self.failed || !flushed || self.hasher.finalize() != *hash {
+            return false;
+        }
+        if self.cache.has_blob(hash) {
+            return true;
+        }
+        Cache::place(&self.tmp, &self.cache.blob_path(hash)).is_ok()
+    }
+}
+impl Drop for BlobWriter {
+    fn drop(&mut self) {
+        // once it is placed, the file is not there
+        let _ = std::fs::remove_file(&self.tmp);
+    }
+}
+
 /// What a cache holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -161,7 +200,7 @@ impl Cache {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
-    fn blob_path(&self, hash: &Hash) -> PathBuf {
+    pub(crate) fn blob_path(&self, hash: &Hash) -> PathBuf {
         let hex = hex(hash);
         self.dir.join("cas").join(&hex[..2]).join(&hex[2..])
     }
@@ -282,13 +321,35 @@ impl Cache {
         if missing.is_empty() {
             return;
         }
-        for (blob, contents) in remote.blobs(&missing) {
-            self.accept_blob(&blob, &contents);
-        }
+        remote.fetch_blobs(self, &missing);
     }
     /// Add a blob which was sent, if it has its hash, returning whether it was added.
     pub(crate) fn accept_blob(&self, hash: &Hash, bytes: &[u8]) -> bool {
         blake3::hash(bytes) == *hash && self.put_bytes(bytes).is_ok()
+    }
+    /// Returns what writes a blob in parts, as it is received, which is added once it is finished, if it has its hash.
+    ///
+    /// # Errors
+    ///
+    /// If its file in `tmp` cannot be created.
+    pub fn blob_writer(&self) -> std::io::Result<BlobWriter> {
+        let tmp = self.tmp();
+        let file = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
+        Ok(BlobWriter { cache: self.without_remote(), tmp, file: Some(file), hasher: Hasher::new(), failed: false })
+    }
+    /// Returns a blob's file, open to be read in parts, with its size, if the cache has it.
+    ///
+    /// # Errors
+    ///
+    /// If the cache does not have it, or it cannot be opened.
+    pub fn open_blob(&self, hash: &Hash) -> std::io::Result<(std::fs::File, u64)> {
+        let file = std::fs::File::open(self.blob_path(hash))?;
+        let size = file.metadata()?.len();
+        Ok((file, size))
+    }
+    /// Remove a blob, as one which was found to be corrupted.
+    pub(crate) fn remove_blob(&self, hash: &Hash) {
+        let _ = std::fs::remove_file(self.blob_path(hash));
     }
     /// Check every blob of a result against its hash, removing those which are corrupted.
     pub fn check(&self, entry: &Entry) {

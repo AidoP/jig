@@ -21,6 +21,13 @@
 //!   strings, are replied to with `OK`, or `ERROR` with why, as when the server does not take pushes, or what was sent
 //!   is not valid.
 //!
+//! A blob larger than a part, a MiB, is sent in parts, whether it is a reply to `GET_BLOB` or the request `PUT_BLOB`:
+//! a frame of the kind `MORE` with the id of the request for each part but the last, then the frame of the reply or
+//! request, with the last part, so that the frames of other requests are sent between them, rather than after the
+//! whole blob, and neither end holds the whole blob. The parts of a blob which is received are written to a file in the
+//! cache as they are, hashed, and the file is added once it is whole and has its hash. A server which finds, as it
+//! sends a blob, that it is corrupted, ends it with `NOT_FOUND`, and removes it.
+//!
 //! What is fetched is checked as what is read from a cache on disk is: a blob against its hash, and a manifest or
 //! result against the hash which ends it, so that a server which sends something corrupted is a miss.
 //!
@@ -40,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use crate::cache::{Cache, Discovery, Hash};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -54,9 +61,14 @@ const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
 const ERROR: u8 = 67;
+/// A part of a request or reply, which more frames of the same id follow, the last of which is of its kind.
+const MORE: u8 = 68;
+
+/// The largest part of a blob which is sent in a frame.
+const PART: usize = 1 << 20;
 
 /// The largest payload of a frame which is read, beyond which the stream is taken as corrupted.
-const MAX_FRAME: u64 = 1 << 36;
+const MAX_FRAME: u64 = 16 << 20;
 
 /// The threads a server answers requests on.
 const SERVER_THREADS: usize = 4;
@@ -67,8 +79,17 @@ type Frame = (u8, u32, Vec<u8>);
 /// A reply: its kind and its payload.
 type Reply = (u8, Vec<u8>);
 
+/// What takes the parts of a reply which is sent in parts, as they are received.
+type Sink = Box<dyn FnMut(&[u8]) + Send>;
+
+/// A request waiting for its reply, with what takes the parts of it which come before, if it is sent in parts.
+struct Waiter {
+    reply: Sender<Reply>,
+    sink: Option<Sink>,
+}
+
 /// The requests waiting for their replies, by id.
-type Waiting = Arc<Mutex<HashMap<u32, Sender<Reply>>>>;
+type Waiting = Arc<Mutex<HashMap<u32, Waiter>>>;
 
 fn write_frame(w: &mut dyn Write, kind: u8, id: u32, payload: &[u8]) -> std::io::Result<()> {
     w.write_all(&[kind])?;
@@ -189,9 +210,21 @@ impl Connection {
                 match read_frame(&mut reader) {
                     Ok(Some((kind, id, payload))) => {
                         let waiter = replies.lock().ok().and_then(|mut waiting| waiting.remove(&id));
-                        if let Some(waiter) = waiter {
-                            let _ = waiter.send((kind, payload));
+                        let Some(mut waiter) = waiter else {
+                            continue;
+                        };
+                        // a part is given to the request's sink, without holding the lock, and the request waits for
+                        // the rest
+                        if kind == MORE {
+                            if let Some(sink) = &mut waiter.sink {
+                                sink(&payload);
+                            }
+                            if let Ok(mut waiting) = replies.lock() {
+                                waiting.insert(id, waiter);
+                            }
+                            continue;
                         }
+                        let _ = waiter.reply.send((kind, payload));
                     },
                     Ok(None) => break "the server closed the connection".to_string(),
                     Err(error) => break error.to_string(),
@@ -217,20 +250,56 @@ impl Connection {
     }
     /// Send a request, returning what its reply is given to, or `None` if the connection has failed.
     fn send(&self, kind: u8, payload: &[u8]) -> Option<Receiver<Reply>> {
+        let (id, receiver) = self.register(None)?;
+        self.write(kind, id, payload).then_some(receiver)
+    }
+    /// Send a request whose reply may come in parts, which are given to `sink` as they are received.
+    fn send_to(&self, kind: u8, payload: &[u8], sink: Sink) -> Option<Receiver<Reply>> {
+        let (id, receiver) = self.register(Some(sink))?;
+        self.write(kind, id, payload).then_some(receiver)
+    }
+    /// Send a request of `head` followed by what is read from a file of a size, in parts, each written on its own, so
+    /// that other requests are sent between them.
+    fn send_parts(&self, kind: u8, head: &[u8], mut file: impl Read, size: u64) -> Option<Receiver<Reply>> {
+        let (id, receiver) = self.register(None)?;
+        let mut remaining = size;
+        let mut part = vec![0; PART];
+        while remaining > PART as u64 {
+            if let Err(error) = file.read_exact(&mut part) {
+                self.fail(error.to_string());
+                return None;
+            }
+            if !self.write(MORE, id, &part) {
+                return None;
+            }
+            remaining -= PART as u64;
+        }
+        let mut last = head.to_vec();
+        if let Err(error) = file.read_to_end(&mut last) {
+            self.fail(error.to_string());
+            return None;
+        }
+        self.write(kind, id, &last).then_some(receiver)
+    }
+    /// Returns a new request's id, waiting for its reply, or `None` if the connection has failed.
+    fn register(&self, sink: Option<Sink>) -> Option<(u32, Receiver<Reply>)> {
         if self.has_failed() {
             return None;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = std::sync::mpsc::channel();
-        self.waiting.lock().ok()?.insert(id, sender);
-        let written = self.writer.lock().ok().map(|mut writer| write_frame(&mut **writer, kind, id, payload));
-        match written {
-            Some(Ok(())) => Some(receiver),
+        let (reply, receiver) = std::sync::mpsc::channel();
+        self.waiting.lock().ok()?.insert(id, Waiter { reply, sink });
+        Some((id, receiver))
+    }
+    /// Write a frame, returning whether it was, failing the connection if it could not be.
+    fn write(&self, kind: u8, id: u32, payload: &[u8]) -> bool {
+        match self.writer.lock().ok().map(|mut writer| write_frame(&mut **writer, kind, id, payload)) {
+            Some(Ok(())) => true,
             Some(Err(error)) => {
                 self.fail(error.to_string());
-                None
+                false
             },
-            None => None,
+            None => false,
         }
     }
     /// Wait for the reply to a request, failing the connection if it is an error.
@@ -445,20 +514,41 @@ impl Remote {
         let index = payload.u32()? as usize;
         (index < keys.len()).then(|| (index, payload.0.to_vec()))
     }
-    /// Returns the blobs the remote cache has, of those asked for, which are asked for at once.
-    #[must_use]
-    pub fn blobs(&self, blobs: &[Hash]) -> Vec<(Hash, Vec<u8>)> {
+    /// Fetch blobs into a cache, asking for them at once, returning those which were added. The parts of each are
+    /// written to the cache as they are received, and each is added once it is whole and has its hash.
+    pub fn fetch_blobs(&self, local: &Cache, blobs: &[Hash]) -> Vec<Hash> {
         let Some(connection) = self.connection() else {
             return Vec::new();
         };
-        let sent: Vec<_> = blobs.iter().map(|blob| (blob, connection.send(GET_BLOB, blob))).collect();
-        let found = sent.into_iter().map(|(blob, receiver)| (*blob, Self::get(&connection, connection.wait(receiver))));
-        found.filter_map(|(blob, contents)| Some((blob, contents?))).collect()
-    }
-    /// Returns a blob, if the remote cache has it.
-    #[must_use]
-    pub fn blob(&self, hash: &Hash) -> Option<Vec<u8>> {
-        self.blobs(std::slice::from_ref(hash)).pop().map(|(_, contents)| contents)
+        let mut sent = Vec::new();
+        for blob in blobs {
+            let Ok(writer) = local.blob_writer() else {
+                continue;
+            };
+            let writer = Arc::new(Mutex::new(Some(writer)));
+            let parts = Arc::clone(&writer);
+            let sink: Sink = Box::new(move |part| {
+                if let Ok(mut writer) = parts.lock()
+                    && let Some(writer) = writer.as_mut()
+                {
+                    writer.write(part);
+                }
+            });
+            sent.push((blob, writer, connection.send_to(GET_BLOB, blob, sink)));
+        }
+        let mut fetched = Vec::new();
+        for (blob, writer, receiver) in sent {
+            // once the reply has come, the sink has been given every part before it
+            let last = Self::get(&connection, connection.wait(receiver));
+            let writer = writer.lock().ok().and_then(|mut writer| writer.take());
+            if let Some((last, mut writer)) = last.zip(writer) {
+                writer.write(&last);
+                if writer.finish(blob) {
+                    fetched.push(*blob);
+                }
+            }
+        }
+        fetched
     }
     /// Returns those of the blobs the remote cache does not have, or `None` if it failed.
     #[must_use]
@@ -474,8 +564,8 @@ impl Remote {
     #[must_use]
     pub fn put_blob(&self, hash: &Hash, contents: &[u8]) -> bool {
         self.connection().is_some_and(|connection| {
-            let reply = connection.request(PUT_BLOB, &[hash.as_slice(), contents].concat());
-            Self::put(&connection, reply.map(|(kind, _)| kind))
+            let receiver = connection.send_parts(PUT_BLOB, hash, contents, contents.len() as u64);
+            Self::put(&connection, connection.wait(receiver).map(|(kind, _)| kind))
         })
     }
     /// Queue a result in a local cache to be pushed, by its keys, with what its edge discovered, if the remote cache
@@ -526,12 +616,13 @@ fn push_result(connection: &Connection, push: &Push) {
     }) else {
         return;
     };
+    // each is sent in parts, read from its file as it is sent
     let mut sent = Vec::new();
     for blob in &missing {
-        let Ok(contents) = push.local.read_blob(blob) else {
+        let Ok((file, size)) = push.local.open_blob(blob) else {
             return;
         };
-        sent.push(connection.send(PUT_BLOB, &[blob.as_slice(), &contents].concat()));
+        sent.push(connection.send_parts(PUT_BLOB, blob, std::io::BufReader::new(file), size));
     }
     if !sent.into_iter().all(|receiver| Remote::put(connection, connection.wait(receiver).map(|(kind, _)| kind))) {
         return;
@@ -580,25 +671,55 @@ pub fn serve(cache: &Cache, reader: impl Read, writer: impl Write + Send, push: 
     let (requests, work) = std::sync::mpsc::channel::<Frame>();
     let work = Mutex::new(work);
     let written: Mutex<std::io::Result<()>> = Mutex::new(Ok(()));
+    let reply = |kind: u8, id: u32, payload: &[u8]| {
+        let result = writer.lock().map_or(Ok(()), |mut writer| write_frame(&mut *writer, kind, id, payload));
+        if let Err(error) = result
+            && let Ok(mut written) = written.lock()
+        {
+            *written = Err(error);
+        }
+    };
     std::thread::scope(|scope| {
         for _ in 0..SERVER_THREADS {
             scope.spawn(|| {
                 // the lock is held while waiting for a request, which the other threads wait for in turn
                 while let Ok(Ok((kind, id, payload))) = work.lock().map(|work| work.recv()) {
-                    let (kind, reply) = answer(cache, push, kind, &payload);
-                    let result = writer.lock().map_or(Ok(()), |mut writer| write_frame(&mut *writer, kind, id, &reply));
-                    if let Err(error) = result
-                        && let Ok(mut written) = written.lock()
-                    {
-                        *written = Err(error);
+                    if kind == GET_BLOB && let Ok(key) = <Hash>::try_from(payload.as_slice()) {
+                        send_blob(cache, &key, &|kind, payload| reply(kind, id, payload));
+                        continue;
                     }
+                    let (kind, payload) = answer(cache, push, kind, &payload);
+                    reply(kind, id, &payload);
                 }
             });
         }
+        // the parts of the blobs being pushed, by the ids of their requests, which are written as they are read, or
+        // `None` for a blob which is not taken
+        let mut uploads: HashMap<u32, Option<crate::cache::BlobWriter>> = HashMap::new();
         let read = loop {
             match read_frame(&mut reader) {
-                Ok(Some(frame)) => {
-                    if requests.send(frame).is_err() {
+                Ok(Some((MORE, id, part))) => {
+                    let upload = uploads.entry(id).or_insert_with(|| cache.blob_writer().ok().filter(|_| push));
+                    if let Some(upload) = upload {
+                        upload.write(&part);
+                    }
+                },
+                Ok(Some((PUT_BLOB, id, payload))) if push => {
+                    let (hash, last) = payload.split_at(payload.len().min(32));
+                    let upload = uploads.remove(&id).unwrap_or_else(|| cache.blob_writer().ok());
+                    let added = <Hash>::try_from(hash).ok().zip(upload).is_some_and(|(hash, mut upload)| {
+                        upload.write(last);
+                        upload.finish(&hash)
+                    });
+                    if added {
+                        reply(OK, id, &[]);
+                    } else {
+                        reply(ERROR, id, b"a blob which does not have its hash");
+                    }
+                },
+                Ok(Some((kind, id, payload))) => {
+                    uploads.remove(&id);
+                    if requests.send((kind, id, payload)).is_err() {
                         break Ok(());
                     }
                 },
@@ -611,6 +732,37 @@ pub fn serve(cache: &Cache, reader: impl Read, writer: impl Write + Send, push: 
         read
     })?;
     written.into_inner().unwrap_or(Ok(()))
+}
+
+/// Send a blob as the reply to a request, by `reply`, in parts, as it is read, checking it against its hash, and
+/// ending it with `NOT_FOUND`, and removing it, if it does not have it, or with `NOT_FOUND` alone if the cache does not
+/// have it.
+fn send_blob(cache: &Cache, hash: &Hash, reply: &dyn Fn(u8, &[u8])) {
+    let Ok((file, size)) = cache.open_blob(hash) else {
+        return reply(NOT_FOUND, &[]);
+    };
+    let mut file = std::io::BufReader::new(file);
+    let mut hasher = crate::blake3::Hasher::new();
+    let mut remaining = size;
+    let mut part = vec![0; PART];
+    while remaining > PART as u64 {
+        if file.read_exact(&mut part).is_err() {
+            return reply(NOT_FOUND, &[]);
+        }
+        hasher.update(&part);
+        reply(MORE, &part);
+        remaining -= PART as u64;
+    }
+    let mut last = Vec::new();
+    if file.read_to_end(&mut last).is_err() {
+        return reply(NOT_FOUND, &[]);
+    }
+    hasher.update(&last);
+    if hasher.finalize() != *hash {
+        cache.remove_blob(hash);
+        return reply(NOT_FOUND, &[]);
+    }
+    reply(FOUND, &last);
 }
 
 /// Returns the reply to a request.
@@ -636,7 +788,6 @@ fn answer(cache: &Cache, push: bool, kind: u8, payload: &[u8]) -> (u8, Vec<u8>) 
     };
     match kind {
         GET_MANIFEST => found(cache.raw_manifest(&key)),
-        GET_BLOB => found(cache.read_blob(&key).ok()),
         PUT_BLOB if cache.accept_blob(&key, p.0) => (OK, Vec::new()),
         PUT_BLOB => error("a blob which does not have its hash"),
         PUT_RESULT if cache.accept_result(&key, p.0) => (OK, Vec::new()),
@@ -742,7 +893,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut requests = requests;
             while let Ok(Some((kind, id, _))) = read_frame(&mut requests) {
-                let reply: &[u8] = if kind == HELLO { &[2, 0, 0, 0, 0] } else { b"corrupted" };
+                let reply: &[u8] = if kind == HELLO { &[3, 0, 0, 0, 0] } else { b"corrupted" };
                 let _ = write_frame(&mut replies, if kind == HELLO { HELLO } else { FOUND }, id, reply);
             }
         });
@@ -758,27 +909,30 @@ mod tests {
 
     #[test]
     fn gives_each_reply_to_its_request() {
-        // a server which answers two requests the other way round, with the hash each asked for
+        // a server which answers two requests for blobs the other way round
+        let (a, b) = (crate::blake3::hash(b"a"), crate::blake3::hash(b"b"));
         let (requests, client) = std::io::pipe().unwrap();
         let (server, mut replies) = std::io::pipe().unwrap();
         std::thread::spawn(move || {
             let mut requests = requests;
             let Ok(Some((HELLO, id, _))) = read_frame(&mut requests) else { return };
-            let _ = write_frame(&mut replies, HELLO, id, &[2, 0, 0, 0, 0]);
+            let _ = write_frame(&mut replies, HELLO, id, &[3, 0, 0, 0, 0]);
             let mut pending = Vec::new();
             while let Ok(Some((_, id, payload))) = read_frame(&mut requests) {
-                pending.push((id, payload));
+                pending.push((id, if payload == a { b"a" } else { b"b" }));
                 if pending.len() == 2 {
-                    for (id, payload) in pending.drain(..).rev() {
-                        let _ = write_frame(&mut replies, FOUND, id, &payload);
+                    for (id, contents) in pending.drain(..).rev() {
+                        let _ = write_frame(&mut replies, FOUND, id, contents);
                     }
                 }
             }
         });
         let remote = Remote::streams(server, client, false);
-        let (a, b) = ([1; 32], [2; 32]);
-        assert_eq!(remote.blobs(&[a, b]), [(a, a.to_vec()), (b, b.to_vec())]);
+        let local = cache("reply-order");
+        assert_eq!(remote.fetch_blobs(&local, &[a, b]), [a, b]);
+        assert_eq!((local.read_blob(&a).unwrap(), local.read_blob(&b).unwrap()), (b"a".to_vec(), b"b".to_vec()));
         assert!(remote.error().is_none());
+        let _ = std::fs::remove_dir_all(local.dir());
     }
 
     #[test]
@@ -786,19 +940,74 @@ mod tests {
         let server = cache("concurrent");
         let blobs: Vec<Hash> = (0..64).map(|i| server.put_bytes(format!("blob {i}").as_bytes()).unwrap()).collect();
         let remote = Arc::new(served(server.clone(), false, false));
+        let local = cache("concurrent-local");
         std::thread::scope(|scope| {
             for chunk in blobs.chunks(8) {
-                let remote = Arc::clone(&remote);
-                scope.spawn(move || {
-                    for (blob, contents) in remote.blobs(chunk) {
-                        assert_eq!(crate::blake3::hash(&contents), blob);
-                    }
-                    assert_eq!(remote.blobs(chunk).len(), chunk.len());
-                });
+                let (remote, local) = (Arc::clone(&remote), &local);
+                scope.spawn(move || assert_eq!(remote.fetch_blobs(local, chunk), chunk));
             }
         });
         assert!(remote.error().is_none());
-        let _ = std::fs::remove_dir_all(server.dir());
+        assert_eq!(local.stats().blobs, 64);
+        for cache in [server, local] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
+    }
+
+    /// Returns bytes of a length which differ from part to part, so that parts which are swapped or repeated show.
+    fn large(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| (i / 7 % 251) as u8 ^ seed).collect()
+    }
+
+    #[test]
+    fn sends_large_blobs_in_parts() {
+        let server = cache("large-server");
+        // larger than several parts, and not a whole number of them
+        let fetched = large(3 * PART + 12_345, 1);
+        let hash = server.put_bytes(&fetched).unwrap();
+        let remote = Arc::new(served(server.clone(), true, true));
+        let local = cache("large-local");
+        // fetched with small blobs, which are asked for at once with it
+        let small: Vec<Hash> = (0..8).map(|i| server.put_bytes(format!("small {i}").as_bytes()).unwrap()).collect();
+        let all: Vec<Hash> = std::iter::once(hash).chain(small.iter().copied()).collect();
+        assert_eq!(remote.fetch_blobs(&local, &all), all);
+        assert_eq!(local.read_blob(&hash).unwrap(), fetched);
+        // and pushed in parts
+        let pushed = large(2 * PART + 1, 2);
+        let pushed_hash = crate::blake3::hash(&pushed);
+        assert!(remote.put_blob(&pushed_hash, &pushed));
+        assert_eq!(server.read_blob(&pushed_hash).unwrap(), pushed);
+        // one exactly a part long is sent whole
+        let exact = large(PART, 3);
+        assert!(remote.put_blob(&crate::blake3::hash(&exact), &exact));
+        // a blob which is not what its hash says is refused, which fails the remote
+        assert!(!remote.put_blob(&[0; 32], &pushed));
+        assert!(!server.has_blob(&[0; 32]));
+        assert!(remote.error().unwrap().contains("does not have its hash"));
+        assert_eq!(std::fs::read_dir(server.dir().join("tmp")).unwrap().count(), 0);
+        for cache in [server, local] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
+    }
+
+    #[test]
+    fn ends_a_blob_which_is_corrupted_as_it_is_sent() {
+        let server = cache("large-corrupted");
+        let contents = large(2 * PART + 100, 4);
+        let hash = server.put_bytes(&contents).unwrap();
+        // corrupted after its first part, which is sent before it is found to be
+        let mut corrupted = contents.clone();
+        corrupted[PART + 10] ^= 1;
+        std::fs::write(server.blob_path(&hash), &corrupted).unwrap();
+        let remote = served(server.clone(), false, false);
+        let local = cache("large-corrupted-local");
+        assert!(remote.fetch_blobs(&local, &[hash]).is_empty());
+        assert!(!local.has_blob(&hash) && !server.has_blob(&hash));
+        assert_eq!(std::fs::read_dir(local.dir().join("tmp")).unwrap().count(), 0);
+        assert!(remote.error().is_none());
+        for cache in [server, local] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
     }
 
     #[test]
@@ -843,7 +1052,7 @@ mod tests {
     #[test]
     fn stops_using_a_remote_which_fails() {
         let remote = Remote::command(vec!["rig-no-such-server".into()], true);
-        assert!(remote.blob(&[0; 32]).is_none());
+        assert!(remote.manifest(&[0; 32]).is_none());
         assert!(remote.error().unwrap().contains("rig-no-such-server"), "{:?}", remote.error());
         // and a server which ends, with why on its stderr
         let remote = Remote::command(vec!["sh".into(), "-c".into(), "echo no such cache >&2".into()], true);
