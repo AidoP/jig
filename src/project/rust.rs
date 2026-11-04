@@ -87,6 +87,11 @@ impl Crate {
     pub fn short_name(&self, host: &str) -> String {
         if self.target == host { self.name.clone() } else { format!("{}@{}", self.name, self.target) }
     }
+    /// The library built again without `panic`, for the test harnesses and procedural macros which link it, which
+    /// unwind.
+    pub fn unwind_output(&self) -> PathBuf {
+        self.dir.join("unwind").join(format!("lib{}.rlib", self.name))
+    }
     /// The test harness of the crate, built with `--test`.
     pub fn test_harness(&self) -> PathBuf {
         self.dir.join("test").join(&self.name)

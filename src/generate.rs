@@ -536,23 +536,48 @@ fn write_graph(
         }
     }
 
-    for (c, unit) in crates.iter().zip(units) {
-        // a dependency is a library, so it has an output
-        let mut deps = Vec::new();
-        for &index in &unit.deps {
-            let d = &crates[index];
-            deps.push(Extern { name: &d.name, path: at.path(&d.output()) });
-        }
+    // a library built with `panic=abort` is built again without it for the test harnesses and procedural macros which
+    // link it, which unwind
+    let unwind = unwind_copies(crates, units);
+    for (index, (c, unit)) in crates.iter().zip(units).enumerate() {
+        // a dependency is a library, so it has an output, or its copy which unwinds, for what must unwind
+        let externs = |unwinds: bool| -> Vec<Extern> {
+            let mut deps = Vec::new();
+            for &index in &unit.deps {
+                let d = &crates[index];
+                let path = if unwinds && unwind[index] { d.unwind_output() } else { d.output() };
+                deps.push(Extern { name: &d.name, path: at.path(&path) });
+            }
+            deps
+        };
         let target = TargetFlag::new(&c.target, project, build_dir);
         let spec = at.paths(&target.spec);
         let input = at.path(&c.path);
         let codegen = codegen(c, project);
-        let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &codegen, &input, at);
-        flags.cfg(&c.cfg);
-        let mut harness_flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &harness_codegen(&codegen), &input, at);
-        harness_flags.cfg(&c.cfg);
+        // the crates which copies depend on are found among the copies, when any is linked
+        let unwind_search = format!("dependency={}", at.path(&c.dir.join("unwind")).display());
+        let copies = unit.deps.iter().any(|&index| unwind[index]);
+        let flags_with = |deps: &[Extern], codegen: &[String], unwinds: bool| {
+            let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, deps, codegen, &input, at);
+            if unwinds && copies {
+                flags.plain(&["-L", &unwind_search]);
+            }
+            flags.cfg(&c.cfg);
+            flags
+        };
+        let deps_of = |externs: &[Extern]| -> Vec<PathBuf> {
+            externs.iter().map(|d| d.path.clone()).chain(spec.iter().cloned()).collect()
+        };
+        // a procedural macro unwinds, so it links the copies too
+        let proc_macro = c.kind == Kind::ProcMacro;
+        let externs_built = externs(proc_macro);
+        let flags = flags_with(&externs_built, &codegen, proc_macro);
+        let built_deps = deps_of(&externs_built);
+        let deps: Vec<_> = as_paths(&built_deps);
+        let harness_externs = externs(true);
+        let harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
+        let harness_deps = deps_of(&harness_externs);
         let crate_env = crate_env(&c.env);
-        let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
         // test harness and any crate but a library, which then depends on it
         let link_script = c.link_script.as_ref().or_else(|| project.target(&c.target)?.link_script.as_ref());
@@ -574,6 +599,7 @@ fn write_graph(
         };
         let linked_flags = link(&flags);
         let link_deps: Vec<_> = deps.iter().copied().chain(link_script.as_deref()).collect();
+        let harness_link_deps: Vec<_> = as_paths(&harness_deps).into_iter().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
@@ -613,12 +639,36 @@ fn write_graph(
                 rule: "rustc",
                 outputs: &[&harness],
                 inputs: &[&input],
-                implicit: &link_deps,
+                implicit: &harness_link_deps,
                 order_only: &as_paths(&depends),
                 variables: &[
                     ("crate-name", &c.name),
                     ("crate-type", crate_type),
                     ("flags", test_flags.ninja()),
+                    ("tmpdir", &tmpdir.display().to_string()),
+                    ("crate-env", &crate_env),
+                ],
+                exec: Some(&exec),
+                hashed,
+                pass_env: rust.pass_env,
+                cache,
+                ..Default::default()
+            })?;
+        }
+        if unwind[index] {
+            let tmpdir = Path::new("tmp").join(&c.target).join("unwind").join(&c.name);
+            let copy = at.path(&c.unwind_output());
+            let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &copy), &harness_flags, None);
+            graph.edge(&Edge {
+                rule: "rustc",
+                outputs: &[&copy],
+                inputs: &[&input],
+                implicit: &as_paths(&harness_deps),
+                order_only: &as_paths(&depends),
+                variables: &[
+                    ("crate-name", &c.name),
+                    ("crate-type", crate_type),
+                    ("flags", harness_flags.ninja()),
                     ("tmpdir", &tmpdir.display().to_string()),
                     ("crate-env", &crate_env),
                 ],
@@ -956,6 +1006,62 @@ fn rustc_flags(
         flags.plain(&["--extern", &format!("{}={}", dep.name, dep.path.display())]);
     }
     flags
+}
+
+/// Returns whether each crate is built again without `panic`, as `<target>/unwind/lib<name>.rlib`, for the test
+/// harnesses and procedural macros which link it, which unwind, while a library built with `panic=abort` cannot be
+/// linked into them: a library built with it, or which depends on one which is copied, as `panic` changes the hash of
+/// a crate, so a crate built against the library cannot use its copy. Only those which are linked by a test harness or
+/// a procedural macro are copied.
+fn unwind_copies(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
+    let aborts = library_aborts(crates, units);
+    let mut copied = vec![false; crates.len()];
+    let needs_copy = |index: &&usize| aborts[**index];
+    let mut stack: Vec<usize> = Vec::new();
+    for (c, unit) in crates.iter().zip(units) {
+        if c.test || c.kind == Kind::ProcMacro {
+            stack.extend(unit.deps.iter().filter(needs_copy));
+        }
+    }
+    while let Some(index) = stack.pop() {
+        if !copied[index] {
+            copied[index] = true;
+            stack.extend(units[index].deps.iter().filter(needs_copy));
+        }
+    }
+    copied
+}
+
+/// Returns whether each crate is a library built with `panic=abort`, or which uses one which is.
+fn library_aborts(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum State {
+        Unvisited,
+        Visiting,
+        Done,
+    }
+    let mut state = vec![State::Unvisited; crates.len()];
+    let mut aborts = vec![false; crates.len()];
+    // depth first, deciding each crate after the crates it uses, as they may be declared after it
+    let mut stack = Vec::new();
+    for root in 0..crates.len() {
+        stack.push((root, false));
+        while let Some((index, used)) = stack.pop() {
+            if used {
+                let c = &crates[index];
+                // a crate which uses itself, through others, which is still being visited, does not abort here
+                aborts[index] = c.kind == Kind::Lib
+                    && (c.codegen.iter().any(|option| option == "panic=abort")
+                        || units[index].deps.iter().any(|&d| state[d] == State::Done && aborts[d]));
+                state[index] = State::Done;
+            } else if state[index] == State::Unvisited {
+                state[index] = State::Visiting;
+                stack.push((index, true));
+                stack.extend(units[index].deps.iter().filter(|&&d| state[d] == State::Unvisited).map(|&d| (d, false)));
+            }
+        }
+    }
+    aborts
 }
 
 /// Returns the codegen options of a crate for its test harness, without `panic`, as the harness must unwind on stable

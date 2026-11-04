@@ -4324,27 +4324,28 @@ crate aborts 'aborts.rs'
     let output = project.configure().ok();
     assert_contains(
         output.build(&format!("{host}/libfast.rlib")),
-        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C strip=symbols",
+        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C panic=abort \
+-C strip=symbols",
     );
     assert_contains(
         output.build(&format!("{host}/libslow.rlib")),
-        "-C codegen-units=256 -C debug-assertions=true -C debuginfo=2 -C lto=off -C opt-level=0 -C overflow-checks=true -C strip=none",
+        "-C codegen-units=256 -C debug-assertions=true -C debuginfo=2 -C lto=off -C opt-level=0 -C overflow-checks=true -C panic=unwind \
+-C strip=none",
     );
     // a profile which has already been used is applied again, replacing what was set since
     assert_contains(
         output.build(&format!("{host}/libother.rlib")),
-        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C strip=symbols",
+        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C panic=abort \
+-C strip=symbols",
     );
     output.stderr(
         "note: codegen-units: 1, debug-assertions: false, debuginfo: 0, lto: fat, opt-level: 3, overflow-checks: false, \
 panic: abort, strip: symbols",
     );
-    // only a binary is given `panic` by the properties, as a library built with `panic=abort` cannot be linked into a
-    // test harness, while a crate's own attribute gives it to a library
+    // a library is given `panic`, while its test harness unwinds, as it catches each test's panic, as do the checks
+    // and lints, which are of the harness
     assert_contains(output.build(&format!("{host}/app")), "-C overflow-checks=false -C panic=abort -C strip=symbols");
-    assert!(!output.build(&format!("{host}/libother.rlib")).contains("panic"), "{}", output.ninja);
-    assert_contains(output.build(&format!("{host}/libaborts.rlib")), "-C panic=abort");
-    // a test harness unwinds, as it catches each test's panic, as do the checks and lints, which are of the harness
+    assert_contains(output.build(&format!("{host}/libother.rlib")), "-C overflow-checks=false -C panic=abort");
     for harness in [format!("{host}/test/app"), format!("{host}/test/aborts")] {
         assert_contains(output.build(&harness), "-C overflow-checks=false -C strip=symbols");
         assert!(!output.build(&harness).contains("panic"), "{}", output.ninja);
@@ -4357,15 +4358,93 @@ panic: abort, strip: symbols",
         assert_contains(statement, "-C overflow-checks=false -C strip=symbols");
         assert!(!statement.contains("panic"), "{statement}");
     }
-    // a procedural macro is not given LTO by the properties, as rustc refuses it, but is by its own attribute
+    // a procedural macro is not given LTO or `panic` by the properties, as rustc refuses LTO for one, and it must
+    // unwind, but is by its own attribute
     let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     let proc_macro = output.build(&format!("{host}/{prefix}macro{suffix}"));
     assert_contains(proc_macro, "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C opt-level=3");
-    assert!(!proc_macro.contains("lto"), "{proc_macro}");
+    assert!(!proc_macro.contains("lto") && !proc_macro.contains("panic"), "{proc_macro}");
     assert_contains(output.build(&format!("{host}/{prefix}forced{suffix}")), "-C lto=thin");
     // the profiles are part of jig, so the configuration does not depend on them as files
     let depfile = project.depfile();
     assert!(depfile.starts_with("build.ninja: ../Jig reconfigure.stamp"), "{depfile}");
+}
+
+#[test]
+fn unwind_copies() {
+    let project = Project::new("unwind-copies", &[
+        ("Jig", "\
+set codegen/panic 'abort'
+crate base 'base.rs'
+crate util 'util.rs'
+    use base
+    test
+crate lonely 'lonely.rs'
+crate unwinds 'unwinds.rs'
+    codegen/panic 'unwind'
+crate mac 'mac.rs'
+    crate-type 'proc-macro'
+    use base
+crate app 'app.rs'
+    crate-type 'bin'
+    use [util, mac, unwinds]
+    test
+"),
+        ("base.rs", "pub fn one() -> u32 { 1 }\n"),
+        ("util.rs", "pub fn add(a: u32, b: u32) -> u32 { a + b + base::one() - 1 }\n#[test]\nfn adds() { assert_eq!(add(1, 2), 3); }\n"),
+        ("lonely.rs", "pub fn lonely() {}\n"),
+        ("unwinds.rs", "pub fn two() -> u32 { 2 }\n"),
+        ("mac.rs", "\
+extern crate proc_macro;
+#[proc_macro]
+pub fn three(_: proc_macro::TokenStream) -> proc_macro::TokenStream { (base::one() + 2).to_string().parse().unwrap() }
+"),
+        ("app.rs", "\
+fn main() { println!(\"{}\", util::add(mac::three!(), unwinds::two())); }
+#[test]
+fn adds() { assert_eq!(util::add(1, 1), 2); }
+#[test]
+#[should_panic]
+fn unwinds() { panic!(\"caught by the harness\"); }
+"),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // the libraries abort, and the test harnesses and the procedural macro, which unwind, link copies of those which
+    // abort, or depend on one which does, as `panic` changes the hash of a crate
+    assert_contains(output.build(&format!("{host}/libbase.rlib")), "-C panic=abort");
+    assert_contains(output.build(&format!("{host}/libutil.rlib")), &format!("-C panic=abort --extern base={host}/libbase.rlib"));
+    let copies = format!("-L dependency={host}/unwind");
+    let base = output.build(&format!("{host}/unwind/libbase.rlib"));
+    assert!(!base.contains("panic") && !base.contains(&copies), "{base}");
+    let util = output.build(&format!("{host}/unwind/libutil.rlib"));
+    assert_contains(util, &format!("--extern base={host}/unwind/libbase.rlib {copies}"));
+    assert!(!util.contains("panic"), "{util}");
+    assert_contains(output.build(&format!("{host}/test/util")), &format!("--extern base={host}/unwind/libbase.rlib {copies}"));
+    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    assert_contains(output.build(&format!("{host}/{prefix}mac{suffix}")), &format!("--extern base={host}/unwind/libbase.rlib {copies}"));
+    let harness = output.build(&format!("{host}/test/app"));
+    assert_contains(harness, &format!("--extern unwinds={host}/libunwinds.rlib --extern util={host}/unwind/libutil.rlib {copies}"));
+    // the binary links the libraries which abort
+    assert_contains(output.build(&format!("{host}/app")), &format!("-C panic=abort --extern mac={host}/{prefix}mac{suffix} \
+--extern unwinds={host}/libunwinds.rlib --extern util={host}/libutil.rlib"));
+    // only what aborts and is linked by one which unwinds is copied
+    for library in ["lonely", "unwinds"] {
+        assert!(!output.ninja.contains(&format!("unwind/lib{library}.rlib")), "{}", output.ninja);
+    }
+    // the binary and the harnesses build, and the harnesses catch a test's panic
+    for command in ["build", "test"] {
+        let run = Command::new(configure_path()).arg(command).current_dir(&project.dir).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{}{stderr}", String::from_utf8_lossy(&run.stdout));
+    }
+    let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&app.stdout), "5\n");
+
+    // without `panic=abort`, nothing is copied
+    std::fs::write(project.dir.join("Jig"), "crate base 'base.rs'\ncrate util 'util.rs'\n    use base\n    test\n").unwrap();
+    let output = project.configure().ok();
+    assert!(!output.ninja.contains("unwind/"), "{}", output.ninja);
 }
 
 #[test]

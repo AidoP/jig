@@ -652,12 +652,16 @@ crate build_tool
 The stable codegen options of rustc are builtin properties named `codegen/<option>`, such as `codegen/opt-level`, which
 have no value until they are set. A crate is compiled, and checked, with `-C <option>=<value>` for each of them which is
 set where it is declared, as with the `target` property, unless the crate has an attribute for the option,
-`codegen/<option> <value>`, which replaces it. So that they can be set for the whole project, as with cargo, unless a
-crate has the attribute itself, a procedural macro is not given `codegen/lto`, which rustc refuses for one, and only a
-binary is given `codegen/panic`, as a library built with `panic=abort` cannot be linked into a test harness, which must
-unwind, while a binary which aborts can link libraries which unwind. A test harness is never given `panic`, nor are the
-checks and lints of a crate with tests, which are of its harness. A value is converted to a string as in a string
-template.
+`codegen/<option> <value>`, which replaces it. So that they can be set for the whole project, as with cargo, a
+procedural macro is not given `codegen/lto`, which rustc refuses for one, or `codegen/panic`, as it must unwind, unless
+it has the attribute itself. A test harness is never given `panic`, as it must unwind on stable rustc, to catch each
+test's panic, nor are the checks and lints of a crate with tests, which are of its harness. A value is converted to a
+string as in a string template.
+
+A library built with `panic=abort` cannot be linked into what unwinds, a test harness or a procedural macro, nor can a
+library which uses one, as `panic` changes the hash of a crate. So each of those libraries which a test harness or a
+procedural macro links is built again without `panic`, as `<target>/unwind/lib<name>.rlib`, which they link instead,
+as cargo does, while binaries link the libraries which abort. Nothing is built again without `panic=abort`.
 For `target-feature` and `remark`, a list is joined by `,`, for `llvm-args` and `passes` by spaces, and for `link-arg`
 each item is a separate option. A path, such as for `linker`, is relative to the project root, unless it is a reference.
 `codegen/` is a dict of the options which are set, by name, as a crate declared there would be given them, such as
@@ -682,9 +686,9 @@ The builtin profiles set the codegen options which are usually wanted together, 
 
 - `profile/release`: optimised aggressively, with `opt-level` 3, fat LTO, as `lto` `'fat'`, a single codegen unit, as
   `codegen-units` 1, `strip` `'symbols'`, which takes the symbols and debug information from what is linked, and
-  `panic` `'abort'`, which binaries are given, though not their tests, with `debuginfo` 0, and `debug-assertions` and
-  `overflow-checks` off. It builds slowly, as each binary is optimised with all of the crates it links, in one codegen
-  unit
+  `panic` `'abort'`, with `debuginfo` 0, and `debug-assertions` and `overflow-checks` off. It builds slowly, as each
+  binary is optimised with all of the crates it links, in one codegen unit, and the libraries which tests link are built
+  again to unwind, as described for codegen options
 - `profile/debug`: `opt-level` 0, `debuginfo` 2, `debug-assertions` and `overflow-checks` on, and `lto` `'off'`,
   `codegen-units` 256, `strip` `'none'` and `panic` `'unwind'`, so that it undoes the release profile
 
