@@ -4448,6 +4448,49 @@ fn unwinds() { panic!(\"caught by the harness\"); }
 }
 
 #[test]
+fn proc_macro_target_options() {
+    let project = Project::new("proc-macro-target-options", &[
+        ("Jig", "\
+set codegen/relocation-model 'static'
+set codegen/target-feature '+soft-float'
+set codegen/{host-target}/target-cpu 'generic'
+crate mac 'mac.rs'
+    crate-type 'proc-macro'
+crate forced 'forced.rs'
+    crate-type 'proc-macro'
+    codegen/code-model 'small'
+crate app 'app.rs'
+    crate-type 'bin'
+    use mac
+    codegen/target-feature []
+"),
+        ("mac.rs", "\
+extern crate proc_macro;
+#[proc_macro]
+pub fn three(_: proc_macro::TokenStream) -> proc_macro::TokenStream { \"3\".parse().unwrap() }
+"),
+        ("forced.rs", ""),
+        ("app.rs", "fn main() { println!(\"{}\", mac::three!()); }\n"),
+    ]);
+    let host = project.host();
+    let output = project.configure().ok();
+    // a procedural macro is for the host, where rustc loads it, so it is not given the options of the machine the
+    // crates are for, or of linking for it, which are set for the whole project, while it is given those set for the
+    // host, and its own
+    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let mac = output.build(&format!("{host}/{prefix}mac{suffix}"));
+    assert_contains(mac, "-C target-cpu=generic");
+    assert!(!mac.contains("relocation-model") && !mac.contains("target-feature"), "{mac}");
+    assert_contains(output.build(&format!("{host}/{prefix}forced{suffix}")), "-C code-model=small");
+    assert_contains(output.build(&format!("{host}/app")), "-C relocation-model=static -C target-cpu=generic");
+    // which a procedural macro built with them could not be linked, or loaded, with
+    let run = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+    assert!(run.status.success(), "{}{}", String::from_utf8_lossy(&run.stdout), String::from_utf8_lossy(&run.stderr));
+    let app = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&app.stdout), "3\n");
+}
+
+#[test]
 fn use_expressions() {
     let project = Project::new("use-expressions", &[
         ("Jig", "\

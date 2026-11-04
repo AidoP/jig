@@ -652,20 +652,28 @@ crate build_tool
 The stable codegen options of rustc are builtin properties named `codegen/<option>`, such as `codegen/opt-level`, which
 have no value until they are set. A crate is compiled, and checked, with `-C <option>=<value>` for each of them which is
 set where it is declared, as with the `target` property, unless the crate has an attribute for the option,
-`codegen/<option> <value>`, which replaces it. So that they can be set for the whole project, as with cargo, a
-procedural macro is not given `codegen/lto`, which rustc refuses for one, or `codegen/panic`, as it must unwind, unless
-it has the attribute itself. A test harness is never given `panic`, as it must unwind on stable rustc, to catch each
-test's panic, nor are the checks and lints of a crate with tests, which are of its harness. A value is converted to a
-string as in a string template.
-
-A library built with `panic=abort` cannot be linked into what unwinds, a test harness or a procedural macro, nor can a
-library which uses one, as `panic` changes the hash of a crate. So each of those libraries which a test harness or a
-procedural macro links is built again without `panic`, as `<target>/unwind/lib<name>.rlib`, which they link instead,
-as cargo does, while binaries link the libraries which abort. Nothing is built again without `panic=abort`.
-For `target-feature` and `remark`, a list is joined by `,`, for `llvm-args` and `passes` by spaces, and for `link-arg`
-each item is a separate option. A path, such as for `linker`, is relative to the project root, unless it is a reference.
+`codegen/<option> <value>`, which replaces it. A value is converted to a string as in a string template. For
+`target-feature` and `remark`, a list is joined by `,`, for `llvm-args` and `passes` by spaces, and for `link-arg` each
+item is a separate option. A path, such as for `linker`, is relative to the project root, unless it is a reference.
 `codegen/` is a dict of the options which are set, by name, as a crate declared there would be given them, such as
 `[opt-level: 's']`, as described for namespaces.
+
+So that the options can be set for the whole project, as with cargo, some are not given to every crate:
+
+- A procedural macro is not given `codegen/lto`, which rustc refuses for one, or `codegen/panic`, as it must unwind,
+  unless it has the attribute itself.
+- A procedural macro is for the host, where rustc loads it, so it is not given the options which describe the machine
+  the crates are for, or how they are linked for it, by `codegen/<option>`: `code-model`, `default-linker-libraries`,
+  `link-arg`, `link-self-contained`, `linker`, `linker-flavor`, `no-redzone`, `relocation-model`, `target-cpu` and
+  `target-feature`. It is given them by `codegen/<host>/<option>`, where the host is `host-target`, or its own
+  attribute. So one of them can be set for a whole project for a target without an operating system, such as
+  `codegen/relocation-model 'static'`, which a procedural macro could not be linked with.
+- A test harness is never given `panic`, as it must unwind on stable rustc, to catch each test's panic, nor are the
+  checks and lints of a crate with tests, which are of its harness.
+- A library built with `panic=abort` cannot be linked into what unwinds, a test harness or a procedural macro, nor can
+  a library which uses one, as `panic` changes the hash of a crate. So each of those libraries which a test harness or
+  a procedural macro links is built again without `panic`, as `<target>/unwind/lib<name>.rlib`, which they link
+  instead, as cargo does, while binaries link the libraries which abort. Nothing is built again without `panic=abort`.
 
 Each target has a property for each option too, `codegen/<target>/<option>`, such as
 `codegen/x86_64-unknown-linux-gnu/opt-level`, which replaces `codegen/<option>` for the crates for that target, while a
