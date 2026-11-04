@@ -952,7 +952,7 @@ mod tests {
         let dir = dir("entries");
         let cache = Cache::open(&dir).unwrap();
         let key = blake3::hash(b"key");
-        assert!(cache.manifest(&key).is_empty());
+        assert_eq!(cache.manifest(&key), Vec::<Discovery>::new());
         let discovery = |input: &str| Discovery { inputs: vec![input.into()], env: vec!["VARIABLE".into()] };
         cache.add_to_manifest(&key, discovery("a.h")).unwrap();
         cache.add_to_manifest(&key, discovery("b.h")).unwrap();

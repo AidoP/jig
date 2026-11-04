@@ -266,9 +266,13 @@ fn apply(edit: &Edit, dir: &Path) {
             let mut file = std::fs::File::options().append(true).open(dir.join(path)).unwrap();
             writeln!(file, "changed").unwrap();
         },
+        // written again unchanged, so that its time is the file system's clock, as the outputs' are, rather than the
+        // precise time now, which can be later than an output written after it within the file system's tick, which
+        // ninja from 1.12 finds is older than its input
         Edit::Touch(path) => {
-            let file = std::fs::File::options().write(true).open(dir.join(path)).unwrap();
-            file.set_modified(std::time::SystemTime::now()).unwrap();
+            let path = dir.join(path);
+            let contents = std::fs::read(&path).unwrap();
+            std::fs::write(&path, contents).unwrap();
         },
         Edit::Delete(path) => {
             let _ = std::fs::remove_file(dir.join(path));

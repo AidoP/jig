@@ -679,7 +679,9 @@ impl Project {
                 continue;
             }
             let path = dir.join(name);
-            self.depend(dir);
+            // a directory which is missing is recorded as missing, as ninja would otherwise find it out of date each
+            // time, and configure the project again endlessly, while it configures the project again once it exists
+            self.depend_on_path(&dir);
             if path.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0) {
                 return Ok(path);
             }
