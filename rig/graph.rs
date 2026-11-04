@@ -111,6 +111,10 @@ pub struct Edge {
     /// Whether the edge's outputs are checked again once it has run, so that what depends on an output which did not
     /// change is not run.
     pub restat: bool,
+    /// Whether the edge's files are stamped by their contents, rather than their time and size, so that it does not
+    /// run when a file is changed back, or written again unchanged, and what depends on its outputs does not run when
+    /// it writes them unchanged.
+    pub hashed: bool,
 }
 
 /// The lists of nodes of an edge, in the order they are stored.
@@ -128,6 +132,7 @@ struct EdgeData {
     pool: Pool,
     generator: bool,
     restat: bool,
+    hashed: bool,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
 }
@@ -236,6 +241,7 @@ impl Graph {
             pool: edge.pool,
             generator: edge.generator,
             restat: edge.restat,
+            hashed: edge.hashed,
             lists,
         });
         Ok(id)
@@ -361,6 +367,10 @@ impl<'a> EdgeRef<'a> {
     pub fn restat(&self) -> bool {
         self.data.restat
     }
+    #[must_use]
+    pub fn hashed(&self) -> bool {
+        self.data.hashed
+    }
     /// Returns the edge as it would be added to a graph.
     #[must_use]
     pub fn to_edge(&self) -> Edge {
@@ -376,6 +386,7 @@ impl<'a> EdgeRef<'a> {
             pool: self.data.pool,
             generator: self.data.generator,
             restat: self.data.restat,
+            hashed: self.data.hashed,
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {

@@ -33,6 +33,8 @@ pub struct Custom {
     /// The tags of a test, by which `jig test` chooses it, which only run without being asked for if one of them is in
     /// `test-tags`.
     pub tags: Vec<String>,
+    /// How rig finds that the files of a command have changed, in place of `change-detection`, if it is given.
+    pub change_detection: Option<String>,
 }
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
@@ -119,6 +121,7 @@ impl Project {
         let mut command: Option<Runner> = None;
         let mut default = false;
         let mut tags = Vec::new();
+        let mut change_detection = None;
         let mut install = Install::data();
         // an attribute which failed has been reported, so it is not also reported as missing
         let mut failed = false;
@@ -150,6 +153,21 @@ impl Project {
                         continue;
                     };
                     depends.extend(new);
+                },
+                "change-detection" if !test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    let value = match operand.data {
+                        Data::Str(ref value) if value == "timestamp" || value == "hash" => Some(value.clone()),
+                        _ => None,
+                    };
+                    if value.is_none() {
+                        self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
+                    }
+                    change_detection = value.or(change_detection);
                 },
                 "tag" if test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -235,6 +253,7 @@ impl Project {
             program: runner.program,
             kind,
             tags,
+            change_detection,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {

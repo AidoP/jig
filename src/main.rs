@@ -228,6 +228,13 @@ fn declare_builtins(
             "/usr/local".into(),
         ),
         (
+            project::Property::new("change-detection".into(), project::Type::String).info(
+                "how rig finds that a file has changed: `'timestamp'`, by its time and size, or `'hash'`, by its \
+                 contents too, so that what is written again unchanged builds nothing more",
+            ),
+            "timestamp".into(),
+        ),
+        (
             project::Property::new("host-target".into(), project::Type::String)
                 .info("the target triple of the machine running the build")
                 .read_only(),
@@ -358,6 +365,8 @@ enum Error {
     RigArgument(String),
     /// A value of `JIG_ENGINE` which is not an engine.
     UnknownEngine(String),
+    /// A value of `change-detection` which is not a way to detect changes.
+    ChangeDetection(String),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -421,6 +430,9 @@ impl core::fmt::Display for Error {
             Self::ProxyOutOfDate => write!(f, "not building or running the program"),
             Self::Rig(error) => write!(f, "rig: {error}"),
             Self::RigArgument(argument) => write!(f, "rig does not take {argument:?}"),
+            Self::ChangeDetection(value) => {
+                write!(f, "`change-detection` is {value:?}, rather than `'timestamp'` or `'hash'`")
+            },
             Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
         }
     }

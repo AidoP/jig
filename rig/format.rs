@@ -8,8 +8,8 @@
 //! followed by the program, its arguments as a list of strings, its environment variables as their number followed by
 //! each name and value, then its working directory and the file of its stderr, each as `0`, or `1` followed by the
 //! path, then its description, its depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console,
-//! its flags, `1` if it is a generator and `2` if it is restat, then its lists of nodes: outputs, implicit outputs,
-//! inputs, implicit inputs and order-only inputs.
+//! its flags, `1` if it is a generator, `2` if it is restat and `4` if it is hashed, then its lists of nodes: outputs,
+//! implicit outputs, inputs, implicit inputs and order-only inputs.
 
 use std::path::Path;
 
@@ -19,10 +19,11 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
+const HASHED: u32 = 4;
 
 impl Graph {
     /// Returns the graph in the format it is saved in.
@@ -60,7 +61,8 @@ impl Graph {
                 Pool::Default => 0,
                 Pool::Console => 1,
             });
-            w.u32(if edge.generator() { GENERATOR } else { 0 } | if edge.restat() { RESTAT } else { 0 });
+            let flags = [(edge.generator(), GENERATOR), (edge.restat(), RESTAT), (edge.hashed(), HASHED)];
+            w.u32(flags.into_iter().filter(|&(set, _)| set).fold(0, |flags, (_, flag)| flags | flag));
             for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
                 w.nodes(list);
             }
@@ -117,7 +119,7 @@ impl Graph {
                 _ => return Err(Error::Format("unknown pool")),
             };
             let flags = r.u32()?;
-            if flags & !(GENERATOR | RESTAT) != 0 {
+            if flags & !(GENERATOR | RESTAT | HASHED) != 0 {
                 return Err(Error::Format("unknown flags"));
             }
             let edge = Edge {
@@ -132,6 +134,7 @@ impl Graph {
                 pool,
                 generator: flags & GENERATOR != 0,
                 restat: flags & RESTAT != 0,
+                hashed: flags & HASHED != 0,
             };
             graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
@@ -282,6 +285,7 @@ mod tests {
                 pool: Pool::Console,
                 generator: true,
                 restat: true,
+                hashed: true,
                 ..Edge::default()
             })
             .unwrap();

@@ -659,11 +659,38 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ### Phase 3: hashing and early cutoff
 
-- Add BLAKE3, the stamp cache in hash mode, and the racy-timestamp rule.
-- Add the `build/change-detection` property, and its override per edge.
-- Apply early cutoff to every edge in hash mode.
-- Use critical-path priority from recorded durations.
-- Add the jobserver.
+1. **Done:** BLAKE3, hashed stamps and early cutoff.
+   - **`rig::blake3`.** A portable implementation from the spec: chunks of 1,024 bytes compressed a block at a time,
+     merged in a tree by a stack of chaining values.
+     - It is checked against 21 of the official test vectors from BLAKE3's `test_vectors.json`, at lengths across the
+       block, chunk and tree boundaries up to 100 KiB.
+     - Hashing in parts must match hashing at once.
+     - It runs at about 470 MB/s on one core; SIMD can come later if hashing ever shows in a profile.
+   - **`Stamp::Content`.** It is the mtime, size and hash, and two content stamps are the same when their hashes are,
+     by `Stamp::same`.
+     - Edges have a `hashed` flag (graph format version 3), and the state log stores content stamps (version 3).
+     - A hashed edge's inputs, outputs and discovered inputs are stamped by their contents.
+   - **The hash is reused, not read again,** while a file's time and size are those recorded. The racy rule applies
+     only to sources, which no edge produces: one modified within a tick of being stamped is hashed again, as it may
+     have been edited again within the tick. A tick is a second where the time has no fraction of one, or 10 ms
+     otherwise.
+     - Generated files aren't subject to the rule, as they are written moments before they are stamped, so that
+       every output would otherwise be read again on every no-op build.
+   - **Early cutoff.** A hashed edge's outputs are stamped before and after it runs, as a restat edge's are, and an
+     edge which would run only because they were rebuilt is checked again, and skipped if they are unchanged.
+     - A hashed edge is checked again whatever produced its inputs, since it compares their contents itself.
+   - **jig.**
+     - The builtin `change-detection` property, `'timestamp'` by default or `'hash'`, applies to every edge.
+     - A custom command's `change-detection` attribute replaces it, such as to hash the small file a generator
+       writes.
+     - It has no effect with ninja. `.jig`'s version changed with the graph's.
+   - **Tests.**
+     - Stamps reuse hashes, except for a racy source.
+     - Under a hashed edge, an unchanged rewrite and a change undone don't rebuild, and an output written unchanged
+       isn't modified.
+     - A generator which rewrites its output unchanged doesn't rebuild what follows. That test fails without hashing.
+     - An integration test checks the property, the attribute and their invalid values.
+2. Priority by critical path, from the durations in the state log.
 
 ### Phase 4: the local global cache
 

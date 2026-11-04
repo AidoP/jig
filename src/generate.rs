@@ -348,6 +348,12 @@ fn write_graph(
 ) -> Result<(), Error> {
     // the specifications of custom targets are found in the build directory, and rebased
     let build_dir = &at.build_dir;
+    // whether rig stamps the files of an edge by their contents
+    let hashed = match project.change_detection().as_str() {
+        "timestamp" => false,
+        "hash" => true,
+        other => return Err(Error::ChangeDetection(other.into())),
+    };
     // the configure tool and custom commands run from the project root, as their arguments are relative to it
     let cd = format!("cd {} &&", ninja_quote(&at.root.display().to_string()));
 
@@ -383,6 +389,7 @@ fn write_graph(
         inputs: &[&at.path(input)],
         implicit: &as_paths(&exe),
         exec: Some(&exec),
+        hashed,
         ..Default::default()
     })?;
 
@@ -466,6 +473,7 @@ fn write_graph(
             order_only: &as_paths(&at.paths(&custom.depends)),
             variables: &[("command-line", &command), ("name", &custom.name)],
             exec: Some(&exec),
+            hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
             ..Default::default()
         })?;
         // so that the outputs can be built by name
@@ -522,6 +530,7 @@ fn write_graph(
                 ("crate-env", &crate_env),
             ],
             exec: Some(&exec),
+            hashed,
             ..Default::default()
         })?;
         everything.push(output.clone());
@@ -546,6 +555,7 @@ fn write_graph(
                     ("crate-env", &crate_env),
                 ],
                 exec: Some(&exec),
+                hashed,
                 ..Default::default()
             })?;
         }
@@ -599,6 +609,7 @@ fn write_graph(
                     ("crate-env", &crate_env),
                 ],
                 exec: Some(&exec),
+                hashed,
                 ..Default::default()
             })?;
             let phony = Path::new("doc").join(name);
@@ -639,6 +650,7 @@ fn write_graph(
                     ("crate-env", &crate_env),
                 ],
                 exec: Some(&exec),
+                hashed,
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
@@ -662,6 +674,7 @@ fn write_graph(
                 ("crate-env", &crate_env),
             ],
             exec: Some(&exec),
+            hashed,
             ..Default::default()
         })?;
         graph.alias(&Path::new("check").join(&unit.label), &[&output])?;

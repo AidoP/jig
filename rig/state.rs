@@ -25,7 +25,7 @@ use crate::Error;
 use crate::stamp::Stamp;
 
 const MAGIC: &[u8; 4] = b"RIGL";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 /// The fewest records the log has before it is rewritten without those which have been replaced.
 const COMPACT_MIN: usize = 1024;
@@ -185,6 +185,12 @@ fn write_record(bytes: &mut Vec<u8>, record: &Record) {
                     contents.extend_from_slice(&mtime.to_le_bytes());
                     contents.extend_from_slice(&size.to_le_bytes());
                 },
+                Stamp::Content { mtime, size, hash } => {
+                    contents.push(2);
+                    contents.extend_from_slice(&mtime.to_le_bytes());
+                    contents.extend_from_slice(&size.to_le_bytes());
+                    contents.extend_from_slice(hash);
+                },
             }
         }
     }
@@ -247,6 +253,11 @@ fn read_record(contents: &[u8]) -> Option<Record> {
                     mtime: i64::from_le_bytes(r.take(8)?.try_into().ok()?),
                     size: u64::from_le_bytes(r.take(8)?.try_into().ok()?),
                 },
+                2 => Stamp::Content {
+                    mtime: i64::from_le_bytes(r.take(8)?.try_into().ok()?),
+                    size: u64::from_le_bytes(r.take(8)?.try_into().ok()?),
+                    hash: r.take(32)?.try_into().ok()?,
+                },
                 _ => return None,
             };
             list.push((path, stamp));
@@ -300,7 +311,11 @@ mod tests {
             action: 42,
             outputs: vec![(output.into(), Stamp::File { mtime: -3, size: 7 })],
             inputs: vec![("in".into(), Stamp::File { mtime: 1_700_000_000_000_000_000, size: 0 })],
-            discovered: vec![("header.h".into(), Stamp::Missing)],
+            discovered: vec![("header.h".into(), Stamp::Missing), ("hashed".into(), Stamp::Content {
+                mtime: 5,
+                size: 6,
+                hash: [7; 32],
+            })],
             env: vec![("SET".into(), Some(7)), ("UNSET".into(), None)],
         }
     }

@@ -119,10 +119,27 @@ pub fn declared_inputs(graph: &Graph, edge: EdgeRef) -> Vec<NodeId> {
     inputs
 }
 
-/// Returns the stamps of the inputs an edge declares, as they are when it starts, to record once it has run.
-pub fn input_stamps(graph: &Graph, edge: EdgeId, stamps: &mut Stamps) -> Vec<(String, Stamp)> {
-    let inputs = declared_inputs(graph, graph.edge(edge));
-    inputs.into_iter().map(|node| (graph.path(node).to_string(), stamps.node(node))).collect()
+/// Returns the stamps of the inputs an edge declares, as they are when it starts, to record once it has run, by their
+/// contents if it is hashed, reusing the hashes of its last record.
+pub fn input_stamps(graph: &Graph, state: &State, edge: EdgeId, stamps: &mut Stamps) -> Vec<(String, Stamp)> {
+    let data = graph.edge(edge);
+    let previous = state.get(&first_output(graph, edge));
+    let recorded = |path: &str| {
+        let record = previous?;
+        let (_, stamp) = record.inputs.iter().find(|(recorded, _)| recorded == path)?;
+        Some((stamp, record.start))
+    };
+    let inputs = declared_inputs(graph, data);
+    inputs.into_iter().map(|node| {
+        let path = graph.path(node);
+        (path.to_string(), stamps.node_as(node, data.hashed(), recorded(path)))
+    }).collect()
+}
+
+/// Returns when the stamps of an edge's outputs and discovered inputs were taken, as it finished, in milliseconds since
+/// the Unix epoch.
+fn finished(record: &Record) -> u64 {
+    record.start.saturating_add(u64::from(record.duration))
 }
 
 /// Returns the record of an edge which has run, from the stamps of its inputs when it started, and the inputs it
@@ -142,10 +159,11 @@ pub fn record(
     let mut outputs = Vec::new();
     for &output in edge.outputs().iter().chain(edge.implicit_outputs()) {
         stamps.forget(output);
-        outputs.push((graph.path(output).to_string(), stamps.node(output)));
+        outputs.push((graph.path(output).to_string(), stamps.node_as(output, edge.hashed(), None)));
     }
     let env = discovered.env.iter().map(|name| (name.clone(), stamps.env(name))).collect();
-    let discovered = discovered.inputs.iter().map(|path| (path.clone(), stamps.path(path))).collect();
+    let discovered = discovered.inputs.iter().map(|path| (path.clone(), stamps.path_as(path, edge.hashed(), None)));
+    let discovered = discovered.collect();
     let start = start.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
     Record {
         start: u64::try_from(start.as_millis()).unwrap_or(u64::MAX),
@@ -369,12 +387,13 @@ pub(crate) fn reason(
     if !edge.generator() && record.action != action_hash(edge) {
         return Some(Reason::CommandChanged);
     }
+    let hashed = edge.hashed();
     for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
-        let now = stamps.node(output);
+        let now = stamps.node_as(output, hashed, Some((stamp, finished(record))));
         if !now.exists() {
             return Some(Reason::OutputMissing(path.clone()));
         }
-        if now != *stamp {
+        if !now.same(*stamp) {
             return Some(Reason::OutputModified(path.clone()));
         }
     }
@@ -386,12 +405,12 @@ pub(crate) fn reason(
         return Some(Reason::InputRebuilt(graph.path(input).into()));
     }
     for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
-        if stamps.node(node) != *stamp {
+        if !stamps.node_as(node, hashed, Some((stamp, record.start))).same(*stamp) {
             return Some(Reason::InputChanged(path.clone()));
         }
     }
     for (path, stamp) in &record.discovered {
-        if stamps.path(path) != *stamp {
+        if !stamps.path_as(path, hashed, Some((stamp, finished(record)))).same(*stamp) {
             return Some(Reason::DiscoveredChanged(path.clone()));
         }
     }
@@ -440,7 +459,7 @@ mod tests {
             let plan = plan(&self.graph, &self.state, &mut stamps, targets).unwrap();
             let mut ran = Vec::new();
             for (edge, _) in plan.edges {
-                let inputs = input_stamps(&self.graph, edge, &mut stamps);
+                let inputs = input_stamps(&self.graph, &self.state, edge, &mut stamps);
                 let data = self.graph.edge(edge);
                 for &output in data.outputs().iter().chain(data.implicit_outputs()) {
                     write(&self.dir.join(self.graph.path(output)), &format!("built {}", ran.len()));
@@ -591,6 +610,27 @@ mod tests {
         // an alias without inputs, which is not a file, is always out of date
         build.run(&["forced"], &[]);
         assert_eq!(build.plan(&["forced"]).unwrap(), [("forced".into(), Reason::InputRebuilt("force".into()))]);
+    }
+
+    #[test]
+    fn hashed_edges_compare_contents() {
+        let graph = cc().hashed().edge("cc", &["a.o"], &["a.c"]).finish();
+        let mut build = Build::new("hashed", graph, &["a.c"]);
+        build.run(&["a.o"], &[]);
+        // written again unchanged, with a new time, which only changes its time
+        let later = SystemTime::now() + Duration::from_secs(5);
+        build.write("a.c", "source");
+        std::fs::File::options().write(true).open(build.dir.join("a.c")).unwrap().set_modified(later).unwrap();
+        assert_eq!(build.plan(&["a.o"]).unwrap(), []);
+        // changed, then changed back, which is as it was recorded
+        build.write("a.c", "changed");
+        assert_eq!(build.plan(&["a.o"]).unwrap(), [("a.o".into(), Reason::InputChanged("a.c".into()))]);
+        build.write("a.c", "source");
+        assert_eq!(build.plan(&["a.o"]).unwrap(), []);
+        // an output written again unchanged is not taken as modified
+        let output = std::fs::read(build.dir.join("a.o")).unwrap();
+        std::fs::write(build.dir.join("a.o"), output).unwrap();
+        assert_eq!(build.plan(&["a.o"]).unwrap(), []);
     }
 
     #[test]

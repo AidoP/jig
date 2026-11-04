@@ -20,6 +20,9 @@ pub enum Stamp {
         mtime: i64,
         size: u64,
     },
+    /// A file stamped by its contents, as an edge which is hashed stamps its files, with the time and size it had, by
+    /// which its hash is reused while they are the same.
+    Content { mtime: i64, size: u64, hash: [u8; 32] },
 }
 impl Stamp {
     /// Returns the stamp of a file as it is now, following symbolic links, as ninja does.
@@ -45,6 +48,29 @@ impl Stamp {
     pub fn exists(self) -> bool {
         self != Self::Missing
     }
+    /// Whether a file has not changed between two stamps: by its contents if both are of them, or otherwise by its
+    /// time and size, while a stamp of one kind differs from a stamp of the other.
+    #[must_use]
+    pub fn same(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Content { hash, .. }, Self::Content { hash: other, .. }) => hash == other,
+            (lhs, rhs) => lhs == rhs,
+        }
+    }
+}
+
+/// The granularity of the modification time of a file, beyond which a change to a file after it was stamped changes
+/// its time: a second if the time has no fraction of one, as on file systems with times in seconds, or otherwise the
+/// kernel's clock, which is coarser than its nanoseconds.
+fn tick(mtime: i64) -> i64 {
+    if mtime % 1_000_000_000 == 0 { 1_000_000_000 } else { 10_000_000 }
+}
+
+/// Whether a file which was stamped at a time, in milliseconds since the Unix epoch, may have changed again within the
+/// same tick of its time since then, so that its time and size alone do not show it, as git's racy files.
+fn racy(mtime: i64, stamped: u64) -> bool {
+    let stamped = i64::try_from(stamped).unwrap_or(i64::MAX / 1_000_000).saturating_mul(1_000_000);
+    mtime >= stamped.saturating_sub(tick(mtime))
 }
 
 /// The stamps of files, each found once, of the nodes of a graph and of other paths, relative to a directory, and of
@@ -56,12 +82,15 @@ pub struct Stamps<'a> {
     paths: HashMap<String, Stamp>,
     /// The variables the commands are given, beside those they inherit.
     env: Vec<(String, String)>,
+    /// The stamps of the contents of files, by path, each found once.
+    contents: HashMap<String, Stamp>,
 }
 impl<'a> Stamps<'a> {
     /// The stamps of the files of a graph, whose paths are relative to `dir`.
     #[must_use]
     pub fn new(graph: &'a Graph, dir: &Path) -> Self {
-        Self { dir: dir.into(), graph, nodes: vec![None; graph.nodes()], paths: HashMap::new(), env: Vec::new() }
+        let nodes = vec![None; graph.nodes()];
+        Self { dir: dir.into(), graph, nodes, paths: HashMap::new(), env: Vec::new(), contents: HashMap::new() }
     }
     /// Stamp environment variables as they are for commands which are given `env` beside what they inherit.
     #[must_use]
@@ -122,6 +151,59 @@ impl<'a> Stamps<'a> {
     /// Forget the stamp of a node, such as an output once its edge has run, so that it is found again.
     pub fn forget(&mut self, node: NodeId) {
         self.nodes[node.0 as usize] = None;
+        self.contents.remove(self.graph.path(node));
+    }
+    /// Returns the stamp of a node as an edge compares it: its time and size, or with `hashed`, its contents too.
+    ///
+    /// The hash of a stamp which was `recorded`, with the time it was stamped in milliseconds since the Unix epoch, is
+    /// reused while the file's time and size are those it had then, so that it is not read again. That is, unless the
+    /// file is a source, which no edge produces, which changed within a tick of its time of being stamped, as a person
+    /// may edit it again within that tick, which its time would not show.
+    pub fn node_as(&mut self, node: NodeId, hashed: bool, recorded: Option<(&Stamp, u64)>) -> Stamp {
+        let stamp = self.node(node);
+        if !hashed {
+            return stamp;
+        }
+        let source = self.graph.producer(node).is_none();
+        self.content(self.graph.path(node).to_string(), stamp, source, recorded)
+    }
+    /// Returns the stamp of a path as an edge compares it, as [`Self::node_as`] does, which is a source unless it is a
+    /// node which an edge produces.
+    pub fn path_as(&mut self, path: &str, hashed: bool, recorded: Option<(&Stamp, u64)>) -> Stamp {
+        if let Some(node) = self.graph.node(path) {
+            return self.node_as(node, hashed, recorded);
+        }
+        let stamp = self.path(path);
+        if !hashed {
+            return stamp;
+        }
+        self.content(path.to_string(), stamp, true, recorded)
+    }
+    /// Returns the stamp of the contents of a file, whose stamp by time and size is `stamp`.
+    fn content(&mut self, path: String, stamp: Stamp, source: bool, recorded: Option<(&Stamp, u64)>) -> Stamp {
+        let Stamp::File { mtime, size } = stamp else {
+            return stamp;
+        };
+        let unchanged =
+            |stamp: &Stamp| matches!(*stamp, Stamp::Content { mtime: m, size: s, .. } if (m, s) == (mtime, size));
+        if let Some(&stamp) = self.contents.get(&path).filter(|stamp| unchanged(stamp)) {
+            return stamp;
+        }
+        let reused = recorded.and_then(|(stamp, stamped)| match *stamp {
+            Stamp::Content { hash, .. } if unchanged(stamp) && !(source && racy(mtime, stamped)) => Some(hash),
+            _ => None,
+        });
+        let hash = match reused {
+            Some(hash) => hash,
+            None => match crate::blake3::hash_file(&self.dir.join(&path)) {
+                Ok(hash) => hash,
+                // a file which cannot be read is taken as missing, as `Stamp::of` takes it
+                Err(_) => return Stamp::Missing,
+            },
+        };
+        let stamp = Stamp::Content { mtime, size, hash };
+        self.contents.insert(path, stamp);
+        stamp
     }
 }
 
@@ -146,6 +228,33 @@ pub fn stamps_of(paths: &[&Path]) -> Vec<Stamp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reuses_hashes_unless_a_source_is_racy() {
+        let dir = std::env::temp_dir().join(format!("rig-stamps-hash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut graph = Graph::new();
+        let source = graph.file("source");
+        let path = dir.join("source");
+        std::fs::write(&path, "one").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let hashed = Stamps::new(&graph, &dir).node_as(source, true, None);
+        let Stamp::Content { hash, .. } = hashed else { panic!("{hashed:?}") };
+        assert_eq!(hash, crate::blake3::hash(b"one"));
+        // changed with the same time and size, which only reading it would show, so the recorded hash is reused
+        std::fs::write(&path, "two").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let later = 2_000_000_000;
+        assert_eq!(Stamps::new(&graph, &dir).node_as(source, true, Some((&hashed, later))), hashed);
+        // unless it was stamped within a tick of its time, when it is read again
+        let racy = 1_000_000_000;
+        let again = Stamps::new(&graph, &dir).node_as(source, true, Some((&hashed, racy)));
+        assert!(!again.same(hashed));
+        // and without a recorded hash, as without hashing, it is stamped by its time and size
+        assert!(matches!(Stamps::new(&graph, &dir).node_as(source, false, None), Stamp::File { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn stamps_together_as_one_by_one() {

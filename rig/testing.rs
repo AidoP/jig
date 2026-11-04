@@ -6,14 +6,20 @@ use crate::ninja::{Build, Manifest};
 
 /// Returns a graph to build, with its statements added in turn.
 pub(crate) fn graph() -> Graphs {
-    Graphs(Manifest::new())
+    Graphs(Manifest::new(), false)
 }
 
-pub(crate) struct Graphs(Manifest);
+/// The statements of a graph, and whether the edges added are hashed.
+pub(crate) struct Graphs(Manifest, bool);
 
 impl Graphs {
     pub(crate) fn variable(mut self, name: &str, value: &str) -> Self {
         self.0.variable(name, value).unwrap();
+        self
+    }
+    /// Stamp the files of the edges added from now on by their contents.
+    pub(crate) fn hashed(mut self) -> Self {
+        self.1 = true;
         self
     }
     pub(crate) fn rule(mut self, name: &str, bindings: &[(&str, &str)]) -> Self {
@@ -55,6 +61,7 @@ impl Graphs {
             order_only: &order_only,
             bindings,
             action: None,
+            hashed: self.1,
         };
         self.0.build(&build)
     }

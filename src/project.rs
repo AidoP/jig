@@ -294,6 +294,14 @@ impl Project {
         self.values[value].data.coerce_string()
     }
     /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.
+    /// Returns `change-detection`, the way rig finds that the files of an edge have changed, which is `timestamp` or
+    /// `hash` if it is valid.
+    pub fn change_detection(&self) -> String {
+        let Some(&value) = self.values_idx.get("change-detection") else {
+            return "timestamp".into();
+        };
+        self.values[value].data.coerce_string()
+    }
     /// Returns the tags of the tests which `jig test` runs without being asked for them, beside the tests without tags,
     /// from `test-tags`.
     pub fn test_tags(&self) -> Vec<String> {
