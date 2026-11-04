@@ -382,11 +382,14 @@ impl Run<'_, '_> {
             EdgeKind::Alias => unreachable!("an alias is not run"),
         }
     }
-    /// Whether an edge which depends on restat edges, none of which changed their outputs, is up to date without them.
+    /// Whether an edge which would run only as an input is built again is up to date after all, as a restat edge it
+    /// depends on left its outputs alone.
+    ///
+    /// It is checked again once the edges it depends on have run, if one of them left its outputs alone, by the inputs
+    /// which make it run, so that another which it depends on only through an order-only input may have changed.
     fn restat_clean(&mut self, index: usize) -> bool {
-        let deps = &self.deps[index];
         let unchanged = |dep: &usize| self.status[*dep] == Status::Done { changed: false };
-        if deps.is_empty() || !deps.iter().all(unchanged) || !matches!(self.reasons[index], Reason::InputRebuilt(_)) {
+        if !self.deps[index].iter().any(unchanged) || !matches!(self.reasons[index], Reason::InputRebuilt(_)) {
             return false;
         }
         let (graph, index_of, status) = (self.graph, &self.index, &self.status);
@@ -773,6 +776,26 @@ mod tests {
             .edge("cc", &["a.o"], &[]);
         let mut build = Build::new("bad-depfile", graph.finish(), &[]);
         assert_eq!(build.build(&[]).0.failed, 1);
+    }
+
+    #[test]
+    fn restat_skips_past_order_only_inputs() {
+        // `out` depends on `gen.h`, which a restat edge leaves alone, and on `first` only to be built after it, which
+        // does change, so `out` is up to date, as the differential tests found
+        let graph = cat()
+            .rule("gen", &[
+                ("command", "cat $in > $out.tmp && (cmp -s $out.tmp $out || mv $out.tmp $out) && rm -f $out.tmp"),
+                ("restat", "1"),
+            ])
+            .edge("cat", &["first"], &["a"])
+            .edge("gen", &["gen.h"], &["gen.in", "|", "first"])
+            .edge("cat", &["out"], &["gen.h", "||", "first"]);
+        let mut build = Build::new("restat-order-only", graph.finish(), &[("a", "a\n"), ("gen.in", "same\n")]);
+        assert_eq!(build.ran(&[]), ["first", "gen.h", "out"]);
+        std::fs::remove_file(build.dir.join("first")).unwrap();
+        let (report, finished) = build.build(&[]);
+        assert_eq!(finished.into_iter().map(|(output, _)| output).collect::<Vec<_>>(), ["first", "gen.h"]);
+        assert_eq!(report.restat_skipped, 1);
     }
 
     #[test]

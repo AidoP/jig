@@ -6,6 +6,8 @@ mod builder;
 mod check;
 mod configured;
 mod database;
+#[cfg(test)]
+mod differential;
 mod generate;
 mod graph;
 mod install;

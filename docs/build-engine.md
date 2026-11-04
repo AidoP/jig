@@ -515,9 +515,34 @@ implementation of that trait, so `generate.rs` doesn't change.
      they check that nothing ran, as no `CLIPPY` line is shown. Under rig they look in rig's log instead of using
      `ninja -t deps`. With `JIG_ENGINE=rig`, all 160 integration tests
      and the unit and perf tests pass, and CI runs the suite a second time with it.
-6. **Differential tests.** Generate random graphs and sequences of edits through jig's `Graph` trait, which writes
-   both `build.ninja` and rig's graph, run both engines on them, and compare which edges run. The only allowed
-   differences are the cases where `rig` rebuilds on purpose because a stamp went backwards.
+6. **Done:** differential tests, `src/differential.rs`, in jig's unit tests.
+   - **What a seed does.** It generates a random graph and writes it through jig's `Graph` trait, as `build.ninja` in
+     one directory and rig's graph in another, with the same sources.
+     - The graph can have explicit, implicit and order-only inputs, implicit outputs, output subdirectories, and
+       aliases.
+     - It can have edges that discover headers through a gcc depfile, and restat edges that leave their output alone
+       when it wouldn't change.
+   - **What it checks.** The seed builds with ninja (`-j4 -k0`) and with rig, then makes 12 random edits, building
+     with both after each one.
+     - The edits change a source, touch one without changing it, delete an output, or change nothing. Some builds ask
+       for one target rather than the defaults.
+     - After each build, both engines must have run the same edges, with the same outcome, and every output must have
+       the same contents.
+   - **Running it.** 16 seeds run by default, 8 at a time. `JIG_DIFFERENTIAL_SEEDS` sets how many, and
+     `JIG_DIFFERENTIAL_SEED` runs one, showing each step, what each engine ran, and ninja's output. The test is
+     skipped where ninja isn't installed.
+   - **It found a bug in rig's restat handling, now fixed with a regression test.** An edge waiting on a restat edge
+     that left its output alone was only checked again if every edge it waited on had left its outputs alone. It
+     also counted an edge it only depended on through an order-only input, which can't make it run. It is now checked
+     again whenever one of them left its outputs alone.
+   - **It found a ninja behaviour that rig doesn't copy.** A restat edge with an alias as an input, which left its
+     output alone, is run again by ninja on the next build, though nothing it depends on changed. ninja records the
+     newest of the edge's inputs, not counting the alias's own inputs. rig runs nothing.
+     - The generator doesn't give restat edges alias inputs, so the comparison stays exact.
+     - The other cases left out are those where rig rebuilds on purpose and ninja doesn't: a source whose time goes
+       back, or an output changed by hand.
+   - **Checked.** 400 seeds pass, three runs in a row. Breaking rig on purpose, so that it ignored implicit inputs,
+     made the first three default seeds fail.
 7. Environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and `PATH`,
    recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
    reconfigure stamp, after which `env()` stops being an error.
