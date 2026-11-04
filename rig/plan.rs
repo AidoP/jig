@@ -171,6 +171,9 @@ pub fn plan<'g>(graph: &'g Graph, state: &State, stamps: &mut Stamps<'g>, target
         let nodes = targets.iter().map(|&path| graph.node(path).ok_or_else(|| Error::UnknownTarget(path.into())));
         nodes.collect::<Result<_, _>>()?
     };
+    // the files the plan may need are stamped together first
+    let (nodes, paths) = reachable(graph, state, &targets);
+    stamps.prefetch(&nodes, &paths.iter().map(String::as_str).collect::<Vec<_>>());
     let status = vec![Status::Unvisited; graph.edges().len()];
     let mut planner = Planner { graph, state, stamps, status, plan: Plan::default() };
     for target in targets {
@@ -181,6 +184,37 @@ pub fn plan<'g>(graph: &'g Graph, state: &State, stamps: &mut Stamps<'g>, target
         }
     }
     Ok(planner.plan)
+}
+
+/// Returns the nodes which building targets may stamp: the targets, and the outputs and inputs of the edges which
+/// produce them, and so on, and the paths which those edges discovered when they last ran which are not nodes.
+fn reachable(graph: &Graph, state: &State, targets: &[NodeId]) -> (Vec<NodeId>, Vec<String>) {
+    let mut seen = vec![false; graph.nodes()];
+    let mut visited = vec![false; graph.edges().len()];
+    let (mut nodes, mut paths) = (Vec::new(), Vec::new());
+    let mut stack = targets.to_vec();
+    while let Some(node) = stack.pop() {
+        if std::mem::replace(&mut seen[node.0 as usize], true) {
+            continue;
+        }
+        nodes.push(node);
+        let Some(edge) = graph.producer(node) else {
+            continue;
+        };
+        if std::mem::replace(&mut visited[edge.0 as usize], true) {
+            continue;
+        }
+        let data = graph.edge(edge);
+        let lists = [data.outputs(), data.implicit_outputs(), data.inputs(), data.implicit(), data.order_only()];
+        stack.extend(lists.into_iter().flatten());
+        for (path, _) in state.get(&first_output(graph, edge)).into_iter().flat_map(|record| &record.discovered) {
+            match graph.node(path) {
+                Some(node) => stack.push(node),
+                None => paths.push(path.clone()),
+            }
+        }
+    }
+    (nodes, paths)
 }
 
 struct Planner<'g, 's, 'b> {
