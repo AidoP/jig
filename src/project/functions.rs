@@ -299,19 +299,15 @@ impl Project {
                 Data::Bool(if name == "starts-with" { string.starts_with(&affix) } else { string.ends_with(&affix) })
             },
             _ => {
-                self.impure("env", span);
                 let variable = arguments.next()?;
                 let variable_span = variable.span;
                 let variable = self.str_operand(variable)?;
-                match std::env::var(&variable) {
-                    Ok(value) => Data::Str(value),
-                    Err(error) => {
+                match self.read_env(&variable).map(std::ffi::OsString::into_string) {
+                    Some(Ok(value)) => Data::Str(value),
+                    value => {
                         self.diagnostics.push(Diagnostic {
                             span: Some(variable_span),
-                            message: Message::EnvironmentVariable {
-                                name: variable,
-                                present: matches!(error, std::env::VarError::NotUnicode(_)),
-                            },
+                            message: Message::EnvironmentVariable { name: variable, present: value.is_some() },
                             severity: Severity::Error,
                         });
                         return None;
@@ -676,7 +672,7 @@ impl Project {
         if name.is_empty() || name.contains('/') {
             return Err(Message::InvalidProgramName(name.into()));
         }
-        let search = std::env::var_os("PATH").unwrap_or_default();
+        let search = self.read_env("PATH").unwrap_or_default();
         for dir in std::env::split_paths(&search) {
             // an empty entry means the working directory, which is not a reliable place to find a program
             if dir.as_os_str().is_empty() {
@@ -700,6 +696,16 @@ impl Project {
         } else if !self.missing.iter().any(|missing| missing == path) {
             self.missing.push(path.to_path_buf());
         }
+    }
+    /// Read an environment variable, which the configuration then depends on, so that it is generated again when the
+    /// variable changes, or is set or unset.
+    pub(super) fn read_env(&mut self, name: &str) -> Option<std::ffi::OsString> {
+        use std::os::unix::ffi::OsStrExt;
+        let value = std::env::var_os(name);
+        if !self.env.iter().any(|(read, _)| read == name) {
+            self.env.push((name.into(), value.as_ref().map(|value| rig::fnv1a(value.as_bytes()))));
+        }
+        value
     }
     /// Add a file which the configuration depends on, so that it is regenerated when the file changes.
     pub(super) fn depend(&mut self, path: PathBuf) {

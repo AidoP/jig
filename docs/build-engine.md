@@ -211,8 +211,8 @@ variable rebuilds nothing. jig works around this in several places, and in other
 - **Variables jig sets.** A crate's `env` attribute and the toolchain's `RUSTUP_TOOLCHAIN` are tracked only because
   they're written into the command string, so a change to the command rebuilds the edge.
 
-In `rig`, an environment variable is a kind of input node, `Env(name)`. Its stamp is a hash of its value, or a marker
-that it is unset. It takes part in change detection like a file:
+In `rig`, an environment variable is an input of an edge, stamped with a hash of its value, or as unset. It takes part
+in change detection like a file:
 
 1. **Declared variables.** These are the variables an action sets: a crate's `env`, the toolchain, and `crate-env`.
    They're part of the action, so they're in the action hash. With argument-vector actions (phase 2), they're no
@@ -220,13 +220,16 @@ that it is unset. It takes part in change detection like a file:
 2. **Discovered variables.** The depfile parser reads rustc's `env-dep` lines, and records each variable as an input
    of the edge alongside the files it lists. A crate that uses `env!("FOO")` rebuilds when `FOO` changes, as it does
    with cargo.
+   - The value stamped is the one rig's commands see: the build's `Options::env`, or else rig's own environment. That
+     is not the value in the dep-info, which a command may have set itself. A crate's `env` is set in its command,
+     which is already in the action hash; comparing against the dep-info's value would rebuild it every time.
 3. **The configuration's variables.**
-   - The configure edge records each variable that `env()` reads, and `PATH` whenever it is searched.
-   - These are stored in `.jig` beside the missing paths and passed to the engine as inputs of the generator edge.
-   - When one of them changes, the project is reconfigured, so `env()` no longer needs to be an error. It becomes as
-     pure as reading a file, and `diagnostic/impure` can stop covering it.
-   - With the ninja backend these variables can still be recorded, and `Configured::locate` can compare them, touching
-     `reconfigure.stamp` as it does for missing paths. That brings the benefit forward to phase 1.
+   - Evaluating the configuration records each variable that `env()` reads, set or not, and `PATH` whenever `which`
+     searches it.
+   - They are stored in `.jig` beside the missing paths, as names and hashes of their values.
+   - `Configured::locate` compares them with the environment, and touches `reconfigure.stamp` when one has changed, as
+     it does when a missing path appears. Both engines then regenerate the configuration.
+   - `env()` is therefore no longer impure, and `diagnostic/impure` now covers only `run()`.
 4. **Variables a command passes through.** `custom` and `test` get an attribute that declares which inherited
    variables the command reads, such as `pass-env 'CC' 'CFLAGS'`. Their values become inputs.
 5. **Hermetic environments.** An option, required for cacheable and remote actions, runs an action with only its
@@ -239,10 +242,9 @@ that it is unset. It takes part in change detection like a file:
      added, the engine resolves each action's program when the graph is loaded. It records the resolved path, and in
      hash mode the program's contents. The program, not `PATH`, is the input.
 
-Tracked variables are shown by `jig build --explain`, which reports why each edge is dirty, such as "`FOO` changed
-from `a` to `b`". The values are kept in the state log in plain text, so the log must stay inside the build directory.
-Variables whose names suggest a secret (`*_TOKEN`, `*_KEY`, `*_PASSWORD`) are stored only as hashes, and are never
-sent to a cache or worker unless the action declares them explicitly.
+Only a hash of each value is kept, in rig's state log and in `.jig`, never the value, which may be a secret. A dry run
+(`jig build -n` with rig) names a variable that changed, such as `environment variable "FOO" has changed`, but not its
+value. A variable is never sent to a cache or worker unless the action declares it.
 
 ### Scheduling and execution
 
@@ -543,9 +545,26 @@ implementation of that trait, so `generate.rs` doesn't change.
        back, or an output changed by hand.
    - **Checked.** 400 seeds pass, three runs in a row. Breaking rig on purpose, so that it ignored implicit inputs,
      made the first three default seeds fail.
-7. Environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and `PATH`,
-   recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
-   reconfigure stamp, after which `env()` stops being an error.
+7. **Done:** environment variables as inputs. See [Environment variables](#environment-variables) for the design.
+   - **rig.**
+     - `depfile::parse` returns the names on rustc's `# env-dep:` lines beside the inputs.
+     - Each record in the state log keeps a hash of each such variable's value, or that it was unset. The log format
+       is now version 2.
+     - `Stamps::env` stamps a variable as commands see it, through `Stamps::with_env`.
+     - A change is `Reason::EnvChanged`.
+     - `rig::fnv1a` is public, so that jig hashes values the same way.
+   - **jig.**
+     - `env()` and `which`'s search of `PATH` record the variable in the project.
+     - `.jig` (database version 13) stores the names and hashes, and `Configured::locate` touches the reconfigure
+       stamp when one differs, for either engine.
+     - `env()` is no longer impure.
+   - **Tests.**
+     - A unit test in rig rebuilds when a variable listed in a depfile is set, changed or unset.
+     - Integration tests regenerate the configuration when a variable `env()` read changes, is unset, or when `PATH`
+       changes.
+     - Under rig, `jig run` rebuilds a crate whose `env!` variable changed, and nothing else. It fails if rig's
+       variable check is disabled.
+     - `impure_functions` now uses `run()`, the remaining impure function.
 8. Performance tests in `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
 
 ### Phase 2: make the engine the default

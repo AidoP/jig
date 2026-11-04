@@ -52,6 +52,9 @@ pub struct Project {
     pub dependencies: Vec<PathBuf>,
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
+    /// Environment variables which expressions read, each with a hash of its value, or `None` if it was not set, so
+    /// that the configuration is generated again when one changes.
+    pub env: Vec<(String, Option<u64>)>,
     files_idx: HashMap<FileId, usize>,
     /// The names given to `defined` and `select` which had not been declared, which must be by the end.
     later_declared: Vec<(String, Span)>,
@@ -108,6 +111,7 @@ impl Project {
             files: Vec::new(),
             dependencies: Vec::new(),
             missing: Vec::new(),
+            env: Vec::new(),
             files_idx: HashMap::new(),
             later_declared: Vec::new(),
             clippy_lints: std::collections::BTreeSet::default(),

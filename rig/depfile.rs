@@ -2,18 +2,33 @@
 //!
 //! A depfile is rules of the form `<target> ...: <input> ...`, where a `\` before a line break continues the line, a
 //! `\` escapes a space, `#` or `\`, and `$$` is `$`. The inputs of every rule are taken, as ninja takes them. Lines
-//! which begin with `#`, such as the `# env-dep:` lines rustc writes, are comments.
+//! which begin with `#` are comments, except for the `# env-dep:<name>=<value>` or `# env-dep:<name>` lines rustc
+//! writes for the environment variables `env!` and `option_env!` read, whose names are taken.
 
-/// Returns the inputs a depfile lists, each once, in the order they are first listed.
+/// What a depfile lists: the inputs a command discovered, and the environment variables it read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Discovered {
+    pub inputs: Vec<String>,
+    pub env: Vec<String>,
+}
+
+/// Returns what a depfile lists, each input and variable once, in the order they are first listed.
 ///
 /// # Errors
 ///
 /// If a rule has no `:`, or has a second one.
-pub fn parse(text: &str) -> Result<Vec<String>, String> {
+pub fn parse(text: &str) -> Result<Discovered, String> {
     let mut inputs: Vec<String> = Vec::new();
+    let mut env: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for line in logical_lines(text) {
-        if line.trim_start().starts_with('#') {
+        if let Some(comment) = line.trim_start().strip_prefix('#') {
+            if let Some(variable) = comment.trim_start().strip_prefix("env-dep:") {
+                let name = variable.split_once('=').map_or(variable, |(name, _)| name).trim_end();
+                if !name.is_empty() && !env.iter().any(|known| known == name) {
+                    env.push(name.into());
+                }
+            }
             continue;
         }
         let words = words(&line);
@@ -33,7 +48,7 @@ pub fn parse(text: &str) -> Result<Vec<String>, String> {
             }
         }
     }
-    Ok(inputs)
+    Ok(Discovered { inputs, env })
 }
 
 /// Returns the lines of a depfile, where a `\` before a line break continues the line.
@@ -90,29 +105,31 @@ fn words(line: &str) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{Discovered, parse};
 
     #[test]
     fn takes_the_inputs() {
         let text = "out.o: a.c b.h \\\n  c.h\nout.o: d.h a.c\n";
-        assert_eq!(parse(text).unwrap(), ["a.c", "b.h", "c.h", "d.h"]);
-        assert_eq!(parse("out: \n").unwrap(), Vec::<String>::new());
-        assert_eq!(parse("").unwrap(), Vec::<String>::new());
+        assert_eq!(parse(text).unwrap().inputs, ["a.c", "b.h", "c.h", "d.h"]);
+        assert_eq!(parse("out: \n").unwrap(), Discovered::default());
+        assert_eq!(parse("").unwrap(), Discovered::default());
         // several targets, and no line break at the end
-        assert_eq!(parse("a b: c").unwrap(), ["c"]);
+        assert_eq!(parse("a b: c").unwrap().inputs, ["c"]);
     }
 
     #[test]
     fn unescapes_paths() {
         let text = "build.ninja: Jig sub/data\\ dir/VERSION a\\#b c$$d e\\\\ f\r\n";
-        assert_eq!(parse(text).unwrap(), ["Jig", "sub/data dir/VERSION", "a#b", "c$d", "e\\", "f"]);
+        assert_eq!(parse(text).unwrap().inputs, ["Jig", "sub/data dir/VERSION", "a#b", "c$d", "e\\", "f"]);
     }
 
     #[test]
-    fn skips_comments() {
-        // as rustc writes, with the variables `env!` read
-        let text = "lib.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:FOO=bar\n";
-        assert_eq!(parse(text).unwrap(), ["src/lib.rs"]);
+    fn takes_the_variables_rustc_lists() {
+        // as rustc writes, with the variables `env!` and `option_env!` read, which are set or not
+        let text = "lib.rlib: src/lib.rs\n\nsrc/lib.rs:\n\n# env-dep:FOO=bar=baz\n# env-dep:UNSET\n# a comment\n# env-dep:FOO\n";
+        let discovered = parse(text).unwrap();
+        assert_eq!(discovered.inputs, ["src/lib.rs"]);
+        assert_eq!(discovered.env, ["FOO", "UNSET"]);
     }
 
     #[test]

@@ -1251,29 +1251,29 @@ set a try(upper('unclosed'
 fn impure_functions() {
     let project = Project::new("impure", &[("Jig", "\
 declare a
-set a env('PATH')
+set a run('echo', 'a')
 @if run('true') == ''
 custom c
     command 'echo' run('echo', 'x')
-log note try(env('PATH'), 'fallback')
+log note try(run('echo', 'y'), 'fallback')
 @if false
 log note 'skipped'
-@else-if env('PATH') != ''
+@else-if run('echo', 'z') != ''
 log note 'else'
 ")]);
     project.configure().failed()
         // the call is reported, with a suggestion to allow it for the statement
         .stderr("\
-error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes
+error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes
  --> Jig:2:7
   |
-2 | set a env('PATH')
-  |       ^^^^^^^^^^^
+2 | set a run('echo', 'a')
+  |       ^^^^^^^^^^^^^^^^
 suggestion: allow it for the statement with `@with`
  --> Jig:2:1
   |
 2 + @with diagnostic/impure as 'allow'
-2 | set a env('PATH')
+2 | set a run('echo', 'a')
 ")
         // in a meta-statement, the suggestion is before the meta-statement
         .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:3:5")
@@ -1282,10 +1282,10 @@ suggestion: allow it for the statement with `@with`
         .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:5:20")
         .stderr("suggestion: allow it for the statement with `@with`\n --> Jig:4:1")
         // `try` does not lower it, as evaluating it did not fail
-        .stderr("error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes\n --> Jig:6:14")
-        .stderr("note: /")
+        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:6:14")
+        .stderr("note: y")
         // `@with` cannot be before `@else-if`, so there is no suggestion
-        .stderr("error[impure]: function \"env\" is impure, as the build is not reconfigured when its value changes\n --> Jig:9:10\n  |\n9 | @else-if env('PATH') != ''\n  |          ^^^^^^^^^^^\nnote: else")
+        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:9:10\n  |\n9 | @else-if run('echo', 'z') != ''\n  |          ^^^^^^^^^^^^^^^^\nnote: else")
         .stderr("configuration failed with 5 errors");
 }
 
@@ -1294,7 +1294,7 @@ fn impure_functions_allowed() {
     let project = Project::new("impure-allowed", &[
         ("Jig", "\
 @with diagnostic/impure as 'allow'
-log note 'home is {env('HOME')}'
+log note 'home is {run('echo', env('HOME'))}'
 @with diagnostic/impure as 'warning'
 use 'sub'
 log note run('echo', 'again')
@@ -1313,6 +1313,74 @@ log note run('echo', 'again')
         .stderr("configuration failed with 1 error, 1 warning");
     // only the calls outside the first `@with` are reported
     assert_eq!(output.stderr.matches("[impure]").count(), 2, "{}", output.stderr);
+}
+
+#[test]
+fn environment_variables_reconfigure() {
+    // the variables the configuration reads, set or not, are recorded, and once one changes, building regenerates
+    // `build.ninja` first, with either engine
+    let jig = "log note 'value is {try(env('JIG_TEST_VALUE'), 'unset')}'\n";
+    let project = Project::new("env-reconfigure", &[("Jig", jig)]);
+    project.configure_with(&[("JIG_TEST_VALUE", "one")]).ok().stderr("note: value is one\n");
+    let build = |value: Option<&str>| {
+        let mut command = Command::new(configure_path());
+        command.arg("build").current_dir(&project.dir);
+        match value {
+            Some(value) => command.env("JIG_TEST_VALUE", value),
+            None => command.env_remove("JIG_TEST_VALUE"),
+        };
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
+    };
+    // ninja regenerates it the first time, as it has not recorded how it was made
+    build(Some("one"));
+    assert!(!build(Some("one")).contains("CONFIGURE"));
+    let output = build(Some("two"));
+    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, "note: value is two");
+    assert!(!build(Some("two")).contains("CONFIGURE"));
+    assert_contains(&build(None), "note: value is unset");
+    // and `PATH`, which `which` searches
+    let project = Project::new("path-reconfigure", &[("Jig", "log note which('sh')\n")]);
+    project.configure().ok();
+    let build = |path: &str| {
+        let mut command = Command::new(configure_path());
+        let output = command.arg("build").env("PATH", path).current_dir(&project.dir).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let path = std::env::var("PATH").unwrap();
+    build(&path);
+    assert!(!build(&path).contains("CONFIGURE"));
+    assert_contains(&build(&format!("{path}:/nonexistent")), "CONFIGURE build.ninja");
+}
+
+#[test]
+fn rig_rebuilds_when_a_crate_variable_changes() {
+    // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info
+    let project = Project::new("rig-env", &[
+        ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n"),
+        ("app.rs", "fn main() { print!(\"{}\", env!(\"JIG_TEST_CRATE_VALUE\")); }\n"),
+    ]);
+    project.configure().ok();
+    let run = |value: &str| {
+        let output = Command::new(configure_path())
+            .arg("run")
+            .env("JIG_ENGINE", "rig")
+            .env("JIG_TEST_CRATE_VALUE", value)
+            .current_dir(&project.dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
+    };
+    assert_eq!(run("one").0, "one");
+    let (stdout, stderr) = run("one");
+    assert_eq!(stdout, "one");
+    assert!(!stderr.contains("RUSTC"), "{stderr}");
+    let (stdout, stderr) = run("two");
+    assert_eq!(stdout, "two");
+    assert_contains(&stderr, "RUSTC");
 }
 
 #[test]

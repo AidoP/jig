@@ -47,18 +47,39 @@ impl Stamp {
     }
 }
 
-/// The stamps of files, each found once, of the nodes of a graph and of other paths, relative to a directory.
+/// The stamps of files, each found once, of the nodes of a graph and of other paths, relative to a directory, and of
+/// environment variables, as the commands of a build see them.
 pub struct Stamps<'a> {
     dir: PathBuf,
     graph: &'a Graph,
     nodes: Vec<Option<Stamp>>,
     paths: HashMap<String, Stamp>,
+    /// The variables the commands are given, beside those they inherit.
+    env: Vec<(String, String)>,
 }
 impl<'a> Stamps<'a> {
     /// The stamps of the files of a graph, whose paths are relative to `dir`.
     #[must_use]
     pub fn new(graph: &'a Graph, dir: &Path) -> Self {
-        Self { dir: dir.into(), graph, nodes: vec![None; graph.nodes()], paths: HashMap::new() }
+        Self { dir: dir.into(), graph, nodes: vec![None; graph.nodes()], paths: HashMap::new(), env: Vec::new() }
+    }
+    /// Stamp environment variables as they are for commands which are given `env` beside what they inherit.
+    #[must_use]
+    pub fn with_env(mut self, env: &[(String, String)]) -> Self {
+        self.env = env.to_vec();
+        self
+    }
+    /// Returns the stamp of an environment variable, a hash of its value, or `None` if it is not set, as a command
+    /// sees it.
+    ///
+    /// A hash is kept rather than the value, which may be a secret, and is written to the state of the build.
+    #[must_use]
+    pub fn env(&self, name: &str) -> Option<u64> {
+        use std::os::unix::ffi::OsStrExt;
+        if let Some((_, value)) = self.env.iter().rev().find(|(variable, _)| variable == name) {
+            return Some(crate::state::fnv1a(value.as_bytes()));
+        }
+        std::env::var_os(name).map(|value| crate::state::fnv1a(value.as_bytes()))
     }
     /// Returns the stamp of a node, finding it if it has not been.
     pub fn node(&mut self, node: NodeId) -> Stamp {

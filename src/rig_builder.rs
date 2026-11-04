@@ -199,7 +199,7 @@ pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Erro
             let text = std::fs::read_to_string(&path).map_err(|error| Error::Read(path.clone(), error))?;
             rig::depfile::parse(&text).map_err(|error| Error::RigArgument(format!("{path:?}: {error}")))?
         },
-        None => Vec::new(),
+        None => rig::depfile::Discovered::default(),
     };
     let now = std::time::SystemTime::now();
     let record = rig::plan::record(graph, edge, inputs, &discovered, &mut stamps, now, std::time::Duration::ZERO);

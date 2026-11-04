@@ -252,6 +252,11 @@ fn write_generated_files(files: &[GeneratedFile]) -> Result<(), Error> {
     Ok(())
 }
 
+/// Returns the hash of the value of an environment variable as the database records it, in hexadecimal.
+pub fn env_hash(hash: u64) -> String {
+    format!("{hash:016x}")
+}
+
 /// The file in the build directory which `build.ninja` depends on, which is touched to regenerate it, such as when a path
 /// the configuration found was missing is created.
 pub const RECONFIGURE_STAMP: &str = "reconfigure.stamp";
@@ -743,6 +748,7 @@ fn write_database(
     }
 
     let missing = missing.iter().map(String::as_str).collect();
+    let env_hashes: Vec<String> = project.env.iter().map(|(_, hash)| hash.map(env_hash).unwrap_or_default()).collect();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets: Vec<_> = installed.iter().map(|file| at.path(&file.path).display().to_string()).collect();
     let mut database = database::Database {
@@ -750,6 +756,8 @@ fn write_database(
         toolchain: project.toolchain.as_deref().unwrap_or_default(),
         build_dir: &build_dir,
         missing,
+        env: project.env.iter().map(|(name, _)| name.as_str()).collect(),
+        env_hashes: env_hashes.iter().map(String::as_str).collect(),
         install_prefix: &install_prefix,
         proxy_build: &proxy_build,
         other_jig: &other_jig,
