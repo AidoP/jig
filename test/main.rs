@@ -1815,6 +1815,35 @@ fn remote_cache() {
 }
 
 #[test]
+fn cached_commands_run_the_chosen_toolchain() {
+    // a cached command runs in a hermetic environment, which passes on `RUSTUP_TOOLCHAIN`, so that rustc runs the
+    // toolchain it chooses, and is identified by, as rustdoc, which is not cached, does, rather than rustup's default,
+    // which is not nightly, which the tests of custom targets need
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-chosen-toolchain-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let project = Project::new("chosen-toolchain", &[
+        ("Jig", "crate util 'util.rs'\n    doc\ncrate app 'app.rs'\n    crate-type 'bin'\n    use util\n    doc\n"),
+        ("util.rs", "pub fn two() -> u32 { 2 }\n"),
+        ("app.rs", "fn main() { util::two(); }\n"),
+    ]);
+    let jig = |args: &[&str], toolchain: &str| {
+        let mut command = jig_command();
+        command.args(args).env("JIG_CACHE", &cache).env("RUSTUP_TOOLCHAIN", toolchain).current_dir(&project.dir);
+        let output = command.output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    jig(&["generate"], "nightly");
+    assert!(!jig(&["build", "doc"], "nightly").contains("incompatible version of rustc"));
+    // and choosing another configures the project again, identifying the toolchain afresh, here building a check, as
+    // the documentation nightly wrote is not of a format stable's rustdoc reads
+    let check = format!("check/app@{}", project.host());
+    assert_contains(&jig(&["build", &check], "stable"), "CONFIGURE build.ninja");
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn rig_caches_custom_commands() {
     if !rig_engine() {
         return;
