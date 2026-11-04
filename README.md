@@ -33,9 +33,11 @@ finding the crates passed to each crate, which fail if one grows much faster tha
 running the test harness with `--nocapture`, as in `build/<target>/test/jig benches --nocapture`.
 
 `rig/` is rig, the build engine which is replacing ninja, as `docs/build-engine.md` plans. It is a crate which `jig`
-uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. For now, `jig generate`
-writes rig's graph to `graph` in the build directory beside `build.ninja`, from the same description, and ninja still
-builds the project. With `JIG_VERIFY_GRAPH=1`, as the integration tests set, `jig generate` reads `build.ninja` back
+uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate`
+writes rig's graph to `graph` in the build directory beside `build.ninja`, from the same description. ninja builds the
+project by default, while with `JIG_ENGINE=rig`, rig does, keeping the state of the build in `.rig` in the build
+directory. `jig build` then takes a subset of ninja's options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run,
+which shows why each edge would run, `-v` and `--quiet`. With `JIG_VERIFY_GRAPH=1`, as the integration tests set, `jig generate` reads `build.ninja` back
 with rig and fails if it differs from rig's graph.
 
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.

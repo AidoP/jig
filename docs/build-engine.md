@@ -494,8 +494,29 @@ implementation of that trait, so `generate.rs` doesn't change.
      `rig::stamps_of`. io_uring was measured as an alternative and removed; see
      [Batched stat](#batched-stat-and-why-there-is-no-io_uring).
    - The `unsafe` code is in `rig/sys.rs`: `signal`, `kill` and `mkfifo`.
-5. `JIG_ENGINE=rig`, which `Configured::builder()` uses to return the `rig` builder. CI runs the suite with both
-   engines.
+5. **Done:** `JIG_ENGINE=rig`.
+   - **Choosing the engine.** `Configured` reads `JIG_ENGINE` (`ninja` by default, or `rig`), and `builder()` returns
+     `ninja::Ninja` or `rig_builder::Rig`. An unknown value is an error.
+   - **`rig_builder::Rig`** implements the same `Builder` interface:
+     - It loads `build/graph`, and keeps its state in `build/.rig`.
+     - Each command gets the project's toolchain through `exec::Options::env`.
+     - `regenerate` builds `build.ninja`, the generator edge, and jig reads the database again after it, as with
+       ninja.
+     - `up_to_date` and `graph_up_to_date` are plans that run nothing.
+   - **`jig build`'s arguments.** Under rig it takes a subset of ninja's options: `-j`, `-k`, `-n` (a dry run that
+     prints each edge with the reason it would run), `-v` (commands rather than descriptions) and `--quiet`. Any
+     other option is an error that names it.
+   - **Errors and output.** An unknown target, a missing input or a cycle is printed as `rig: error: ...`, and the
+     build fails, as ninja's do. A build with nothing to do prints `rig: no work to do.`, except while regenerating.
+   - **The generator edge is recorded by `jig generate`.** It records the edge in rig's state directly, so the first
+     build doesn't regenerate the graph as it would with no record. That is skipped while rig holds the state, as when
+     rig itself runs the configure edge, which it records afterwards.
+   - **Output directories.** rig now creates the directories of an edge's outputs and depfile before running it, as
+     ninja does. Building jig itself showed it was needed.
+   - **`configured::ensure`** regenerates when `graph` is missing as well as `build.ninja`.
+   - **The suite runs with both engines.** The integration tests now check engine-neutral output (`: no work to do.`),
+     and look in rig's log instead of `ninja -t deps` under rig. With `JIG_ENGINE=rig`, all 160 integration tests
+     and the unit and perf tests pass, and CI runs the suite a second time with it.
 6. The standalone `rig` binary, which builds ninja files with the reader.
 7. **Differential tests.** Generate random graphs and sequences of edits, run both ninja and `rig` on them, and compare
    which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went

@@ -70,6 +70,9 @@ impl Graph for RigGraph {
     fn finish(&mut self) -> Result<(), Error> {
         let graph = std::mem::take(&mut self.manifest).finish();
         graph.save(&self.path).map_err(Error::Rig)?;
+        if let Some(build_dir) = self.path.parent() {
+            crate::rig_builder::record_generator(&graph, build_dir)?;
+        }
         let Some(ninja) = &self.verify else {
             return Ok(());
         };
