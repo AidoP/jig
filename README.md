@@ -25,8 +25,10 @@ Building `jig` needs Rust 1.95 or later, and ninja 1.11 or later. Its tests need
 of custom targets.
 
 The `perf` test times `jig` on large generated projects, failing if one takes far longer than expected, or grows much
-faster than its size where it should be linear. Its time budgets are multiplied by the `JIG_PERF_SCALE` environment
-variable, such as `JIG_PERF_SCALE=4 jig test perf` on a slow machine.
+faster than its size where it should be linear, and compares rig with ninja. It is slow, so it is tagged `perf`, and
+`jig test` leaves it out unless it is named, or run with `jig test --tag perf` or `jig test --all`, as CI does. Its
+time budgets are multiplied by the `JIG_PERF_SCALE` environment variable, such as `JIG_PERF_SCALE=4 jig test perf` on
+a slow machine.
 
 The unit tests, run by `jig test jig`, include micro-benchmarks of parts of `jig`, such as reading a configuration and
 finding the crates passed to each crate, which fail if one grows much faster than its input. Their times are shown by
@@ -82,6 +84,13 @@ does. What is built is reported on stderr, so that stdout is the program's. A cr
 crate with it, or only one of those is `default`, and without a name, the project's only binary crate is run, or the
 only one which is `default`. Arguments which start with `-` follow `--`,
 as in `jig run -- --help`.
+
+`jig test [-v] [--all] [--tag <tag> ...] [<name> ...]` builds what the tests need and runs them in turn, showing the
+output of those which fail, or of each with `-v`. Without names or tags, it runs the tests without a `tag`, and those
+with a tag in the `test-tags` property, which is empty by default, so that slow tests can be left out. Tests can be
+named, whatever their tags, or chosen by tag with `--tag`, which can be repeated, and `--all` runs every test. Named
+tests run in the order they are named, followed by the others, in the order they were declared. A name or tag which no
+test has is an error.
 
 `jig lint` lints the crates of the project with clippy, which are those not from the toolchain, or only those named,
 as `<name>`, or `<name>@<target>` if the target is not the host target. A crate is linted as it is checked, with the
@@ -166,8 +175,9 @@ to, which is the error `empty-path`.
 - `file <name>`: a file generated from a template string, which is written when the project is configured. See below
 - `target <name>`: a custom target, which crates can be compiled for. See below
 - `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input`, `depends` and `command`
-  attributes, but no `output` or `default`. Its inputs and dependencies are built with `jig build test/<name>`, or those
-  of every test with `jig build test`
+  attributes, but no `output` or `default`, and a `tag` attribute, a tag or a list of them, by which `jig test` chooses
+  it, as below. Its inputs and dependencies are built with `jig build test/<name>`, or those of every test with
+  `jig build test`
 
 ```
 set rust-version '1.95.0'
@@ -519,6 +529,8 @@ A `crate` statement may be followed by indented attributes:
   whose `test` is `true` can be tested, which it is by default for the host target and a builtin target which the host
   can run, as found by `can-run`. It is `false` by default, and `true` without a value, so `test {target}.test` tests a
   crate where its tests can run
+- `tag <tag>`: a tag of the crate's test, or a list of them, by which `jig test` chooses it, such as `tag 'slow'`. A
+  tag is not empty and has no whitespace. It can be repeated, adding to them
 - `doc`: document the crate with rustdoc in `<build-dir>/<target>/doc/<name>`, which `jig build doc/<name>` builds, or
   `doc/<name>@<target>` if the target is not the host target, and `jig build doc` builds with the documentation of
   the other crates. The crates for a target are documented in the same directory, so that they link to each other. It is
@@ -700,6 +712,8 @@ target bluemetal-riscv64
 - `target`: the target triple for crates without a `target` attribute, initially the host
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default
+- `test-tags`: the tags of the tests `jig test` runs without names or tags, beside the tests without tags, as a list,
+  which is empty by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no

@@ -294,6 +294,17 @@ impl Project {
         self.values[value].data.coerce_string()
     }
     /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.
+    /// Returns the tags of the tests which `jig test` runs without being asked for them, beside the tests without tags,
+    /// from `test-tags`.
+    pub fn test_tags(&self) -> Vec<String> {
+        let Some(&value) = self.values_idx.get("test-tags") else {
+            return Vec::new();
+        };
+        match &self.values[value].data {
+            Data::List(tags) => tags.iter().map(Data::coerce_string).collect(),
+            data => vec![data.coerce_string()],
+        }
+    }
     pub fn install_prefix(&self) -> String {
         let Some(&value) = self.values_idx.get("install-prefix") else {
             return String::new();

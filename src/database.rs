@@ -6,7 +6,8 @@
 //! When read, its contents borrow from its bytes.
 //!
 //! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
-//! paths, the environment variables, as a list of their names followed by a list of their hashes, the install prefix,
+//! paths, the environment variables, as a list of their names followed by a list of their hashes, the tags of the
+//! tests which are run by default, the install prefix,
 //! the severities of `proxy-build` and `other-jig`, and the `jig` which configured it, followed by each section: the
 //! flychecks, the tests, the lints, the programs, then the installed files. A section is the number of its records
 //! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
@@ -18,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-const VERSION: u32 = 13;
+const VERSION: u32 = 14;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -36,6 +37,8 @@ pub struct Database<'a> {
     pub env: Vec<&'a str>,
     /// The hash of the value of each of `env`, in hexadecimal, or empty if it was not set.
     pub env_hashes: Vec<&'a str>,
+    /// The tags of the tests which `jig test` runs without names or tags, beside those without tags.
+    pub test_tags: Vec<&'a str>,
     /// The directory `jig install` installs in by default, relative to the project root unless it is absolute.
     pub install_prefix: &'a str,
     /// The severity of the `proxy-build` diagnostic, as the value of its property, which `jig build --proxy` reports.
@@ -76,6 +79,8 @@ pub struct Test<'a> {
     /// Whether the program is a test harness built by libtest, run directly, which takes its arguments, such as
     /// `--color`.
     pub libtest: bool,
+    /// The tags of the test, by which `jig test` chooses it.
+    pub tags: Vec<&'a str>,
 }
 
 /// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
@@ -126,6 +131,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_strs(w, &database.missing)?;
     write_strs(w, &database.env)?;
     write_strs(w, &database.env_hashes)?;
+    write_strs(w, &database.test_tags)?;
     write_str(w, database.install_prefix)?;
     write_str(w, database.proxy_build)?;
     write_str(w, database.other_jig)?;
@@ -142,6 +148,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         write_str(w, test.name)?;
         write_strs(w, &test.command)?;
         write_u32(w, u32::from(test.libtest))?;
+        write_strs(w, &test.tags)?;
     }
     write_u32(w, database.lints.len())?;
     for lint in &database.lints {
@@ -180,6 +187,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         missing: r.strs()?,
         env: r.strs()?,
         env_hashes: r.strs()?,
+        test_tags: r.strs()?,
         install_prefix: r.str()?,
         proxy_build: r.str()?,
         other_jig: r.str()?,
@@ -190,7 +198,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: r.bool()?, deps: r.u32s()? });
     }
     for _ in 0..r.u32()? {
-        database.tests.push(Test { name: r.str()?, command: r.strs()?, libtest: r.bool()? });
+        database.tests.push(Test { name: r.str()?, command: r.strs()?, libtest: r.bool()?, tags: r.strs()? });
     }
     for _ in 0..r.u32()? {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
@@ -295,6 +303,7 @@ mod tests {
             missing: vec!["Debug"],
             env: vec!["CC", "UNSET"],
             env_hashes: vec!["00000000000000ff", ""],
+            test_tags: vec!["slow"],
             install_prefix: "/usr/local",
             proxy_build: "warning",
             other_jig: "warning",
@@ -304,8 +313,8 @@ mod tests {
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
             ],
             tests: vec![
-                Test { name: "unit", command: vec!["./run", "a b"], libtest: false },
-                Test { name: "app", command: vec!["./build/test/app"], libtest: true },
+                Test { name: "unit", command: vec!["./run", "a b"], libtest: false, tags: vec!["slow", "io"] },
+                Test { name: "app", command: vec!["./build/test/app"], libtest: true, tags: vec![] },
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             programs: vec![
@@ -337,7 +346,7 @@ mod tests {
         assert_eq!(read(b"{\"crates\"").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         // truncated
         let mut bytes = Vec::new();
-        let tests = vec![Test { name: "x", command: vec![], libtest: false }];
+        let tests = vec![Test { name: "x", command: vec![], libtest: false, tags: vec![] }];
         write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     }
@@ -356,7 +365,8 @@ mod benches {
                 let deps = if i > 0 { vec![i as u32 - 1, 0] } else { vec![] };
                 Flycheck { label, diagnostics, member: true, deps }
             }).collect();
-            let tests = labels[..n].iter().map(|(label, _)| Test { name: label, command: vec![label, "--quiet"], libtest: true }).collect();
+            let test = |label| Test { name: label, command: vec![label, "--quiet"], libtest: true, tags: vec![] };
+            let tests = labels[..n].iter().map(|(label, _)| test(label.as_str())).collect();
             Database { flychecks, tests, ..Default::default() }
         };
         assert_linear("database", 5000, database, |database| {

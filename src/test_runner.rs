@@ -6,39 +6,70 @@ use std::time::{Duration, Instant};
 
 use crate::Error;
 use crate::builder::Request;
+use crate::database::{self, Database};
 use crate::configured::{Configured, Output};
 
-/// Run tests, or all of them if no names are given, without evaluating the configuration.
+/// Which tests `jig test` runs.
+#[derive(Default)]
+pub struct Selection {
+    /// The tests named, which run whatever their tags.
+    pub names: Vec<String>,
+    /// The tests with any of these tags.
+    pub tags: Vec<String>,
+    /// Every test.
+    pub all: bool,
+}
+
+impl Selection {
+    /// Returns the tests chosen, failing for a name or tag which no test has.
+    ///
+    /// Without names, tags or `all`, the tests are those without tags and those with a tag in `test-tags`.
+    fn choose<'a, 'b>(&self, database: &'b Database<'a>) -> Result<Vec<&'b database::Test<'a>>, Error> {
+        if let Some(name) = self.names.iter().find(|name| !database.tests.iter().any(|test| test.name == *name)) {
+            return Err(Error::UnknownTest(name.clone()));
+        }
+        let tagged = |tag: &&String| database.tests.iter().any(|test| test.tags.contains(&tag.as_str()));
+        if let Some(tag) = self.tags.iter().find(|tag| !tagged(tag)) {
+            return Err(Error::UnknownTag(tag.clone()));
+        }
+        let default = !self.all && self.names.is_empty() && self.tags.is_empty();
+        let chosen = |test: &&database::Test| {
+            self.all
+                || self.tags.iter().any(|tag| test.tags.contains(&tag.as_str()))
+                || default && (test.tags.is_empty() || test.tags.iter().any(|tag| database.test_tags.contains(tag)))
+        };
+        // the tests named, in the order they were, then the others chosen, in the order they were declared
+        let named = |name: &String| database.tests.iter().find(|test| test.name == name);
+        let mut tests: Vec<_> = self.names.iter().filter_map(named).collect();
+        for test in database.tests.iter().filter(chosen) {
+            if !tests.iter().any(|chosen| chosen.name == test.name) {
+                tests.push(test);
+            }
+        }
+        Ok(tests)
+    }
+}
+
+/// Run the tests a selection chooses, without evaluating the configuration.
 ///
 /// What the tests need is built first, then each is run in turn from the project root with its output captured,
 /// which is shown if it fails, with how long each took. With `verbose`, the output of every test is shown below its
 /// result, such as the results of the tests in a crate's test harness, rather than only those which fail at the end.
-pub fn test(names: &[String], verbose: bool) -> Result<(), Error> {
+pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
-    let targets: Vec<_> = if names.is_empty() {
-        vec!["test".to_string()]
-    } else {
-        names.iter().map(|name| format!("test/{name}")).collect()
-    };
-    let targets: Vec<_> = targets.iter().map(String::as_str).collect();
-    let built = project.builder().build(&Request { targets: &targets, ..Default::default() })?;
-    // read after building, which reconfigures if needed, so that it is current
+    // the configuration is up to date, so the tests are chosen before what they need is built, which is only theirs
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
-    // an unknown test also fails the build, as it has no target, but is the more useful error
-    let mut tests = Vec::new();
-    for name in names {
-        match database.tests.iter().find(|test| test.name == name) {
-            Some(test) => tests.push(test),
-            None => return Err(Error::UnknownTest(name.clone())),
-        }
-    }
+    let targets: Vec<String> = selection.choose(&database)?.iter().map(|test| format!("test/{}", test.name)).collect();
+    let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let built = targets.is_empty() || project.builder().build(&Request { targets: &targets, ..Default::default() })?;
     if !built {
         return Err(Error::TestBuild);
     }
-    if names.is_empty() {
-        tests = database.tests.iter().collect();
-    }
+    // read after building, in case it reconfigured
+    let bytes = project.read()?;
+    let database = project.parse(&bytes)?;
+    let tests = selection.choose(&database)?;
 
     let style = Style::new(std::io::stdout().is_terminal());
     let plural = if tests.len() == 1 { "" } else { "s" };

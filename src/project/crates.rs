@@ -58,6 +58,7 @@ impl Project {
         let mut default = false;
         let mut test = false;
         let mut doc = false;
+        let mut tags = Vec::new();
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
@@ -88,6 +89,11 @@ impl Project {
                 "doc" => {
                     if let Some(value) = self.flag(&attribute.operand()) {
                         doc = value;
+                    }
+                },
+                "tag" => {
+                    if let Some(new) = self.tags(&attribute.operand()) {
+                        tags.extend(new);
                     }
                 },
                 "crate-type" => {
@@ -243,7 +249,7 @@ impl Project {
                         let name = c.short_name(&host);
                         let harness = c.test_harness();
                         let depends = c.depends.clone();
-                        self.add_crate_test(name, span, harness, depends);
+                        self.add_crate_test(name, span, harness, depends, tags.clone());
                     }
                 },
             }
@@ -334,7 +340,7 @@ impl Project {
     /// Register the test harness of a crate, like a `test` statement which runs it.
     ///
     /// The harness is run directly, until the runner of its target is known.
-    fn add_crate_test(&mut self, name: String, span: Span, harness: PathBuf, depends: Vec<PathBuf>) {
+    fn add_crate_test(&mut self, name: String, span: Span, harness: PathBuf, depends: Vec<PathBuf>, tags: Vec<String>) {
         let command = vec![Path::new(".").join(&harness).display().to_string()];
         self.add_custom(Custom {
             name,
@@ -344,6 +350,7 @@ impl Project {
             command,
             program: None,
             kind: CustomKind::Test { runner: None, harness: true },
+            tags,
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their
