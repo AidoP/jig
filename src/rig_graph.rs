@@ -1,8 +1,7 @@
 //! rig's graph, `graph` in the build directory, which is built from the same description as `build.ninja`.
 //!
 //! The rules and edges are evaluated as ninja evaluates them, by [`rig::ninja::Manifest`], so that both describe the
-//! same build. With [`VERIFY`] set, the `build.ninja` written beside the graph is read back by rig and compared with
-//! it, which the integration tests do for every project they configure.
+//! same build.
 
 use std::path::{Path, PathBuf};
 
@@ -12,20 +11,14 @@ use crate::graph::{Edge, Graph, Rule};
 /// The file of the graph, in the build directory.
 pub const FILE: &str = "graph";
 
-/// The environment variable which, if it is set and not empty, has the graph compared with `build.ninja`.
-pub const VERIFY: &str = "JIG_VERIFY_GRAPH";
-
 pub struct RigGraph {
     path: PathBuf,
     manifest: rig::ninja::Manifest,
-    /// The `build.ninja` to compare the graph with, once both are written.
-    verify: Option<PathBuf>,
 }
 impl RigGraph {
-    /// Build a graph to save at `path`, compared with the ninja file `ninja` if [`VERIFY`] is set.
-    pub fn new(path: PathBuf, ninja: &Path) -> Self {
-        let verify = std::env::var_os(VERIFY).is_some_and(|value| !value.is_empty()).then(|| ninja.to_path_buf());
-        Self { path, manifest: rig::ninja::Manifest::new(), verify }
+    /// Build a graph to save at `path`.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, manifest: rig::ninja::Manifest::new() }
     }
 }
 
@@ -66,23 +59,12 @@ impl Graph for RigGraph {
         self.manifest.default(&strs(&paths(targets)));
         Ok(())
     }
-    /// Save the graph, then compare it with `build.ninja` if [`VERIFY`] is set.
+    /// Save the graph, and record the edge which generates it as up to date.
     fn finish(&mut self) -> Result<(), Error> {
         let graph = std::mem::take(&mut self.manifest).finish();
         graph.save(&self.path).map_err(Error::Rig)?;
-        if let Some(build_dir) = self.path.parent() {
-            crate::rig_builder::record_generator(&graph, build_dir)?;
-        }
-        let Some(ninja) = &self.verify else {
-            return Ok(());
-        };
-        let text = match std::fs::read(ninja) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(error) => return Err(Error::Read(ninja.clone(), error)),
-        };
-        let read = rig::ninja::read(&text).map_err(Error::Rig)?;
-        match graph.diff(&read) {
-            Some(difference) => Err(Error::GraphMismatch(ninja.clone(), difference)),
+        match self.path.parent() {
+            Some(build_dir) => crate::rig_builder::record_generator(&graph, build_dir),
             None => Ok(()),
         }
     }

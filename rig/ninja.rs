@@ -1,14 +1,13 @@
-//! Building a [`Graph`] from ninja's rules, edges and variables, as a ninja file describes them.
+//! Building a [`Graph`] from rules, edges and variables, as ninja evaluates them.
 //!
-//! A [`Manifest`] takes the statements of a ninja file and evaluates them as ninja does: the variables of an edge are
-//! evaluated where it is defined, then the bindings of its rule are evaluated for it, looking up a variable in the
-//! edge, then the rule, then the variables defined before the edge. `$in` and `$out` are its explicit inputs and
-//! outputs, quoted for the shell as ninja quotes them, except in the depfile. Each edge then has its command,
-//! description and depfile.
+//! A [`Manifest`] takes rules, edges and variables, whose values are written as ninja's are, and evaluates them as
+//! ninja does: the variables of an edge are evaluated where it is defined, then the bindings of its rule are evaluated
+//! for it, looking up a variable in the edge, then the rule, then the variables defined before the edge. `$in` and
+//! `$out` are its explicit inputs and outputs, quoted for the shell as ninja quotes them, except in the depfile. Each
+//! edge then has its command, description and depfile.
 //!
-//! [`read`] reads a ninja file into a [`Manifest`]. Only what rig supports is read: `include`, `subninja`, `pool`
-//! statements, `deps = msvc`, response files and dyndep files are errors. Paths are taken as they are written, rather
-//! than with `.` and `..` resolved as ninja does.
+//! Only what rig supports can be given: `deps = msvc`, pools other than `console`, response files and dyndep files are
+//! errors.
 
 use std::collections::HashMap;
 
@@ -277,215 +276,13 @@ impl Scope<'_> {
 }
 
 fn message(message: String) -> Error {
-    Error::Ninja { line: 0, message }
-}
-
-/// Read a ninja file into a graph.
-///
-/// # Errors
-///
-/// If the file is not valid, or uses what rig does not support, with the line of the statement.
-pub fn read(text: &str) -> Result<Graph, Error> {
-    let mut manifest = Manifest::new();
-    let lines = logical_lines(text);
-    let mut lines = lines.iter().peekable();
-    while let Some(&(number, ref line)) = lines.next() {
-        let at = |error: Error| match error {
-            Error::Ninja { line: 0, message } => Error::Ninja { line: number, message },
-            error => error,
-        };
-        let fail = |message: String| Error::Ninja { line: number, message };
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        if line.starts_with([' ', '\t']) {
-            return Err(fail("unexpected indentation".into()));
-        }
-        // the indented bindings which follow a statement
-        let mut bindings = Vec::new();
-        let indented = |(_, line): &&(usize, String)| line.starts_with([' ', '\t']) || line.trim().is_empty();
-        while let Some((number, binding)) = lines.next_if(indented) {
-            let binding = binding.trim_start();
-            if binding.is_empty() || binding.starts_with('#') {
-                continue;
-            }
-            let Some(binding) = split_binding(binding) else {
-                let message = format!("expected a binding, not {binding:?}");
-                return Err(Error::Ninja { line: *number, message });
-            };
-            bindings.push(binding);
-        }
-        let (keyword, rest) = line.split_once([' ', '\t']).unwrap_or((line.as_str(), ""));
-        match keyword {
-            "rule" => manifest.rule(rest.trim(), &bindings).map_err(at)?,
-            "build" => read_build(&mut manifest, rest, &bindings).map_err(at)?,
-            "default" => {
-                let mut paths = Vec::new();
-                for token in path_tokens(rest) {
-                    match token {
-                        PathToken::Path(raw) => {
-                            paths.push(evaluate_path(&raw, &HashMap::new(), &manifest).map_err(fail)?);
-                        },
-                        _ => return Err(fail("unexpected `:` or `|` in `default`".into())),
-                    }
-                }
-                manifest.default(&paths.iter().map(String::as_str).collect::<Vec<_>>());
-            },
-            "pool" | "include" | "subninja" => return Err(fail(format!("`{keyword}` is not supported"))),
-            _ => {
-                let Some((name, value)) = split_binding(line) else {
-                    return Err(fail(format!("unexpected {line:?}")));
-                };
-                if !bindings.is_empty() {
-                    return Err(fail(format!("unexpected indentation after the variable {name:?}")));
-                }
-                manifest.variable(name, value).map_err(at)?;
-            },
-        }
-    }
-    Ok(manifest.finish())
-}
-
-/// Returns the lines of a ninja file with their numbers, where a `$` before a line break continues the line, and the
-/// whitespace which begins the next line is left out.
-fn logical_lines(text: &str) -> Vec<(usize, String)> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut start = 1;
-    let mut number = 1;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '$' => match chars.peek() {
-                Some('\n') => {
-                    chars.next();
-                    number += 1;
-                    while chars.next_if(|&c| c == ' ').is_some() {}
-                },
-                Some('\r') => {
-                    chars.next();
-                    chars.next_if_eq(&'\n');
-                    number += 1;
-                    while chars.next_if(|&c| c == ' ').is_some() {}
-                },
-                Some(&next) => {
-                    chars.next();
-                    line.push('$');
-                    line.push(next);
-                },
-                None => line.push('$'),
-            },
-            '\n' => {
-                let line = std::mem::take(&mut line);
-                lines.push((start, line.strip_suffix('\r').map(String::from).unwrap_or(line)));
-                number += 1;
-                start = number;
-            },
-            c => line.push(c),
-        }
-    }
-    if !line.is_empty() {
-        lines.push((start, line));
-    }
-    lines
-}
-
-/// Split `name = value`, where the value begins after the whitespace which follows `=`.
-fn split_binding(line: &str) -> Option<(&str, &str)> {
-    let (name, value) = line.split_once('=')?;
-    let name = name.trim_end();
-    if name.is_empty() || !name.chars().all(|c| is_simple_char(c) || c == '.') {
-        return None;
-    }
-    Some((name, value.trim_start_matches([' ', '\t'])))
-}
-
-enum PathToken {
-    Path(String),
-    Colon,
-    Pipe,
-    PipePipe,
-}
-
-/// Split the paths of a statement, as they are written, at unescaped spaces, `:` and `|`.
-fn path_tokens(text: &str) -> Vec<PathToken> {
-    let mut tokens = Vec::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            ' ' | '\t' => (),
-            ':' => tokens.push(PathToken::Colon),
-            '|' if chars.next_if_eq(&'|').is_some() => tokens.push(PathToken::PipePipe),
-            '|' => tokens.push(PathToken::Pipe),
-            c => {
-                let mut path = String::from(c);
-                if c == '$' {
-                    path.extend(chars.next());
-                }
-                while let Some(c) = chars.next_if(|&c| !matches!(c, ' ' | '\t' | ':' | '|')) {
-                    path.push(c);
-                    if c == '$' {
-                        path.extend(chars.next());
-                    }
-                }
-                tokens.push(PathToken::Path(path));
-            },
-        }
-    }
-    tokens
-}
-
-/// Evaluate a path as it is written, looking up a variable in the bindings of its edge, then at the top level.
-fn evaluate_path(raw: &str, edge: &HashMap<&str, &str>, manifest: &Manifest) -> Result<String, String> {
-    let tokens = parse(raw)?;
-    evaluate(&tokens, &mut |name| {
-        if let Some(value) = edge.get(name) {
-            let tokens = parse(value)?;
-            return evaluate(&tokens, &mut |name| Ok(manifest.variables.get(name).cloned().unwrap_or_default()));
-        }
-        Ok(manifest.variables.get(name).cloned().unwrap_or_default())
-    })
-}
-
-/// Read the rest of a `build` statement, after `build`.
-fn read_build(manifest: &mut Manifest, rest: &str, bindings: &[(&str, &str)]) -> Result<(), Error> {
-    let edge: HashMap<&str, &str> = bindings.iter().copied().collect();
-    let mut lists: [Vec<String>; 5] = Default::default();
-    let mut rule = None;
-    // outputs, then implicit outputs, then the rule, then inputs, implicit inputs and order-only inputs
-    let mut list = 0;
-    for token in path_tokens(rest) {
-        match token {
-            PathToken::Path(raw) if list == 2 && rule.is_none() => rule = Some(raw),
-            PathToken::Path(raw) => lists[list].push(evaluate_path(&raw, &edge, manifest).map_err(message)?),
-            PathToken::Pipe if list == 0 => list = 1,
-            PathToken::Colon if list < 2 => list = 2,
-            PathToken::Pipe if list == 2 && rule.is_some() => list = 3,
-            PathToken::PipePipe if (2..4).contains(&list) && rule.is_some() => list = 4,
-            _ => return Err(message("unexpected `:` or `|` in `build`".into())),
-        }
-    }
-    let Some(rule) = rule else {
-        return Err(message("expected a rule in `build`".into()));
-    };
-    if lists[0].is_empty() {
-        return Err(message("expected an output in `build`".into()));
-    }
-    let lists: Vec<Vec<&str>> = lists.iter().map(|list| list.iter().map(String::as_str).collect()).collect();
-    manifest.build(&Build {
-        rule: &rule,
-        outputs: &lists[0],
-        implicit_outputs: &lists[1],
-        inputs: &lists[2],
-        implicit: &lists[3],
-        order_only: &lists[4],
-        bindings,
-    })
+    Error::Manifest(message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::graph;
 
     fn shell(command: &str) -> EdgeKind {
         EdgeKind::Command(Action::Shell(command.into()))
@@ -512,14 +309,20 @@ mod tests {
 
     #[test]
     fn evaluates_as_ninja_does() {
-        let graph = read(
-            "flags = -O\n\
-             rule cc\n  command = cc $flags $extra -o $out $in\n  description = CC $out\n  \
-             depfile = $out.d\n  deps = gcc\n\
-             flags = -O2\n\
-             build a$ b.o | a.d: cc a.c b$:c.c | h.h || gen\n  extra = $$x $flags\n  flags = -g\n",
-        )
-        .unwrap();
+        let graph = graph()
+            .variable("flags", "-O")
+            .rule("cc", &[
+                ("command", "cc $flags $extra -o $out $in"),
+                ("description", "CC $out"),
+                ("depfile", "$out.d"),
+                ("deps", "gcc"),
+            ])
+            .variable("flags", "-O2")
+            .edge_with("cc", &["a b.o", "|", "a.d"], &["a.c", "b:c.c", "|", "h.h", "||", "gen"], &[
+                ("extra", "$$x $flags"),
+                ("flags", "-g"),
+            ])
+            .finish();
         let edge = graph.edge(graph.producer(graph.node("a b.o").unwrap()).unwrap());
         // the edge's variables are evaluated where it is defined, and replace the top level's
         assert_eq!(edge.kind(), &shell("cc -g $x -O2 -o 'a b.o' a.c 'b:c.c'"));
@@ -534,15 +337,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_rules_and_aliases() {
-        let graph = read(
-            "# a comment\n\
-             rule gen\n  command = gen $\n      $in\n  pool = console\n  generator = 1\n  restat = 1\n\n\
-             build build.ninja: gen Jig\n\
-             build all: phony build.ninja\n\
-             default all\n",
-        )
-        .unwrap();
+    fn makes_rules_and_aliases() {
+        let graph = graph()
+            .rule("gen", &[("command", "gen $in"), ("pool", "console"), ("generator", "1"), ("restat", "1")])
+            .edge("gen", &["build.ninja"], &["Jig"])
+            .edge("phony", &["all"], &["build.ninja"])
+            .default(&["all"])
+            .finish();
         let edge = graph.edge(graph.producer(graph.node("build.ninja").unwrap()).unwrap());
         assert_eq!(edge.kind(), &shell("gen Jig"));
         assert_eq!(edge.pool(), Pool::Console);
@@ -554,23 +355,29 @@ mod tests {
 
     #[test]
     fn rule_bindings_refer_to_each_other() {
-        let graph = read("rule r\n  command = run $description\n  description = $out\nbuild o: r\n").unwrap();
+        let graph = graph().rule("r", &[("command", "run $description"), ("description", "$out")]);
+        let graph = graph.edge("r", &["o"], &[]).finish();
         assert_eq!(graph.edge(graph.producer(graph.node("o").unwrap()).unwrap()).kind(), &shell("run o"));
-        let error = read("rule r\n  command = $command\nbuild o: r\n").unwrap_err();
+        let mut graph = crate::testing::graph().rule("r", &[("command", "$command")]);
+        let error = graph.try_edge("r", &["o"], &[], &[]).unwrap_err();
         assert!(error.to_string().contains("refers to itself"), "{error}");
     }
 
     #[test]
-    fn reports_errors_with_their_lines() {
-        let error = |text: &str| read(text).unwrap_err().to_string();
-        assert_eq!(error("rule r\n  command = c\n\nbuild o: missing\n"), "line 4: unknown rule \"missing\"");
-        assert_eq!(error("rule r\n  depfile = d\n"), "line 1: rule \"r\" has no command");
-        assert_eq!(error("rule r\n  command = c\n  wat = 1\n"), "line 1: unexpected variable \"wat\" in rule \"r\"");
-        assert_eq!(error("include other.ninja\n"), "line 1: `include` is not supported");
-        let pool = "rule r\n  command = c\n  pool = link\nbuild o: r\n";
-        assert_eq!(error(pool), "line 4: pool \"link\" is not supported");
-        assert_eq!(error("rule r\n  command = c\nbuild o: r\nbuild o: r\n"), "\"o\" is produced by more than one edge");
-        assert_eq!(error("  x = 1\n"), "line 1: unexpected indentation");
-        assert_eq!(error("build o\n"), "line 1: expected a rule in `build`");
+    fn refuses_what_it_does_not_support() {
+        let rule = |bindings: &[(&str, &str)]| Manifest::new().rule("r", bindings).unwrap_err().to_string();
+        assert_eq!(rule(&[("depfile", "d")]), "rule \"r\" has no command");
+        assert_eq!(rule(&[("command", "c"), ("wat", "1")]), "unexpected variable \"wat\" in rule \"r\"");
+        let edge = |bindings: &[(&str, &str)], rule: &str| {
+            let mut graph = graph().rule("r", bindings);
+            graph.try_edge(rule, &["o"], &[], &[]).unwrap_err().to_string()
+        };
+        assert_eq!(edge(&[("command", "c")], "missing"), "unknown rule \"missing\"");
+        assert_eq!(edge(&[("command", "c"), ("pool", "link")], "r"), "pool \"link\" is not supported");
+        assert_eq!(edge(&[("command", "c"), ("deps", "msvc")], "r"), "`deps = msvc` is not supported");
+        let mut graph = graph().rule("r", &[("command", "c")]).edge("r", &["o"], &[]);
+        let error = graph.try_edge("r", &["o"], &[], &[]).unwrap_err();
+        assert_eq!(error.to_string(), "\"o\" is produced by more than one edge");
+        assert!(Manifest::new().variable("v", "$").is_err());
     }
 }

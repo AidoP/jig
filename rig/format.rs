@@ -250,7 +250,6 @@ mod tests {
         let graph = graph();
         let read = Graph::from_bytes(&graph.to_bytes()).unwrap();
         assert_eq!(read, graph);
-        assert_eq!(read.diff(&graph), None);
     }
 
     #[test]
