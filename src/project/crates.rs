@@ -200,7 +200,7 @@ impl Project {
             });
             return;
         }
-        let codegen = self.codegen_options(span, &codegen, &targets);
+        let codegen = self.codegen_options(span, kind, &codegen, &targets);
         let lints = self.clippy_flags(span);
         let build_dir = self.build_dir();
         // the targets the crate is declared for, whose outputs are declared after its tests are registered
