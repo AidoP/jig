@@ -618,14 +618,29 @@ implementation of that trait, so `generate.rs` doesn't change.
        `JIG_ENGINE=ninja`. That includes the differential and comparison tests.
    - **Checked.** Every test passes with no working ninja on `PATH`, and with `JIG_ENGINE=ninja` after bootstrapping
      with ninja.
-2. **Argument vectors.** Turn commands into argument vectors.
-   - Remove `sh`, `shell_quote`, `ninja_quote` and `toolchain::shell_prefix` from what rig runs. The toolchain and
-     crate variables become an action's environment, and redirections such as clippy's `2> $diagnostics` become
-     fields of the action.
-   - Line breaks in paths become an error only with the ninja engine (`Message` for newlines, `Error::LineBreak`). A
-     graph which ninja can't express is still saved for rig, and `build.ninja` isn't written for it, with a warning
-     that says why.
-   - `build.ninja` still runs its commands through `sh`, so the ninja writer quotes the argument vectors itself.
+2. **Done, apart from line breaks:** argument vectors.
+   - **`rig::Action::Exec`.** It holds a program, its arguments, environment variables, an optional working directory
+     relative to the build directory, and an optional file for stderr. rig runs it directly, without a shell.
+     - Its action hash covers every part, each with its length before it.
+     - The graph format, now version 2, stores it.
+     - A failure, or `-v`, shows it as a quoted command line.
+   - **jig gives every edge a program.** That covers configure, rustc and test harnesses, rustdoc, clippy and checks
+     (whose stderr goes to the diagnostics file), and custom commands.
+     - jig's `Graph` trait carries the program beside the ninja template, as `Edge::exec`. `RigGraph` passes it to
+       `Manifest` as the edge's action.
+     - `NinjaFile` writes the templates as before, so `build.ninja` is byte for byte the same, and ninja still runs
+       through `sh`.
+   - **One description, both forms.** rustc's flags are built once, as `Flags`, which holds both the arguments and the
+     text `build.ninja` had, quoted for `sh` and with `$` escaped for ninja.
+     - The toolchain and a crate's `env` are the program's environment.
+     - Lint flags such as `-W clippy::pedantic` are split into their two arguments.
+   - **Measured.** A full build of 1,000 copies now takes rig 0.94–1.13 s, against ninja's 1.27–1.50 s. rig starts one
+     process for each edge, where ninja starts two: `sh`, then the program.
+   - **A graph of another version is configured again.** `.jig`'s version now changes whenever the graph format does,
+     so `configured::ensure` regenerates the project, rather than rig failing to load the old graph.
+   - **Left for step 3: line breaks.** Lifting the restriction on line breaks waits for step 3. rig's configure edge
+     still has `build.ninja` as its output, so `build.ninja` can't yet be left out for a graph which ninja can't
+     express.
 3. **Configuring natively.** Remove the missing-path stamp in favour of missing-path inputs, and run the configure
    edge in the same process.
 

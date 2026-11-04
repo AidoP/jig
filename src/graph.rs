@@ -52,6 +52,9 @@ pub struct Edge<'a> {
     /// Inputs which must be built first but do not trigger a rebuild.
     pub order_only: &'a [&'a Path],
     pub variables: &'a [(&'a str, &'a str)],
+    /// The program the edge runs, as rig runs it, without a shell, in place of the command of its rule, which
+    /// `build.ninja` has.
+    pub exec: Option<&'a rig::Exec>,
 }
 
 /// What a build graph is written to.

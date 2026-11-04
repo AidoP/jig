@@ -4,18 +4,22 @@
 //! checksum of all that precedes it, the 64-bit FNV-1a hash. Numbers are little-endian `u32`s, strings are their length
 //! followed by their UTF-8 bytes, and a list of nodes is its length followed by each node's index.
 //!
-//! An edge is its kind, `0` for an alias or `1` for a shell command followed by the command, then its description, its
-//! depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console, its flags, `1` if it is a
-//! generator and `2` if it is restat, then its lists of nodes: outputs, implicit outputs, inputs, implicit inputs and
-//! order-only inputs.
+//! An edge is its kind, `0` for an alias, `1` for a shell command followed by the command, or `2` for a program
+//! followed by the program, its arguments as a list of strings, its environment variables as their number followed by
+//! each name and value, then its working directory and the file of its stderr, each as `0`, or `1` followed by the
+//! path, then its description, its depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console,
+//! its flags, `1` if it is a generator and `2` if it is restat, then its lists of nodes: outputs, implicit outputs,
+//! inputs, implicit inputs and order-only inputs.
 
 use std::path::Path;
 
-use crate::graph::{Action, Edge, EdgeKind, Graph, NodeId, Pool};
+use crate::graph::{Action, Edge, EdgeKind, Exec, Graph, NodeId, Pool};
 use crate::Error;
 
 const MAGIC: &[u8; 4] = b"RIGG";
-const VERSION: u32 = 1;
+/// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
+/// failing to load its graph.
+const VERSION: u32 = 2;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -38,6 +42,10 @@ impl Graph {
                 EdgeKind::Command(Action::Shell(command)) => {
                     w.u32(1);
                     w.str(command);
+                },
+                EdgeKind::Command(Action::Exec(exec)) => {
+                    w.u32(2);
+                    w.exec(exec);
                 },
             }
             w.str(edge.description());
@@ -94,6 +102,7 @@ impl Graph {
             let kind = match r.u32()? {
                 0 => EdgeKind::Alias,
                 1 => EdgeKind::Command(Action::Shell(r.str()?.into())),
+                2 => EdgeKind::Command(Action::Exec(r.exec()?)),
                 _ => return Err(Error::Format("unknown kind of edge")),
             };
             let description = r.str()?.into();
@@ -176,6 +185,29 @@ impl Writer {
         self.len(s.len());
         self.0.extend_from_slice(s.as_bytes());
     }
+    fn optional(&mut self, s: Option<&str>) {
+        match s {
+            None => self.u32(0),
+            Some(s) => {
+                self.u32(1);
+                self.str(s);
+            },
+        }
+    }
+    fn exec(&mut self, exec: &Exec) {
+        self.str(&exec.program);
+        self.len(exec.args.len());
+        for arg in &exec.args {
+            self.str(arg);
+        }
+        self.len(exec.env.len());
+        for (name, value) in &exec.env {
+            self.str(name);
+            self.str(value);
+        }
+        self.optional(exec.dir.as_deref());
+        self.optional(exec.stderr.as_deref());
+    }
     fn nodes(&mut self, nodes: &[NodeId]) {
         self.len(nodes.len());
         for node in nodes {
@@ -201,6 +233,19 @@ impl<'a> Reader<'a> {
     fn str(&mut self) -> Result<&'a str, Error> {
         let len = self.u32()? as usize;
         std::str::from_utf8(self.take(len)?).map_err(|_| Error::Format("invalid UTF-8"))
+    }
+    fn optional(&mut self) -> Result<Option<String>, Error> {
+        match self.u32()? {
+            0 => Ok(None),
+            1 => Ok(Some(self.str()?.into())),
+            _ => Err(Error::Format("invalid optional string")),
+        }
+    }
+    fn exec(&mut self) -> Result<Exec, Error> {
+        let program = self.str()?.into();
+        let args = (0..self.u32()?).map(|_| self.str().map(String::from)).collect::<Result<_, _>>()?;
+        let env = (0..self.u32()?).map(|_| Ok((self.str()?.into(), self.str()?.into()))).collect::<Result<_, Error>>()?;
+        Ok(Exec { program, args, env, dir: self.optional()?, stderr: self.optional()? })
     }
     /// Read a list of nodes, each of which must be one of the `nodes` of the graph.
     fn nodes(&mut self, nodes: usize) -> Result<Vec<NodeId>, Error> {
@@ -241,6 +286,16 @@ mod tests {
             })
             .unwrap();
         graph.add_alias("all", &[a]).unwrap();
+        let exec = Exec {
+            program: "cc".into(),
+            args: vec!["-o".into(), "e f".into()],
+            env: vec![("A".into(), "b".into())],
+            dir: Some("..".into()),
+            stderr: None,
+        };
+        let program = graph.file("e f");
+        let kind = EdgeKind::Command(Action::Exec(exec));
+        graph.add_edge(Edge { kind, outputs: vec![program], ..Edge::default() }).unwrap();
         graph.add_default(&[a, d]);
         graph
     }
@@ -265,7 +320,7 @@ mod tests {
         corrupted[10] ^= 1;
         assert_eq!(error(&corrupted), "checksum mismatch");
         let mut other = bytes[..bytes.len() - 8].to_vec();
-        other[4] = 2;
+        other[4] = 9;
         let checksum = fnv1a(&other);
         other.extend_from_slice(&checksum.to_le_bytes());
         assert_eq!(error(&other), "another version");

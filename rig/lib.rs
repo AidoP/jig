@@ -25,7 +25,7 @@ mod sys;
 #[cfg(test)]
 mod testing;
 
-pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Graph, NodeId, Pool};
+pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Exec, Graph, NodeId, Pool};
 pub use stamp::{Stamp, Stamps, stamps_of};
 pub use state::fnv1a;
 

@@ -131,6 +131,8 @@ pub struct Build<'a> {
     pub implicit: &'a [&'a str],
     pub order_only: &'a [&'a str],
     pub bindings: &'a [(&'a str, &'a str)],
+    /// What the edge runs, in place of the command of its rule, whose other bindings still apply.
+    pub action: Option<Action>,
 }
 
 impl Manifest {
@@ -223,7 +225,7 @@ impl Manifest {
             }
             edge.generator = !scope.lookup("generator", 0).map_err(message)?.is_empty();
             edge.restat = !scope.lookup("restat", 0).map_err(message)?.is_empty();
-            edge.kind = EdgeKind::Command(Action::Shell(command));
+            edge.kind = EdgeKind::Command(build.action.clone().unwrap_or(Action::Shell(command)));
         }
         self.graph.add_edge(edge)?;
         Ok(())
