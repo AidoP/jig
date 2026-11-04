@@ -1,6 +1,6 @@
 //! `jig lint`, which lints crates with clippy, and shows the diagnostics they saved.
 
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 
 use crate::Error;
 use crate::builder::Request;
@@ -35,8 +35,8 @@ pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
     if names.is_empty() {
         lints = database.lints.iter().collect();
     }
-    // the diagnostics are saved in colour, which is removed where stdout is not a terminal
-    let pretty = std::io::stdout().is_terminal();
+    // the diagnostics are saved in colour, which is removed where stdout is not in colour
+    let pretty = crate::colour(&std::io::stdout());
     let mut stdout = std::io::stdout().lock();
     let mut warned = false;
     for lint in lints {
@@ -44,7 +44,7 @@ pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
         let Ok(diagnostics) = std::fs::read_to_string(project.root.join(lint.diagnostics)) else {
             continue;
         };
-        let plain = without_colour(&diagnostics);
+        let plain = String::from_utf8_lossy(&rig::exec::without_colour(diagnostics.as_bytes())).into_owned();
         warned |= has_warning(&plain);
         let _ = stdout.write_all(if pretty { diagnostics } else { plain }.as_bytes());
     }
@@ -63,41 +63,9 @@ fn has_warning(diagnostics: &str) -> bool {
     diagnostics.lines().any(|line| line.starts_with("warning:") || line.starts_with("warning["))
 }
 
-/// Returns text without the escape sequences which colour it, `ESC [ ... m`, and those which rustc writes to reset
-/// the character set, `ESC ( B`.
-fn without_colour(text: &str) -> String {
-    let mut plain = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            plain.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            },
-            Some('(') => _ = chars.next(),
-            _ => (),
-        }
-    }
-    plain
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn removes_colour() {
-        let coloured = "\x1b[0m\x1b[1m\x1b[33mwarning\x1b[0m\x1b[0m\x1b[1m: unneeded `return`\x1b(B\x1b[m\n";
-        assert_eq!(without_colour(coloured), "warning: unneeded `return`\n");
-        assert_eq!(without_colour("plain é\n"), "plain é\n");
-    }
 
     #[test]
     fn finds_warnings() {

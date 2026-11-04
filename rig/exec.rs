@@ -898,10 +898,16 @@ fn run_command(
 /// finishes, or as it starts for a console edge, which then has the terminal, followed by its output. A failed edge
 /// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown, and
 /// with `verbose`, each edge is shown by its command rather than its description.
+///
+/// Without `colour`, as where the output is not a terminal, the escape sequences which colour what the commands
+/// printed are left out, as ninja leaves them out, so that commands can be told to print in colour, as rustc is with
+/// `--color=always`, whose output is captured rather than a terminal, without their actions depending on where the
+/// build's output goes.
 pub struct Console<W: std::io::Write> {
     pub out: W,
     pub quiet: bool,
     pub verbose: bool,
+    pub colour: bool,
 }
 impl<W: std::io::Write> Console<W> {
     fn status(&mut self, graph: &Graph, edge: EdgeId, progress: Progress) {
@@ -939,6 +945,13 @@ impl<W: std::io::Write> Observer for Console<W> {
                 let _ = writeln!(self.out, "{error}");
             }
         }
+        let plain;
+        let output = if self.colour {
+            output
+        } else {
+            plain = without_colour(output);
+            &plain
+        };
         let _ = self.out.write_all(output);
         if !output.is_empty() && !output.ends_with(b"\n") {
             let _ = writeln!(self.out);
@@ -947,10 +960,49 @@ impl<W: std::io::Write> Observer for Console<W> {
     }
 }
 
+/// Returns what a command printed without the escape sequences which colour it, `ESC [ ... <letter>`, and those which
+/// choose the character set, `ESC ( <byte>`, as rustc writes to reset it.
+#[must_use]
+pub fn without_colour(text: &[u8]) -> Vec<u8> {
+    let mut plain = Vec::with_capacity(text.len());
+    let mut bytes = text.iter().copied();
+    while let Some(byte) = bytes.next() {
+        if byte != 0x1b {
+            plain.push(byte);
+            continue;
+        }
+        match bytes.next() {
+            Some(b'[') => {
+                for byte in bytes.by_ref() {
+                    if byte.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            },
+            Some(b'(') => _ = bytes.next(),
+            _ => (),
+        }
+    }
+    plain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::Exec;
+
+    #[test]
+    fn removes_colour() {
+        let coloured = b"\x1b[0m\x1b[1m\x1b[33mwarning\x1b[0m\x1b[0m\x1b[1m: unneeded `return`\x1b(B\x1b[m\n";
+        assert_eq!(without_colour(coloured), b"warning: unneeded `return`\n");
+        assert_eq!(without_colour("plain \u{e9}\n".as_bytes()), "plain \u{e9}\n".as_bytes());
+        // and from what a console shows without colour
+        let graph = graph().rule("say", &[("command", "printf '\\033[1mbold\\033[0m\\n' && touch $out")]);
+        let mut build = Build::new("colour", graph.edge("say", &["a"], &[]).finish(), &[]);
+        let mut console = Console { out: Vec::new(), quiet: true, verbose: false, colour: false };
+        super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
+        assert_eq!(String::from_utf8(console.out).unwrap(), "bold\n");
+    }
     use crate::testing::{Graphs, graph};
     use std::time::Duration;
 
@@ -1107,7 +1159,7 @@ mod tests {
             ..Default::default()
         };
         let mut build = Build::new("exec-failed", program(exec), &[]);
-        let mut console = Console { out: Vec::new(), quiet: true, verbose: false };
+        let mut console = Console { out: Vec::new(), quiet: true, verbose: false, colour: true };
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         assert_eq!(String::from_utf8(console.out).unwrap(), "FAILED: out\nX=1 false 'a b' c\n");
         // and a program which is not found fails
@@ -1535,7 +1587,7 @@ mod tests {
             .edge("cat", &["ab"], &["a", "b"]).edge("fail", &["bad"], &[]);
         let mut build = Build::new("console-output", graph.finish(), &[("a", "a\n"), ("b", "b\n")]);
         build.options.jobs = 1;
-        let mut console = Console { out: Vec::new(), quiet: false, verbose: false };
+        let mut console = Console { out: Vec::new(), quiet: false, verbose: false, colour: true };
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         let out = String::from_utf8(console.out).unwrap();
         assert_eq!(out, "[1/2] cat a b > ab\n[2/2] FAIL bad\nFAILED: bad\necho why && false\nwhy\n");

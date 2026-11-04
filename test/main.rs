@@ -104,21 +104,6 @@ fn rebased(project: &Project, path: &Path) -> String {
     relative
 }
 
-/// Returns text without the escape sequences which colour it.
-fn without_colours(text: &str) -> String {
-    let mut plain = String::new();
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // a sequence ends with a letter, such as `m`
-            chars.by_ref().find(char::is_ascii_alphabetic);
-        } else {
-            plain.push(c);
-        }
-    }
-    plain
-}
-
 /// Returns `build.ninja` without the flags which remap the paths rustc writes, each quoted and followed by a space.
 fn without_remaps(ninja: &str) -> String {
     let mut out = String::new();
@@ -3077,10 +3062,9 @@ fn reproducible_outputs() {
         let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(output.status.success(), "{stdout}");
-        // without the colours rustc writes, which ninja leaves out where its output is not a terminal
-        let plain = without_colours(&stdout);
-        assert_contains(&plain, "--> app.rs:1:17");
-        assert_contains(&plain, "--> build/gen.rs:1:29");
+        // without colour, as stdout is not a terminal
+        assert_contains(&stdout, "--> app.rs:1:17");
+        assert_contains(&stdout, "--> build/gen.rs:1:29");
         let run = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
         assert_contains(&String::from_utf8(run.stderr).unwrap(), "panicked at app.rs:1:");
         let lib = std::fs::read(project.dir.join(format!("build/{host}/libg.rlib"))).unwrap();
