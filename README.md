@@ -76,8 +76,9 @@ which are for rust-analyzer, nor the lints. With rig, it takes a subset of ninja
 `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would run, `-v` to show commands rather
 than descriptions, and `--quiet`. With ninja, every argument is passed to ninja.
 rustc and clippy are run in colour, as their output is captured, and with rig, as with ninja, the colour is left out
-where the build's output is not a terminal, or `NO_COLOR` is set, unless `CLICOLOR_FORCE` is set, so that what is
-built does not depend on where its output goes. jig's own diagnostics, and `jig lint`, take the same variables.
+where the build's output is not a terminal, so that what is built does not depend on where its output goes. `jig
+--color <when>`, before the command, chooses otherwise, as `auto`, `always` or `never`, for the build with rig, `jig
+lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. ninja chooses for itself.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
 until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`

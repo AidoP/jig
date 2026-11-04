@@ -588,7 +588,8 @@ impl Cache {
     /// Remove what was used longest ago until the cache is no larger than `max` bytes.
     ///
     /// The results which were used longest ago are removed first, with each blob once no result which is kept refers
-    /// to it, then the manifests which were not used since the latest result removed was. A blob which no result
+    /// to it, then the manifests which were not used since the latest result removed was, and then, if it is still
+    /// larger, as once every result is removed, the manifests used longest ago. A blob which no result
     /// refers to, and a file in `tmp`, is removed once it is older than an hour, as a build may be adding the result
     /// which refers to it, or writing it. A result which is corrupted is removed. A file which cannot be removed is
     /// kept, as another build may have removed it, or the cache may be read-only.
@@ -660,9 +661,12 @@ impl Cache {
                 }
             }
         }
+        let mut manifests = manifests;
+        manifests.sort_by_key(|manifest| manifest.modified);
         let mut kept_manifests = 0;
         for manifest in &manifests {
-            if cutoff.is_some_and(|cutoff| manifest.modified <= cutoff) && remove(manifest, &mut |stats| stats.manifests += 1) {
+            let unused = cutoff.is_some_and(|cutoff| manifest.modified <= cutoff);
+            if (unused || size > max) && remove(manifest, &mut |stats| stats.manifests += 1) {
                 size -= manifest.size;
             } else {
                 kept_manifests += 1;
@@ -1002,6 +1006,21 @@ mod tests {
         // the blob of what was printed is shared, so it is kept while a result refers to it
         let collected = cache.gc(0);
         assert_eq!((collected.kept.results, collected.kept.blobs, collected.kept.bytes), (0, 0, 0));
+        assert_eq!(cache.stats(), Stats::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collects_manifests_newer_than_any_result_to_fit() {
+        // as a manifest is written just after its result, it is newer than the latest result removed
+        let dir = dir("gc-manifests");
+        let cache = Cache::open(&dir).unwrap();
+        add(&cache, "a", "a");
+        let manifest = cache.keyed("mf", &blake3::hash(b"a first"));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        std::fs::File::options().write(true).open(&manifest).unwrap().set_modified(later).unwrap();
+        let collected = cache.gc(0);
+        assert_eq!((collected.removed.results, collected.removed.manifests), (1, 1));
         assert_eq!(cache.stats(), Stats::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
