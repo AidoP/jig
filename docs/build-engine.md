@@ -690,7 +690,15 @@ implementation of that trait, so `generate.rs` doesn't change.
        isn't modified.
      - A generator which rewrites its output unchanged doesn't rebuild what follows. That test fails without hashing.
      - An integration test checks the property, the attribute and their invalid values.
-2. Priority by critical path, from the durations in the state log.
+2. **Done:** priority by critical path.
+   - **The priority.** Each planned edge's priority is how long it took when it last ran, from the state log, or 1 ms
+     if it hasn't run, plus the largest priority of the edges waiting for it. That is the time of the longest path from
+     it to the end of the build. The plan's order is topological, so one pass from its end finds them all.
+   - **The ready queue.** Ready edges start highest priority first, then in plan order, so a long chain isn't left
+     until last.
+   - **Tested.** With one job, a longer chain starts first before anything has run, and of two independent edges, the
+     one which took longer last time starts first. The test fails with every priority the same.
+3. **The jobserver** was done in phase 1, step 4.
 
 ### Phase 4: the local global cache
 
