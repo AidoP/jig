@@ -303,7 +303,7 @@ impl Pe {
 /// How long a probe may run before it is taken to have failed, such as when a runner does not exit.
 const TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a probe for Windows may run, as Wine may create its prefix when it is first run.
-const WINE_TIMEOUT: Duration = Duration::from_secs(60);
+const WINE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Returns whether the host can run what is built for a target, by running its probe, with the runner of the target
 /// if it has one, as a program and its first arguments.
