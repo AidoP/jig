@@ -4,7 +4,7 @@
 name = "rig"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 description = "A build engine, which builds a graph of files from the edges which produce them"
 publish = false
 

@@ -1259,7 +1259,7 @@ mod tests {
         assert!(!client_cache.has_blob(&hash));
         // as is a result or manifest
         assert!(client_cache.result(&hash).is_none());
-        assert!(client_cache.manifest(&hash).is_empty());
+        assert_eq!(client_cache.manifest(&hash), Vec::<Discovery>::new());
         let _ = std::fs::remove_dir_all(client_cache.dir());
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
         std::fs::write(server.blob_path(&hash), &corrupted).unwrap();
         let remote = served(server.clone(), false, false);
         let local = cache("large-corrupted-local");
-        assert!(remote.fetch_blobs(&local, &[hash]).is_empty());
+        assert_eq!(remote.fetch_blobs(&local, &[hash]), Vec::<Hash>::new());
         assert!(!local.has_blob(&hash) && !server.has_blob(&hash));
         assert_eq!(std::fs::read_dir(local.dir().join("tmp")).unwrap().count(), 0);
         assert!(remote.error().is_none());
@@ -1416,7 +1416,7 @@ mod tests {
         assert_eq!(fetch(None, Some(b"secret")), [blob]);
         // while a client with another, or none, is refused
         let remote = served_with_token(server.clone(), Some(b"secret"), Some(b"other"));
-        assert!(remote.fetch_blobs(&local, &[blob]).is_empty());
+        assert_eq!(remote.fetch_blobs(&local, &[blob]), Vec::<Hash>::new());
         assert!(remote.error().unwrap().contains("the token is not the server's"), "{:?}", remote.error());
         let remote = served_with_token(server.clone(), Some(b"secret"), None);
         assert!(remote.manifest(&blob).is_none());

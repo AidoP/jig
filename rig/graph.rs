@@ -204,7 +204,9 @@ impl Graph {
     pub fn edge(&self, edge: EdgeId) -> EdgeRef<'_> {
         EdgeRef { graph: self, data: &self.edges[edge.0 as usize] }
     }
+    // clippy before 1.99 asks for `must_use`, which from 1.99 it finds is already the iterator's
     #[must_use]
+    #[allow(clippy::double_must_use)]
     pub fn edges(&self) -> impl ExactSizeIterator<Item = EdgeRef<'_>> {
         self.edges.iter().map(|data| EdgeRef { graph: self, data })
     }
@@ -463,7 +465,7 @@ mod tests {
         let edge = graph.edge(edge);
         assert_eq!(edge.outputs(), &[NodeId(0)]);
         assert_eq!(edge.inputs(), &[NodeId(1)]);
-        assert!(edge.implicit().is_empty());
+        assert_eq!(edge.implicit(), &[] as &[NodeId]);
     }
 
     #[test]

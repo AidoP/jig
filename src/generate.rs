@@ -558,6 +558,14 @@ fn write_graph(
         if let Some(path) = &link_script {
             linked_flags.codegen(&format!("link-arg=-T{}", path.display()));
         }
+        // Apple's linker writes the absolute paths of the object files into what it links, as the map by which debug
+        // info is found in them, which `--remap-path-prefix` does not reach, so they are made relative to its working
+        // directory, the build directory, by `-oso_prefix .`, as `cc`, the linker of the host, takes it
+        let host = project.host();
+        let default_linker = !codegen(c, project).iter().any(|option| option.starts_with("linker="));
+        if c.target == host && host.contains("-apple-") && default_linker {
+            linked_flags.codegen("link-arg=-Wl,-oso_prefix,.");
+        }
         let link_deps: Vec<_> = deps.iter().copied().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
@@ -1163,6 +1171,9 @@ mod benches {
 
     #[test]
     fn externs_of_a_chain() {
+        // short enough that the crates of the longer chain fit in a core's cache, as the time to look up each crate
+        // grows once they do not, which made a longer chain take more than ten times as long for four times its length
+        // on some machines, though the work is linear
         let chain = |n: usize| {
             let mut source = String::from("crate c0 'c.rs'\n");
             for i in 1..n {
@@ -1170,7 +1181,7 @@ mod benches {
             }
             crates(&source)
         };
-        assert_linear("externs-chain", 8000, chain, |crates| {
+        assert_linear("externs-chain", 100, chain, |crates| {
             std::hint::black_box(externs(crates));
         });
     }

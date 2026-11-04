@@ -1413,6 +1413,15 @@ fn environment_variables_reconfigure() {
     build(&path);
     assert!(!build(&path).contains("CONFIGURE"));
     assert_contains(&build(&format!("{path}:/nonexistent")), "CONFIGURE build.ninja");
+    // a directory which is searched and is missing is not out of date each time, as ninja would find it
+    let missing = project.dir.join("missing");
+    let path = format!("{}:{path}", missing.display());
+    build(&path);
+    assert!(!build(&path).contains("CONFIGURE"));
+    // but configures the project again once it exists
+    std::fs::create_dir(&missing).unwrap();
+    assert_contains(&build(&path), "CONFIGURE build.ninja");
+    assert!(!build(&path).contains("CONFIGURE"));
 }
 
 #[test]

@@ -21,7 +21,7 @@ set release-target 'x86_64-unknown-linux-musl'
 
 ## Building
 
-Building `jig` needs Rust 1.95 or later. ninja 1.11 or later is optional, for building with ninja rather than rig, and
+Building `jig` needs Rust 1.97 or later. ninja 1.11 or later is optional, for building with ninja rather than rig, and
 for the tests which compare the two, which are skipped without it. The tests need a nightly toolchain as well, for those
 of custom targets.
 

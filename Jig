@@ -1,5 +1,5 @@
 # MSRV
-set rust-version '1.95.0'
+set rust-version '1.97.0'
 use msrv
 
 # defaults

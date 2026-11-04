@@ -1147,7 +1147,7 @@ mod tests {
         assert_eq!(build.read("err.txt"), "to-stderr\n");
         // with nothing captured from stderr
         assert_eq!(finished, [("out".to_string(), String::new())]);
-        assert!(build.build(&[]).1.is_empty());
+        assert_eq!(build.build(&[]).1, Vec::<(String, String)>::new());
     }
 
     #[test]

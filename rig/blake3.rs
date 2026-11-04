@@ -102,7 +102,7 @@ impl Output {
     fn root_hash(&self) -> [u8; OUT_LEN] {
         let words = compress(&self.input_cv, &self.block, 0, self.block_len, self.flags | ROOT);
         let mut hash = [0; OUT_LEN];
-        for (bytes, word) in hash.chunks_exact_mut(4).zip(words) {
+        for (bytes, word) in hash.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             bytes.copy_from_slice(&word.to_le_bytes());
         }
         hash
