@@ -320,8 +320,8 @@ Distribution reuses the cache's blob store and keys. A remote execution is a cac
 - **Workers.** `jig worker` runs the same protocol as the cache over `ssh --stdio` or TCP.
   - On connecting, a worker reports its host triple, its rustup toolchains and their installed targets, its job
     count, and any tags.
-  - Workers are listed in a user configuration file, `~/.config/jig/workers`, or in `JIG_WORKERS`, not in `Jig`, since
-    they belong to a machine rather than a project.
+  - Workers are listed in the user's configuration, `~/.config/jig/config`, as the remote cache is, or in
+    `JIG_WORKERS`, rather than in a project's `Jig`, since they belong to a machine rather than a project.
 - **Running an action remotely.**
   1. The client asks which input blobs the worker is missing, and uploads only those.
   2. The worker materializes the inputs in a fresh directory under its own root, using hard links from its store, and
@@ -952,8 +952,38 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Requests take turns on one connection, and blobs are sent whole in a frame. Several connections, or
        streaming large blobs, should be measured first.
      - The manifest is asked for on every lookup of a cached edge, a round trip each.
-2. A TCP transport for `jig serve`, with a shared token for private networks.
-3. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
+2. **Done:** the user's configuration, for settings such as the remote cache.
+   - **The file.** It is `$XDG_CONFIG_HOME/jig/config`, or `~/.config/jig/config`, or what `JIG_CONFIG` gives, and
+     `JIG_CONFIG=off` turns it off.
+     - It is a Jig file, processed before the project's `Jig` as if the project began with a `use` of it, so there is
+       one syntax. `env()`, `@if` and `path()` work in it, and a project can read and override what it sets.
+     - The project depends on it, so a change configures again. While it is missing, it is a missing path, so creating
+       it configures again too.
+   - **The cache's settings are builtin properties.** They are overridden by the variables which set them before:
+     - `cache/dir`, or `JIG_CACHE`, defaulting to `$XDG_CACHE_HOME/jig` or `~/.cache/jig`;
+     - `cache/size`, or `JIG_CACHE_SIZE`, defaulting to `'10G'`;
+     - `cache/remote`, or `JIG_REMOTE_CACHE`;
+     - `cache/push`, or `JIG_REMOTE_CACHE_PUSH`.
+   - **Resolved when configuring.** `cache::Settings` is resolved once the configuration is evaluated, reading the
+     variables as configuration variables, and recorded in `.jig` (version 19). A build reads it from there rather than
+     from the environment.
+     - Changing the remote cache now configures the project again, where it was only read by the build before.
+     - A cached custom command's identity is found once the configuration is evaluated rather than as it is declared,
+       as the cache can be turned on or off after it.
+   - **Without a project.** `jig cache` and `jig serve` process the user's configuration alone, with the toolchain's
+     builtin properties from rustc if it can be run, or empty, so that a server without Rust can serve a cache.
+   - **Tests.**
+     - The integration tests run jig with `JIG_CONFIG=off`, so the user's configuration doesn't affect them, and the
+       perf tests do too.
+     - jig: finding the file from each variable, and resolving the settings with each override, turned off, and invalid.
+     - Integration:
+       - `jig cache` takes the settings of the configuration, with a directory relative to it.
+       - A project reads `cache/push` from it, depends on it, and pushes to the remote cache it gives.
+       - Changing it configures again.
+       - An error in it is reported at its path.
+       - Creating it while it is missing configures again.
+3. A TCP transport for `jig serve`, with a shared token for private networks.
+4. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
 
 ### Phase 6: distributed execution
 

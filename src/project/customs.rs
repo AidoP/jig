@@ -35,8 +35,10 @@ pub struct Custom {
     pub tags: Vec<String>,
     /// How rig finds that the files of a command have changed, in place of `change-detection`, if it is given.
     pub change_detection: Option<String>,
-    /// What identifies the command in rig's cache, if it has the `cache` attribute and rig caches: the toolchain, and
-    /// the program, if it is found in `PATH`.
+    /// Whether the command has the `cache` attribute.
+    pub cached: bool,
+    /// What identifies the command in rig's cache, if it is cached and rig caches: the toolchain, and the program, if it
+    /// is found in `PATH`, as [`Project::identify_cached_customs`] finds it once the configuration is evaluated.
     pub cache: Option<String>,
     /// The environment variables the command reads from those it inherits, whose values are its inputs.
     pub pass_env: Vec<String>,
@@ -256,7 +258,6 @@ impl Project {
             return;
         }
         let runner = command.unwrap_or_default();
-        let cache = if cache { self.custom_identity(&runner) } else { None };
         // the outputs are declared as a property named after the command, once it is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test { CustomKind::Test { runner: None, harness: false } } else { CustomKind::Command { outputs, default, install } };
@@ -270,12 +271,23 @@ impl Project {
             kind,
             tags,
             change_detection,
-            cache,
+            cached: cache,
+            cache: None,
             pass_env,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {
             self.declare_reference(declared, span, Item::CustomCommand, reference);
+        }
+    }
+    /// Find what identifies each command with the `cache` attribute in rig's cache, if rig caches, as the project's
+    /// `cache` identifies its toolchain once the configuration is evaluated, as [`Self::custom_identity`] finds it.
+    pub fn identify_cached_customs(&mut self) {
+        for index in 0..self.customs.len() {
+            if self.customs[index].cached {
+                let runner = Runner { command: self.customs[index].command.clone(), program: self.customs[index].program.clone() };
+                self.customs[index].cache = self.custom_identity(&runner);
+            }
         }
     }
     /// Returns what identifies a command with the `cache` attribute in rig's cache, if rig caches: a hash of the

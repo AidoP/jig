@@ -150,9 +150,10 @@ fn jig_command() -> Command {
 }
 
 /// Run a command with the tests' own cache, rather than the user's, which every test shares, as builds may, and which
-/// is collected down to 256 MiB.
+/// is collected down to 256 MiB, and without the user's configuration.
 fn with_test_cache(mut command: Command) -> Command {
     command.env("JIG_CACHE", std::env::temp_dir().join("jig-test-cache")).env("JIG_CACHE_SIZE", "256M");
+    command.env("JIG_CONFIG", "off");
     command
 }
 
@@ -1527,6 +1528,66 @@ fn cache_command() {
 }
 
 #[test]
+fn user_configuration() {
+    if !rig_engine() {
+        return;
+    }
+    // the user's configuration is processed before a project's, setting rig's cache, which a project depends on
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-user-config-home", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = dir.join("config");
+    let server = dir.join("server").display().to_string();
+    let remote = format!("/usr/bin/env JIG_CACHE={server} {} serve --stdio --push", configure_path().display());
+    // a path relative to the configuration, as in any file of it
+    let settings = format!("set cache/dir path('cache')\nset cache/remote '{remote}'\nset cache/push true\n");
+    std::fs::write(&config, &settings).unwrap();
+    let jig = |cwd: &Path, args: &[&str]| {
+        let mut command = jig_command();
+        command.args(args).env_remove("JIG_CACHE").env_remove("JIG_CACHE_SIZE").env("JIG_CONFIG", &config);
+        let output = command.current_dir(cwd).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    // `jig cache` has no project, so it takes the configuration alone
+    let (ok, stats) = jig(&dir, &["cache", "stats"]);
+    assert!(ok && stats.starts_with(&format!("{}/cache\n", dir.display())), "{stats}");
+    let project = Project::new("user-config", &[("Jig", "crate a 'a.rs'\nlog note cache/push\n"), ("a.rs", "")]);
+    let (ok, output) = jig(&project.dir, &["generate"]);
+    assert!(ok, "{output}");
+    assert_contains(&output, "note: true");
+    assert_contains(&std::fs::read_to_string(project.dir.join("build/build.ninja.d")).unwrap(), "/config ");
+    let (ok, output) = jig(&project.dir, &["build"]);
+    assert!(ok && !output.contains("warning"), "{output}");
+    // pushed to the remote cache
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &server).output().unwrap();
+    assert!(!String::from_utf8(stats.stdout).unwrap().contains("\n0 results"));
+    // a change to it configures the project again, as does a variable which overrides it
+    std::fs::write(&config, settings.replace("set cache/push true", "set cache/push false")).unwrap();
+    let (ok, output) = jig(&project.dir, &["build"]);
+    assert!(ok, "{output}");
+    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, "note: false");
+    // an error in it is reported with where it is
+    std::fs::write(&config, "set cache/push 'sometimes'\n").unwrap();
+    let (ok, output) = jig(&project.dir, &["generate"]);
+    assert!(!ok);
+    assert_contains(&output, &format!("--> {}:1", config.display()));
+    // and one which is missing configures the project again once it exists
+    std::fs::remove_file(&config).unwrap();
+    let (ok, output) = jig(&project.dir, &["generate"]);
+    assert!(ok, "{output}");
+    std::fs::write(&config, "set cache/dir 'off'\n").unwrap();
+    let (ok, output) = jig(&project.dir, &["build"]);
+    assert!(ok, "{output}");
+    assert_contains(&output, "CONFIGURE build.ninja");
+    let (ok, output) = jig(&dir, &["cache", "stats"]);
+    assert!(!ok);
+    assert_contains(&output, "the cache is off");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn remote_cache() {
     if !rig_engine() {
         return;
@@ -1550,9 +1611,10 @@ fn remote_cache() {
         assert!(output.status.success(), "{stdout}");
         stdout
     };
+    // the remote cache is part of how the project is configured, as is whether it is pushed to
     let first = Project::new("remote-first", &files);
     let local = dir.join("first").display().to_string();
-    first.configure_with(&[("JIG_CACHE", &local)]).ok();
+    first.configure_with(&[("JIG_CACHE", &local), ("JIG_REMOTE_CACHE", &remote), ("JIG_REMOTE_CACHE_PUSH", "1")]).ok();
     let output = build(&first, &local, &[("JIG_REMOTE_CACHE_PUSH", "1")]);
     assert!(!output.contains("warning: the remote cache"), "{output}");
     let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &server).output().unwrap();
@@ -1560,7 +1622,7 @@ fn remote_cache() {
     assert!(!stats.contains("\n0 results"), "{stats}");
     let second = Project::new("remote-second", &files);
     let local = dir.join("second").display().to_string();
-    second.configure_with(&[("JIG_CACHE", &local)]).ok();
+    second.configure_with(&[("JIG_CACHE", &local), ("JIG_REMOTE_CACHE", &remote)]).ok();
     assert_contains(&build(&second, &local, &[("PATH", "/nonexistent")]), "unused variable");
     let output = Command::new(second.dir.join(format!("build/{}/app", second.host()))).output().unwrap();
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");

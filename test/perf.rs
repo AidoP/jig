@@ -45,7 +45,7 @@ impl Project {
             let start = Instant::now();
             let output = Command::new(&jig)
                 // without the cache, which would fetch what is timed
-                .env("JIG_CACHE", "off")
+                .env("JIG_CACHE", "off").env("JIG_CONFIG", "off")
                 .args(args)
                 .current_dir(&self.dir)
                 .output()
@@ -318,7 +318,7 @@ fn build_times(project: &Project, engine: &str, full: bool) -> (Duration, Durati
         let start = Instant::now();
         let output = Command::new(jig_path())
             .arg("build")
-            .env("JIG_CACHE", "off")
+            .env("JIG_CACHE", "off").env("JIG_CONFIG", "off")
             .env("JIG_ENGINE", engine)
             .current_dir(&project.dir)
             .output()

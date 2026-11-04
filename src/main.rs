@@ -4,6 +4,7 @@ use std::{io::IsTerminal, path::{Path, PathBuf}};
 mod bench;
 mod builder;
 mod cache;
+mod config;
 mod check;
 mod configured;
 mod database;
@@ -143,8 +144,8 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             let args: Vec<_> = args.collect();
             run::run(name.as_deref(), &args)
         },
-        "cache" => cache::command(args).map(|()| ExitCode::SUCCESS),
-        "serve" => cache::serve(args).map(|()| ExitCode::SUCCESS),
+        "cache" => cache::command(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
+        "serve" => cache::serve(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -184,23 +185,50 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
-    // rig caches when there is a cache, which configures the project again when it is turned on or off
-    if cache::dir(|name| project.read_env(name)).is_some() {
-        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot, toolchain));
-    }
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
     };
     declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
+    // the user's configuration, as if the project began by using it
+    config::apply(&mut project)?;
     project.parse(file);
     // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
     if !project.fatal {
         project.check();
     }
-
     report_diagnostics(&project)?;
+
+    // rig caches when there is a cache, which configures the project again when it is turned on or off, as the variables
+    // which override the configuration are read by it
+    let settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
+    if settings.dir.is_some() {
+        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot, toolchain));
+        project.identify_cached_customs();
+    }
+    project.cache_settings = settings;
     generate::write(project, &input, &sysroot)
+}
+
+/// Returns how rig caches outside a project, as for `jig cache` and `jig serve`, from the user's configuration alone,
+/// and the variables which override it.
+///
+/// The builtin properties have rustc's values, if it can be run, or are empty, so that a server without Rust can serve
+/// a cache.
+fn user_settings(toolchain: Option<&str>) -> Result<cache::Settings, Error> {
+    let print = |request| rustc_print(request, toolchain).unwrap_or_default();
+    let (sysroot, host) = (print("sysroot"), print("host-tuple"));
+    let targets: Vec<String> = print("target-list").lines().map(String::from).collect();
+    let version = rustc_output("-vV", toolchain).and_then(|output| rustc_version(&output)).unwrap_or_default();
+    let mut project = project::Project::new(std::env::current_dir().unwrap_or_default(), targets.clone());
+    project.toolchain = toolchain.map(String::from);
+    declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
+    config::apply(&mut project)?;
+    if !project.fatal {
+        project.check();
+    }
+    report_diagnostics(&project)?;
+    cache::Settings::resolve(&project.cache_properties(), |name| std::env::var_os(name))
 }
 
 /// Declare the builtin properties, with the sysroot, host target, version and targets of the toolchain as rustc reports
@@ -214,6 +242,7 @@ fn declare_builtins(
     toolchain: Option<&str>,
 ) {
     let target_list = targets.iter().map(|target| project::Data::Str(target.clone())).collect();
+    let cache_dir = cache::default_dir(|name| project.read_env(name));
     let builtins = [
         (
             project::Property::new("rustc/sysroot".into(), project::Type::String)
@@ -261,6 +290,28 @@ fn declare_builtins(
                 .read_only(),
             toolchain.unwrap_or_default().into(),
         ),
+        (
+            project::Property::new("cache/dir".into(), project::Type::String).info(
+                "the directory of rig's cache, `$XDG_CACHE_HOME/jig` or `~/.cache/jig` by default, or `'off'` without \
+                 a cache, which `JIG_CACHE` overrides",
+            ),
+            cache_dir,
+        ),
+        (
+            project::Property::new("cache/size".into(), project::Type::String).info(
+                "the size rig's cache is collected down to, such as `'512M'` or `'10G'`, which `JIG_CACHE_SIZE` \
+                 overrides",
+            ),
+            cache::DEFAULT_SIZE.into(),
+        ),
+        (
+            project::Property::new("cache/remote".into(), project::Type::String).info(
+                "the remote cache which rig's cache is in front of, as `'ssh://[<user>@]<host>[:<port>][/<jig>]'` or \
+                 a command which serves it on its stdin and stdout, or empty without one, which `JIG_REMOTE_CACHE` \
+                 overrides",
+            ),
+            String::new(),
+        ),
     ];
     let lists = [
         (
@@ -268,6 +319,13 @@ fn declare_builtins(
                 .info("the builtin targets of rustc, as printed by `rustc --print=target-list`")
                 .read_only(),
             project::Data::List(target_list),
+        ),
+        (
+            project::Property::new("cache/push".into(), project::Type::Bool).info(
+                "whether rig pushes what it builds to the remote cache, if it takes pushes, which \
+                 `JIG_REMOTE_CACHE_PUSH=1` overrides",
+            ),
+            project::Data::Bool(false),
         ),
         (
             project::Property::new("test-tags".into(), project::Type::List)

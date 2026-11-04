@@ -385,6 +385,7 @@ impl Project {
             kind: CustomKind::Test { runner: None, harness: true },
             tags,
             change_detection: None,
+            cached: false,
             cache: None,
             pass_env: Vec::new(),
         });

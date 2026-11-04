@@ -815,6 +815,9 @@ fn write_database(
     let input = input.display().to_string();
     let build_dir = build_dir.display().to_string();
     let install_prefix = project.install_prefix();
+    let settings = &project.cache_settings;
+    let cache_dir = settings.dir.as_ref().map(|dir| dir.display().to_string()).unwrap_or_default();
+    let cache_size = settings.size.to_string();
     let proxy_build = project.deferred_severity("proxy-build", Severity::Warning).to_string();
     let other_jig = project.deferred_severity("other-jig", Severity::Warning).to_string();
     // the `jig` which regenerates `build.ninja`, as its configure rule runs it
@@ -860,6 +863,10 @@ fn write_database(
         proxy_build: &proxy_build,
         other_jig: &other_jig,
         jig: &jig,
+        cache_dir: &cache_dir,
+        cache_size: &cache_size,
+        remote_cache: settings.remote.as_deref().unwrap_or_default(),
+        push: settings.push,
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {
