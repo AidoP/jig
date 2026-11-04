@@ -21,9 +21,11 @@ pub mod plan;
 mod stamp;
 pub mod state;
 mod sys;
+#[cfg(all(target_os = "linux", target_pointer_width = "64", target_endian = "little"))]
+mod uring;
 
 pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Graph, NodeId, Pool};
-pub use stamp::{Stamp, Stamps};
+pub use stamp::{Stamp, Stamps, stamps_of};
 
 /// An error from building, saving or loading a graph, or reading a ninja file.
 #[derive(Debug)]

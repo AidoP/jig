@@ -1,4 +1,7 @@
 //! Stamps, which tell whether a file has changed since it was recorded.
+//!
+//! The stamps a build needs are found together before it is planned, by [`stamps_of`], on several threads, or with
+//! `io_uring`, which submits them in batches, if `RIG_IO_URING` is `1` and the system supports it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -80,8 +83,70 @@ impl<'a> Stamps<'a> {
         self.paths.insert(path.into(), stamp);
         stamp
     }
+    /// Find the stamps of nodes and paths which have not been found, together, so that they are not found one by one.
+    pub fn prefetch(&mut self, nodes: &[NodeId], paths: &[&str]) {
+        let nodes: Vec<NodeId> = nodes.iter().copied().filter(|node| self.nodes[node.0 as usize].is_none()).collect();
+        let new = |path: &&str| self.graph.node(path).is_none() && !self.paths.contains_key(*path);
+        let paths: Vec<&str> = paths.iter().copied().filter(new).collect();
+        let all = nodes.iter().map(|&node| self.graph.path(node)).chain(paths.iter().copied());
+        let full: Vec<PathBuf> = all.map(|path| self.dir.join(path)).collect();
+        let full: Vec<&Path> = full.iter().map(PathBuf::as_path).collect();
+        let mut stamps = stamps_of(&full).into_iter();
+        for (node, stamp) in nodes.iter().zip(stamps.by_ref()) {
+            self.nodes[node.0 as usize] = Some(stamp);
+        }
+        for (path, stamp) in paths.iter().zip(stamps) {
+            self.paths.insert((*path).to_string(), stamp);
+        }
+    }
     /// Forget the stamp of a node, such as an output once its edge has run, so that it is found again.
     pub fn forget(&mut self, node: NodeId) {
         self.nodes[node.0 as usize] = None;
+    }
+}
+
+/// The fewest files stamped on threads of their own, below which they are stamped on the calling thread.
+const PARALLEL_MIN: usize = 256;
+
+/// Returns the stamps of files, in the same order, found together: with `io_uring` if `RIG_IO_URING` is `1` and the
+/// system supports it, or otherwise on several threads if there are enough of them.
+#[must_use]
+pub fn stamps_of(paths: &[&Path]) -> Vec<Stamp> {
+    #[cfg(all(target_os = "linux", target_pointer_width = "64", target_endian = "little"))]
+    if paths.len() > 1
+        && std::env::var_os("RIG_IO_URING").is_some_and(|value| value == "1")
+        && let Ok(mut ring) = crate::uring::Ring::new()
+    {
+        return ring.stamps(paths);
+    }
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    if paths.len() < PARALLEL_MIN || threads == 1 {
+        return paths.iter().map(|path| Stamp::of(path)).collect();
+    }
+    let chunk = paths.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let stamp = |chunk: &[&Path]| chunk.iter().map(|path| Stamp::of(path)).collect::<Vec<_>>();
+        let handles: Vec<_> = paths.chunks(chunk).map(|chunk| scope.spawn(move || stamp(chunk))).collect();
+        handles.into_iter().flat_map(|handle| handle.join().unwrap_or_default()).collect()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stamps_together_as_one_by_one() {
+        let dir = std::env::temp_dir().join(format!("rig-stamps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..PARALLEL_MIN * 2).map(|i| dir.join(format!("f{i}"))).collect();
+        for (i, path) in paths.iter().enumerate().filter(|(i, _)| i % 3 != 0) {
+            std::fs::write(path, "x".repeat(i)).unwrap();
+        }
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let expected: Vec<Stamp> = refs.iter().map(|path| Stamp::of(path)).collect();
+        assert_eq!(stamps_of(&refs), expected);
+        assert_eq!(stamps_of(&refs[..3]), expected[..3]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
