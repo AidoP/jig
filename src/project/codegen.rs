@@ -139,9 +139,8 @@ impl Project {
     /// its attributes, or the properties which are set, those for the target replacing the others, reporting those
     /// whose values cannot be given to rustc.
     ///
-    /// So that they can be set for the whole project, as with cargo, a procedural macro is not given `lto` by the
-    /// properties, as rustc refuses it for one, and only a binary is given `panic`, as a library built with
-    /// `panic=abort` cannot be linked into a test harness, which unwinds, while an attribute of the crate still gives
+    /// So that they can be set for the whole project, as with cargo, a procedural macro is not given `lto` or `panic`
+    /// by the properties, as rustc refuses LTO for one, and it must unwind, while an attribute of the crate still gives
     /// either.
     pub(super) fn codegen_options(
         &mut self,
@@ -154,11 +153,7 @@ impl Project {
         for option in CODEGEN_OPTIONS {
             // the last attribute for the option replaces the others, and the properties for the targets
             let attribute = attributes.iter().rev().find(|attribute| attribute.option == option.name);
-            let skipped = match option.name {
-                "lto" => kind == rust::Kind::ProcMacro,
-                "panic" => kind != rust::Kind::Bin,
-                _ => false,
-            };
+            let skipped = kind == rust::Kind::ProcMacro && matches!(option.name, "lto" | "panic");
             if attribute.is_none() && skipped {
                 continue;
             }
