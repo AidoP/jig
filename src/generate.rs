@@ -165,6 +165,8 @@ pub struct Unit {
     pub cfg: Vec<String>,
     /// The environment variables rustc is run with for the crate.
     pub env: Vec<(String, String)>,
+    /// The environment variables rustc inherits for the crate.
+    pub pass_env: Vec<String>,
     /// The directory of the outputs for the target.
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
@@ -365,6 +367,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             codegen: codegen(c, project),
             cfg: c.cfg.clone(),
             env: c.env.clone(),
+            pass_env: c.pass_env.clone(),
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
             default: c.default,
@@ -521,6 +524,7 @@ fn write_graph(
             exec: Some(&exec),
             hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
             cache: custom.cache.as_deref(),
+            pass_env: &custom.pass_env,
             ..Default::default()
         })?;
         // so that the outputs can be built by name
@@ -561,7 +565,7 @@ fn write_graph(
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
-        let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, toolchain };
+        let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
         let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &output), crate_flags, None);
         graph.edge(&Edge {
             rule: "rustc",
@@ -578,6 +582,7 @@ fn write_graph(
             ],
             exec: Some(&exec),
             hashed,
+            pass_env: rust.pass_env,
             cache,
             ..Default::default()
         })?;
@@ -604,6 +609,7 @@ fn write_graph(
                 ],
                 exec: Some(&exec),
                 hashed,
+                pass_env: rust.pass_env,
                 cache,
                 ..Default::default()
             })?;
@@ -634,7 +640,7 @@ fn write_graph(
         flags.cfg(&unit.cfg);
         let crate_env = crate_env(&unit.env);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
-        let rust = Rust { crate_type, name, input: &root, env, toolchain };
+        let rust = Rust { crate_type, name, input: &root, env, pass_env: &unit.pass_env, toolchain };
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
         // the documentation is of the crate as it is built, rather than its tests, with the metadata of the crates it
@@ -659,6 +665,7 @@ fn write_graph(
                 ],
                 exec: Some(&exec),
                 hashed,
+                pass_env: rust.pass_env,
                 ..Default::default()
             })?;
             let phony = Path::new("doc").join(name);
@@ -700,6 +707,7 @@ fn write_graph(
                 ],
                 exec: Some(&exec),
                 hashed,
+                pass_env: rust.pass_env,
                 cache,
                 ..Default::default()
             })?;
@@ -725,6 +733,7 @@ fn write_graph(
             ],
             exec: Some(&exec),
             hashed,
+            pass_env: rust.pass_env,
             cache,
             ..Default::default()
         })?;
@@ -980,6 +989,8 @@ struct Rust<'a> {
     input: &'a Path,
     /// The environment variables of the crate.
     env: &'a [(String, String)],
+    /// The environment variables it inherits.
+    pass_env: &'a [String],
     toolchain: Option<&'a str>,
 }
 impl Rust<'_> {

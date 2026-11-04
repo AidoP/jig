@@ -51,6 +51,10 @@ pub struct Options {
     pub env: Vec<(String, String)>,
     /// The cache the results of cached edges are kept in, if there is one.
     pub cache: Option<Cache>,
+    /// The environment variables which a hermetic edge inherits beside those it passes on, which only locate the tools
+    /// and files it uses, rather than changing what it produces, so they are not its inputs: `PATH`, `HOME` and
+    /// `TMPDIR` by default.
+    pub locating: Vec<String>,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -63,7 +67,11 @@ impl Options {
             2 => 3,
             threads => threads + 2,
         };
-        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(), env: Vec::new(), cache: None }
+        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(),
+            env: Vec::new(),
+            cache: None,
+            locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
+        }
     }
 }
 
@@ -147,6 +155,8 @@ struct Job {
     action: Action,
     console: bool,
     restore: Option<Restore>,
+    /// The variables a hermetic edge inherits, or `None` if it inherits every one.
+    inherit: Option<Vec<String>>,
 }
 
 /// The result of an edge in the cache, which is restored to its outputs.
@@ -365,7 +375,7 @@ impl Run<'_, '_> {
                 let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
                 scope.spawn(move || {
                     // the lock is held while waiting for a job, which the other threads wait for in turn
-                    while let Ok(Ok(Job { index, action, console, restore })) = work.lock().map(|work| work.recv()) {
+                    while let Ok(Ok(Job { index, action, console, restore, inherit })) = work.lock().map(|work| work.recv()) {
                         let start = SystemTime::now();
                         let clock = Instant::now();
                         // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
@@ -377,7 +387,7 @@ impl Run<'_, '_> {
                             let spawned = |pid| {
                                 let _ = sender.send(Message::Spawned(index, pid));
                             };
-                            let environment = Environment { makeflags, env };
+                            let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
                             run_command(&action, dir, console, &environment, &spawned)
                         };
                         let duration = clock.elapsed();
@@ -432,8 +442,14 @@ impl Run<'_, '_> {
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let action = self.action(index).clone();
                     let restore = self.lookup(index);
+                    let edge = self.graph.edge(self.edges[index]);
+                    let inherit = edge.hermetic().then(|| {
+                        let mut inherit = self.options.locating.clone();
+                        inherit.extend(edge.pass_env().iter().cloned());
+                        inherit
+                    });
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console, restore });
+                    let _ = jobs.send(Job { index, action, console, restore, inherit });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -638,7 +654,9 @@ impl Run<'_, '_> {
         let inputs = self.inputs.get(&index)?;
         let inputs: Vec<(&str, Option<&Hash>)> = inputs.iter().map(|(path, stamp)| (path.as_str(), stamp.hash())).collect();
         let action = plan::relocated_action_bytes(edge, &self.relocation);
-        let key = cache::first_key(identity, &action, &self.options.env, &outputs, edge.depfile(), &inputs);
+        let values: Vec<_> = edge.pass_env().iter().map(|name| self.stamps.env_hash(name)).collect();
+        let passed: Vec<_> = edge.pass_env().iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref())).collect();
+        let key = cache::first_key(identity, &action, &self.options.env, &passed, &outputs, edge.depfile(), &inputs);
         self.keys.insert(index, key);
         for discovery in cache.manifest(&key) {
             let stamps: Vec<Stamp> = discovery.inputs.iter().map(|path| self.stamps.path_as(path, true, None)).collect();
@@ -743,6 +761,8 @@ struct Environment<'a> {
     /// The value of `MAKEFLAGS` which gives it the jobserver, if rig created one.
     makeflags: Option<&'a str>,
     env: &'a [(String, String)],
+    /// The variables rig is run with which a hermetic command inherits, or `None` if it inherits every one.
+    inherit: Option<&'a [String]>,
 }
 
 /// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
@@ -775,6 +795,14 @@ fn run_command(
             (program, exec.program.as_str(), exec.stderr.as_ref().map(|path| dir.join(path)))
         },
     };
+    if let Some(inherit) = environment.inherit {
+        command.env_clear();
+        for name in inherit {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
     command.envs(environment.env.iter().map(|(name, value)| (name, value)));
     if let Action::Exec(exec) = action {
         command.envs(exec.env.iter().map(|(name, value)| (name, value)));
@@ -1255,6 +1283,79 @@ mod tests {
         second.options.cache = Some(cache.0.clone());
         assert_eq!(second.build(&[]).0.cached, 1);
         assert_eq!(second.read("out"), "/sub");
+    }
+
+    /// A graph of one edge, `out`, which writes `HOME`, `PATH` and `RIG_TEST_PASSED` as it sees them, passing on
+    /// `pass_env`, and cached if `cached`.
+    fn environment(cached: bool, pass_env: &[&str]) -> Graph {
+        let script = "printf '%s|%s|%s' \"${HOME-unset}\" \"${PATH+set}\" \"${RIG_TEST_PASSED-unset}\" > out";
+        let exec = Exec { program: "/bin/sh".into(), args: vec!["-c".into(), script.into()], ..Default::default() };
+        let mut graph = Graph::new();
+        let out = graph.file("out");
+        let kind = EdgeKind::Command(Action::Exec(exec));
+        let pass_env = pass_env.iter().map(|&name| name.to_string()).collect();
+        let cache = cached.then(|| "id".to_string());
+        graph.add_edge(crate::Edge { kind, outputs: vec![out], cache, pass_env, ..Default::default() }).unwrap();
+        graph
+    }
+
+    #[test]
+    fn runs_cached_edges_in_a_hermetic_environment() {
+        // the names of the variables `env` is run with, as it prints them, passing on `pass_env`, and cached if `cached`
+        let names = |name: &str, cached: bool, pass_env: &[&str], locating: &[&str]| {
+            let exec = Exec { program: "/usr/bin/env".into(), ..Default::default() };
+            let mut graph = Graph::new();
+            let out = graph.file("out");
+            let kind = EdgeKind::Command(Action::Exec(exec));
+            let pass_env = pass_env.iter().map(|&name| name.to_string()).collect();
+            let cache = cached.then(|| "id".to_string());
+            graph.add_edge(crate::Edge { kind, outputs: vec![out], cache, pass_env, ..Default::default() }).unwrap();
+            let mut build = Build::new(name, graph, &[]);
+            build.options.locating = locating.iter().map(|&name| name.to_string()).collect();
+            build.options.jobserver = false;
+            build.options.env.push(("RIG_TEST_GIVEN".into(), "given".into()));
+            let (_, finished) = build.build(&[]);
+            let mut names: Vec<String> =
+                finished[0].1.lines().filter_map(|line| Some(line.split_once('=')?.0.to_string())).collect();
+            names.sort();
+            names
+        };
+        // a cached edge inherits only the variables which locate tools, and those it passes on, beside those the build
+        // gives every command
+        let both = |name: &str| std::env::var_os(name).is_some();
+        let expected = |names: &[&str]| names.iter().filter(|&&name| name == "RIG_TEST_GIVEN" || both(name)).count();
+        assert_eq!(names("hermetic", true, &[], &["HOME"]).len(), expected(&["HOME", "RIG_TEST_GIVEN"]));
+        assert_eq!(names("hermetic-passed", true, &["PATH"], &[]), ["PATH", "RIG_TEST_GIVEN"]);
+        // while one which is not cached inherits every variable
+        let all = names("not-hermetic", false, &[], &[]);
+        assert!(all.len() > 2 && all.iter().any(|name| name == "PATH"), "{all:?}");
+    }
+
+    #[test]
+    fn builds_again_when_a_variable_it_passes_on_changes() {
+        let cache = TempCache::new("passed");
+        let mut build = Build::new("passed", environment(true, &["RIG_TEST_PASSED"]), &[]);
+        build.options.cache = Some(cache.0.clone());
+        let mut set = |value: &str| {
+            build.options.env.retain(|(name, _)| name != "RIG_TEST_PASSED");
+            build.options.env.push(("RIG_TEST_PASSED".into(), value.into()));
+            let (report, finished) = build.build(&[]);
+            assert!(report.succeeded(), "{finished:?}");
+            (report.ran, report.cached)
+        };
+        assert_eq!(set("one"), (1, 0));
+        assert_eq!(set("one"), (0, 0));
+        // its value is an input, and part of the key of the cache
+        assert_eq!(set("two"), (1, 0));
+        assert_eq!(set("one"), (1, 1));
+        let mut stamps = Stamps::new(&build.graph, &build.dir).with_env(&[("RIG_TEST_PASSED".into(), "three".into())]);
+        let plan = plan::plan(&build.graph, &build.state, &mut stamps, &[]).unwrap();
+        assert_eq!(plan.edges[0].1, Reason::EnvChanged("RIG_TEST_PASSED".into()));
+        // and passing on another variable changes its command
+        build.graph = environment(true, &["RIG_TEST_PASSED", "OTHER"]);
+        let mut stamps = Stamps::new(&build.graph, &build.dir).with_env(&build.options.env);
+        let plan = plan::plan(&build.graph, &build.state, &mut stamps, &[]).unwrap();
+        assert_eq!(plan.edges[0].1, Reason::CommandChanged);
     }
 
     #[test]

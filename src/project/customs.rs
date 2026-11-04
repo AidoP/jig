@@ -38,6 +38,8 @@ pub struct Custom {
     /// What identifies the command in rig's cache, if it has the `cache` attribute and rig caches: the toolchain, and
     /// the program, if it is found in `PATH`.
     pub cache: Option<String>,
+    /// The environment variables the command reads from those it inherits, whose values are its inputs.
+    pub pass_env: Vec<String>,
 }
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
@@ -126,6 +128,7 @@ impl Project {
         let mut tags = Vec::new();
         let mut change_detection = None;
         let mut cache = false;
+        let mut pass_env = Vec::new();
         let mut install = Install::data();
         // an attribute which failed has been reported, so it is not also reported as missing
         let mut failed = false;
@@ -172,6 +175,14 @@ impl Project {
                         self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
                     }
                     change_detection = value.or(change_detection);
+                },
+                "pass-env" if !test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    pass_env.extend(self.variable_names(&operand).unwrap_or_default());
                 },
                 "tag" if test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -260,6 +271,7 @@ impl Project {
             tags,
             change_detection,
             cache,
+            pass_env,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {

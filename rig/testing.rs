@@ -69,6 +69,7 @@ impl Graphs {
             action: None,
             hashed: self.1,
             cache: self.2.clone(),
+            pass_env: Vec::new(),
         };
         self.0.build(&build)
     }

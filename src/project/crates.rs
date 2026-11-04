@@ -64,6 +64,7 @@ impl Project {
         let mut depends = Vec::new();
         let mut cfg = Vec::new();
         let mut env = Vec::new();
+        let mut pass_env = Vec::new();
         let mut kind = rust::Kind::Lib;
         let mut link_script = None;
         let mut codegen = Vec::new();
@@ -129,6 +130,11 @@ impl Project {
                 "env" => {
                     if let Some(variables) = self.env_variables(&attribute.operand()) {
                         env.extend(variables);
+                    }
+                },
+                "pass-env" => {
+                    if let Some(names) = self.variable_names(&attribute.operand()) {
+                        pass_env.extend(names);
                     }
                 },
                 "depends" => {
@@ -238,6 +244,7 @@ impl Project {
                         depends: depends.clone(),
                         cfg: cfg.clone(),
                         env: env.clone(),
+                        pass_env: pass_env.clone(),
                         codegen: codegen[i].clone(),
                         lints: lints.clone(),
                         link_script: link_script.clone(),
@@ -337,6 +344,32 @@ impl Project {
         }
         Some(variables)
     }
+    /// Returns the names of environment variables, from a `pass-env` attribute, which is a name or a list of them, each
+    /// of letters, digits and `_`, reporting one which is not.
+    pub(super) fn variable_names(&mut self, operand: &Operand) -> Option<Vec<String>> {
+        let names: Vec<String> = match &operand.data {
+            Data::Str(name) => vec![name.clone()],
+            Data::List(names) if names.iter().all(|name| matches!(name, Data::Str(_))) => {
+                names.iter().map(Data::coerce_string).collect()
+            },
+            _ => {
+                self.invalid_operand(operand, "str, or list of str", false);
+                return None;
+            },
+        };
+        for name in &names {
+            let invalid = name.chars().find(|&c| !c.is_ascii_alphanumeric() && c != '_');
+            if name.is_empty() || invalid.is_some() {
+                self.diagnostics.push(Diagnostic {
+                    span: Some(operand.span),
+                    message: Message::InvalidIdentifier { name: name.clone(), character: invalid.unwrap_or(' ') },
+                    severity: Severity::Error,
+                });
+                return None;
+            }
+        }
+        Some(names)
+    }
     /// Register the test harness of a crate, like a `test` statement which runs it.
     ///
     /// The harness is run directly, until the runner of its target is known.
@@ -353,6 +386,7 @@ impl Project {
             tags,
             change_detection: None,
             cache: None,
+            pass_env: Vec::new(),
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their

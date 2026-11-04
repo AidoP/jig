@@ -119,6 +119,10 @@ pub struct Edge {
     /// again, with what identifies everything else its action depends on but its inputs, such as its toolchain, which
     /// is part of the key it is cached by. A cached edge's files are stamped by their contents, as a hashed edge's are.
     pub cache: Option<String>,
+    /// The environment variables the action reads from those it inherits, beside those it sets, whose values are inputs
+    /// of the edge, so that it runs again when one changes. A cached edge, which runs in a hermetic environment,
+    /// inherits only these and those which locate tools, as [`crate::exec::Options::locating`] lists.
+    pub pass_env: Vec<String>,
 }
 
 /// The lists of nodes of an edge, in the order they are stored.
@@ -138,6 +142,7 @@ struct EdgeData {
     restat: bool,
     hashed: bool,
     cache: Option<String>,
+    pass_env: Vec<String>,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
 }
@@ -248,6 +253,7 @@ impl Graph {
             restat: edge.restat,
             hashed: edge.hashed,
             cache: edge.cache,
+            pass_env: edge.pass_env,
             lists,
         });
         Ok(id)
@@ -382,6 +388,18 @@ impl<'a> EdgeRef<'a> {
     pub(crate) fn hashed_flag(&self) -> bool {
         self.data.hashed
     }
+    /// The environment variables the edge's action reads from those it inherits.
+    #[must_use]
+    pub fn pass_env(&self) -> &'a [String] {
+        &self.data.pass_env
+    }
+    /// Whether the edge runs in a hermetic environment, with only the variables it sets, those it passes on and those
+    /// which locate tools, as a cached edge does, so that a variable which is not part of its key cannot change what it
+    /// produces.
+    #[must_use]
+    pub fn hermetic(&self) -> bool {
+        self.data.cache.is_some()
+    }
     /// What identifies what the edge's action depends on beside its inputs, if its results are cached.
     #[must_use]
     pub fn cache(&self) -> Option<&'a str> {
@@ -404,6 +422,7 @@ impl<'a> EdgeRef<'a> {
             restat: self.data.restat,
             hashed: self.data.hashed,
             cache: self.data.cache.clone(),
+            pass_env: self.data.pass_env.clone(),
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {

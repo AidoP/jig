@@ -27,6 +27,8 @@ pub struct Crate {
     pub cfg: Vec<String>,
     /// The environment variables rustc is run with, which `env!` reads.
     pub env: Vec<(String, String)>,
+    /// The environment variables rustc inherits, which `env!` reads, whose values are inputs of the crate.
+    pub pass_env: Vec<String>,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
     /// The flags which give clippy's lints their levels, as `-W clippy::<lint>`, from the properties set where it was
