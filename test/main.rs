@@ -1573,6 +1573,33 @@ fn user_configuration() {
 }
 
 #[test]
+fn colour_flag() {
+    // rustc prints in colour, which is left out of what is not a terminal, as here, unless `--color` says otherwise
+    let project = Project::new("colour", &[("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() { let unused = 1; }\n")]);
+    project.configure().ok();
+    let mut warning = 0;
+    let mut build = |colour: &[&str]| {
+        // a change to the crate, so that rustc runs, rather than its result being fetched
+        warning += 1;
+        std::fs::write(project.dir.join("a.rs"), format!("pub fn f() {{ let unused = {warning}; }}\n")).unwrap();
+        let output = jig_command().args(colour).arg("build").current_dir(&project.dir).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{stdout}");
+        assert_contains(&stdout, "unused variable");
+        stdout.contains('\x1b')
+    };
+    if rig_engine() {
+        assert!(!build(&[]));
+        assert!(!build(&["--color", "auto"]));
+        assert!(build(&["--color=always"]));
+        assert!(!build(&["--color", "never"]));
+    }
+    let output = jig_command().args(["--color", "sometimes", "build"]).current_dir(&project.dir).output().unwrap();
+    assert!(!output.status.success());
+    assert_contains(&String::from_utf8(output.stderr).unwrap(), "`--color` is \"sometimes\"");
+}
+
+#[test]
 fn remote_cache() {
     if !rig_engine() {
         return;
@@ -2927,7 +2954,7 @@ fn commands() {
     assert_contains(&stderr, "note: generated");
     let (success, stdout, _) = run(&["help"]);
     assert!(success);
-    assert_contains(&stdout, "usage: jig [+<toolchain>] <command>");
+    assert_contains(&stdout, "usage: jig [+<toolchain>] [--color <when>] <command>");
     // a mistaken command is shown with the usage
     for (args, error) in [
         (&[][..], "missing required argument `command`"),
@@ -2938,7 +2965,7 @@ fn commands() {
         let (success, _, stderr) = run(args);
         assert!(!success, "{args:?}");
         assert_contains(&stderr, error);
-        assert_contains(&stderr, "usage: jig [+<toolchain>] <command>");
+        assert_contains(&stderr, "usage: jig [+<toolchain>] [--color <when>] <command>");
     }
 }
 

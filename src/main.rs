@@ -41,9 +41,10 @@ fn main() -> std::process::ExitCode {
 /// The internal commands are left out: `check <label>`, which rust-analyzer runs as its flycheck, and
 /// `build --proxy <prefix> <wrapper>`, which the wrappers installed by `install --proxy` run.
 const USAGE: &str = "\
-usage: jig [+<toolchain>] <command> [<argument> ...]
+usage: jig [+<toolchain>] [--color <when>] <command> [<argument> ...]
 
 A rustup toolchain given with `+` configures the project with it, and is used until it is configured with another.
+`--color` is `auto`, by default, to show colour where the output is a terminal, or `always` or `never`.
 
 commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
@@ -80,6 +81,8 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     use std::process::ExitCode;
     let mut args = args.peekable();
     let toolchain = toolchain::parse(&mut args)?;
+    let when = parse_colour(&mut args)?;
+    let _ = COLOUR.set(when);
     let Some(command) = args.next() else {
         return Err(Error::MissingArg("command"));
     };
@@ -349,11 +352,44 @@ fn declare_builtins(
     project.declare_diagnostic_overrides();
 }
 
-/// Whether what is written to a stream is in colour: where it is a terminal, unless `NO_COLOR` is set and not empty,
-/// or wherever it is if `CLICOLOR_FORCE` is set and not `0`, as other tools take them.
+/// When what jig shows is in colour, as `--color` gives it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Colour {
+    /// Where it is shown on a terminal.
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+/// When what jig shows is in colour, which `--color` sets before the command runs.
+static COLOUR: std::sync::OnceLock<Colour> = std::sync::OnceLock::new();
+
+/// Take `--color <when>` or `--color=<when>` from the arguments, if it is next, which is `auto` without it.
+fn parse_colour(args: &mut std::iter::Peekable<impl Iterator<Item = std::ffi::OsString>>) -> Result<Colour, Error> {
+    let Some(arg) = args.next_if(|arg| arg == "--color" || arg.to_string_lossy().starts_with("--color=")) else {
+        return Ok(Colour::Auto);
+    };
+    let arg = arg.to_string_lossy().into_owned();
+    let when = match arg.strip_prefix("--color=") {
+        Some(when) => when.to_string(),
+        None => args.next().ok_or(Error::MissingArg("--color <when>"))?.to_string_lossy().into_owned(),
+    };
+    match when.as_str() {
+        "auto" => Ok(Colour::Auto),
+        "always" => Ok(Colour::Always),
+        "never" => Ok(Colour::Never),
+        _ => Err(Error::InvalidColour(when)),
+    }
+}
+
+/// Whether what is written to a stream is in colour, as `--color` gives it: by default, where it is a terminal.
 pub fn colour(stream: &impl IsTerminal) -> bool {
-    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty() && value != "0");
-    set("CLICOLOR_FORCE") || stream.is_terminal() && !set("NO_COLOR")
+    match COLOUR.get().copied().unwrap_or_default() {
+        Colour::Auto => stream.is_terminal(),
+        Colour::Always => true,
+        Colour::Never => false,
+    }
 }
 
 /// Write the diagnostics of a project to stderr, failing if there are errors.
@@ -454,6 +490,8 @@ enum Error {
     UnknownCacheCommand(String),
     /// A `JIG_REMOTE_CACHE` which is not a remote cache.
     InvalidRemote(String),
+    /// A `--color` which is not when to show colour.
+    InvalidColour(String),
     /// `jig serve` could not serve the cache.
     Serve(std::io::Error),
 }
@@ -531,6 +569,7 @@ impl core::fmt::Display for Error {
                 write!(f, "`JIG_REMOTE_CACHE` is {remote:?}, rather than `ssh://[<user>@]<host>[:<port>][/<jig>]` or a command")
             },
             Self::Serve(error) => write!(f, "failed to serve the cache: {error}"),
+            Self::InvalidColour(when) => write!(f, "`--color` is {when:?}, rather than `auto`, `always` or `never`"),
             Self::UnknownCacheCommand(command) => {
                 write!(f, "unknown cache command {command:?}, rather than `stats`, `gc` or `clear`")
             },
