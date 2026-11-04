@@ -17,6 +17,57 @@ pub struct EdgeId(pub(crate) u32);
 pub enum Action {
     /// A command line, run by `sh -c`.
     Shell(String),
+    /// A program, run directly rather than by a shell.
+    Exec(Exec),
+}
+
+/// A program to run, with its arguments, environment, working directory and where its stderr goes, which need no
+/// quoting, as no shell reads them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Exec {
+    /// The program, which is found in `PATH` unless it has a `/`, when it is relative to the working directory.
+    pub program: String,
+    pub args: Vec<String>,
+    /// Environment variables the program is given, beside those it inherits.
+    pub env: Vec<(String, String)>,
+    /// The working directory, relative to the build's directory, which is the build's directory without one.
+    pub dir: Option<String>,
+    /// A file, relative to the build's directory, which stderr is written to rather than captured with stdout.
+    pub stderr: Option<String>,
+}
+
+impl Action {
+    /// Returns the action as a command line for `sh`, as it is shown, which is the command of a shell action.
+    #[must_use]
+    pub fn command_line(&self) -> String {
+        use std::fmt::Write as _;
+        let exec = match self {
+            Self::Shell(command) => return command.clone(),
+            Self::Exec(exec) => exec,
+        };
+        let mut line = String::new();
+        if let Some(dir) = &exec.dir {
+            let _ = write!(line, "cd {} && ", shell_quote(dir));
+        }
+        for (name, value) in &exec.env {
+            let _ = write!(line, "{name}={} ", shell_quote(value));
+        }
+        let words = std::iter::once(&exec.program).chain(&exec.args);
+        line.push_str(&words.map(|word| shell_quote(word)).collect::<Vec<_>>().join(" "));
+        if let Some(stderr) = &exec.stderr {
+            let _ = write!(line, " 2> {}", shell_quote(stderr));
+        }
+        line
+    }
+}
+
+/// Quote a word for `sh`, unless every character of it is known to be safe.
+fn shell_quote(word: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "_+-./=:,@%".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        return word.to_string();
+    }
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// Whether an edge produces its outputs by running an action, or only names other files.

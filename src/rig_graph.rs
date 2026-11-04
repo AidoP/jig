@@ -1,7 +1,7 @@
 //! rig's graph, `graph` in the build directory, which is built from the same description as `build.ninja`.
 //!
 //! The rules and edges are evaluated as ninja evaluates them, by [`rig::ninja::Manifest`], so that both describe the
-//! same build.
+//! same build, except that an edge runs its program directly, without a shell, rather than its rule's command.
 
 use std::path::{Path, PathBuf};
 
@@ -49,6 +49,7 @@ impl Graph for RigGraph {
                 implicit: &implicit,
                 order_only: &order_only,
                 bindings: edge.variables,
+                action: edge.exec.cloned().map(rig::Action::Exec),
             })
             .map_err(Error::Rig)
     }

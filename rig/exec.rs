@@ -130,10 +130,10 @@ enum Message {
     Finished(Finished),
 }
 
-/// An edge for a thread to run: its index in the plan, its command, and whether it is in the console pool.
+/// An edge for a thread to run: its index in the plan, its action, and whether it is in the console pool.
 struct Job {
     index: usize,
-    command: String,
+    action: Action,
     console: bool,
 }
 
@@ -299,14 +299,14 @@ impl Run<'_, '_> {
                 let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
                 scope.spawn(move || {
                     // the lock is held while waiting for a job, which the other threads wait for in turn
-                    while let Ok(Ok(Job { index, command, console })) = work.lock().map(|work| work.recv()) {
+                    while let Ok(Ok(Job { index, action, console })) = work.lock().map(|work| work.recv()) {
                         let start = SystemTime::now();
                         let clock = Instant::now();
                         let spawned = |pid| {
                             let _ = sender.send(Message::Spawned(index, pid));
                         };
                         let environment = Environment { makeflags, env };
-                        let (outcome, output) = run_command(&command, dir, console, &environment, &spawned);
+                        let (outcome, output) = run_command(&action, dir, console, &environment, &spawned);
                         let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
                         let _ = sender.send(Message::Finished(finished));
                     }
@@ -356,9 +356,9 @@ impl Run<'_, '_> {
                     }
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
-                    let Action::Shell(command) = self.action(index).clone();
+                    let action = self.action(index).clone();
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, command, console });
+                    let _ = jobs.send(Job { index, action, console });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -561,35 +561,60 @@ struct Environment<'a> {
     env: &'a [(String, String)],
 }
 
-/// Run a command with `sh -c` in a directory, returning how it finished and its output, stdout and stderr together,
-/// with the jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
+/// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
+/// jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
+///
+/// A shell action runs with `sh -c`, and a program runs directly, in its working directory, relative to `dir`, with
+/// stderr written to its file if it has one rather than captured.
 ///
 /// A console command has the terminal, and no output is captured, and is in rig's process group, so that it is sent
 /// what the terminal sends, such as `SIGINT`. Any other has no stdin, and leads a process group of its own, which the
 /// build signals when it is interrupted.
 fn run_command(
-    command: &str,
+    action: &Action,
     dir: &Path,
     console: bool,
     environment: &Environment,
     spawned: &dyn Fn(u32),
 ) -> (Outcome, Vec<u8>) {
     use std::os::unix::process::CommandExt;
-    let mut sh = Command::new("/bin/sh");
-    sh.arg("-c").arg(command).current_dir(dir);
-    sh.envs(environment.env.iter().map(|(name, value)| (name, value)));
-    if let Some(makeflags) = environment.makeflags {
-        sh.env("MAKEFLAGS", makeflags).env("CARGO_MAKEFLAGS", makeflags);
+    let (mut command, program, stderr_file) = match action {
+        Action::Shell(line) => {
+            let mut sh = Command::new("/bin/sh");
+            sh.arg("-c").arg(line).current_dir(dir);
+            (sh, "sh", None)
+        },
+        Action::Exec(exec) => {
+            let mut program = Command::new(&exec.program);
+            let working = exec.dir.as_ref().map_or_else(|| dir.to_path_buf(), |working| dir.join(working));
+            program.args(&exec.args).current_dir(working);
+            (program, exec.program.as_str(), exec.stderr.as_ref().map(|path| dir.join(path)))
+        },
+    };
+    command.envs(environment.env.iter().map(|(name, value)| (name, value)));
+    if let Action::Exec(exec) = action {
+        command.envs(exec.env.iter().map(|(name, value)| (name, value)));
     }
+    if let Some(makeflags) = environment.makeflags {
+        command.env("MAKEFLAGS", makeflags).env("CARGO_MAKEFLAGS", makeflags);
+    }
+    let stderr_file = match stderr_file.map(std::fs::File::create).transpose() {
+        Ok(file) => file,
+        Err(error) => return (Outcome::Error(format!("failed to create the file of stderr: {error}")), Vec::new()),
+    };
+    let failed = |error: std::io::Error| (Outcome::Error(format!("failed to run `{program}`: {error}")), Vec::new());
     if console {
-        let child = sh.spawn().and_then(|mut child| {
+        if let Some(file) = stderr_file {
+            command.stderr(file);
+        }
+        let child = command.spawn().and_then(|mut child| {
             spawned(child.id());
             child.wait()
         });
         return match child {
             Ok(status) if status.success() => (Outcome::Succeeded, Vec::new()),
             Ok(status) => (Outcome::Failed(status), Vec::new()),
-            Err(error) => (Outcome::Error(format!("failed to run `sh`: {error}")), Vec::new()),
+            Err(error) => failed(error),
         };
     }
     let pipe = std::io::pipe().and_then(|(reader, writer)| Ok((reader, writer.try_clone()?, writer)));
@@ -597,13 +622,21 @@ fn run_command(
         Ok(pipe) => pipe,
         Err(error) => return (Outcome::Error(format!("failed to create a pipe: {error}")), Vec::new()),
     };
-    sh.stdin(Stdio::null()).stdout(stdout).stderr(stderr).process_group(0);
-    let child = sh.spawn();
+    command.stdin(Stdio::null()).stdout(stdout).process_group(0);
+    // a writer of the pipe which is not given to the command is closed, so that the output ends
+    match stderr_file {
+        Some(file) => {
+            drop(stderr);
+            command.stderr(file)
+        },
+        None => command.stderr(stderr),
+    };
+    let child = command.spawn();
     // the command holds the pipe's writers, which must be closed for the output to end
-    drop(sh);
+    drop(command);
     let mut child = match child {
         Ok(child) => child,
-        Err(error) => return (Outcome::Error(format!("failed to run `sh`: {error}")), Vec::new()),
+        Err(error) => return failed(error),
     };
     spawned(child.id());
     let mut output = Vec::new();
@@ -611,7 +644,7 @@ fn run_command(
     let outcome = match (child.wait(), read) {
         (Ok(status), Ok(_)) if status.success() => Outcome::Succeeded,
         (Ok(status), Ok(_)) => Outcome::Failed(status),
-        (Err(error), _) | (_, Err(error)) => Outcome::Error(format!("failed to wait for `sh`: {error}")),
+        (Err(error), _) | (_, Err(error)) => Outcome::Error(format!("failed to wait for `{program}`: {error}")),
     };
     (outcome, output)
 }
@@ -632,10 +665,8 @@ impl<W: std::io::Write> Console<W> {
         }
         let data = graph.edge(edge);
         let description = match (data.description(), data.kind()) {
-            (description, EdgeKind::Command(Action::Shell(command))) if description.is_empty() || self.verbose => {
-                command.as_str()
-            },
-            (description, _) => description,
+            (description, EdgeKind::Command(action)) if description.is_empty() || self.verbose => action.command_line(),
+            (description, _) => description.to_string(),
         };
         let _ = writeln!(self.out, "[{}/{}] {description}", progress.finished, progress.total);
     }
@@ -656,8 +687,8 @@ impl<W: std::io::Write> Observer for Console<W> {
             let outputs = data.outputs().iter().chain(data.implicit_outputs());
             let outputs: Vec<&str> = outputs.map(|&node| graph.path(node)).collect();
             let _ = writeln!(self.out, "FAILED: {}", outputs.join(" "));
-            if let EdgeKind::Command(Action::Shell(command)) = data.kind() {
-                let _ = writeln!(self.out, "{command}");
+            if let EdgeKind::Command(action) = data.kind() {
+                let _ = writeln!(self.out, "{}", action.command_line());
             }
             if let Outcome::Error(error) = outcome {
                 let _ = writeln!(self.out, "{error}");
@@ -674,6 +705,7 @@ impl<W: std::io::Write> Observer for Console<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::Exec;
     use crate::testing::{Graphs, graph};
     use std::time::Duration;
 
@@ -766,6 +798,57 @@ mod tests {
         let start = Instant::now();
         assert_eq!(build.ran(&[]).len(), 3);
         assert!(start.elapsed() < Duration::from_millis(1150), "{:?}", start.elapsed());
+    }
+
+    /// A graph of one edge, `out`, which runs a program directly.
+    fn program(exec: Exec) -> Graph {
+        let mut graph = Graph::new();
+        let out = graph.file("out");
+        let kind = EdgeKind::Command(Action::Exec(exec));
+        graph.add_edge(crate::Edge { kind, outputs: vec![out], ..Default::default() }).unwrap();
+        graph
+    }
+
+    #[test]
+    fn runs_programs_without_a_shell() {
+        // the arguments reach the program as they are, as no shell splits or expands them, in its working directory,
+        // with its variables, and its stderr in a file
+        let script = "printf '%s|' \"$@\" > ../out && printf '%s' \"$VALUE\" >> ../out && echo to-stderr >&2";
+        let exec = Exec {
+            program: "sh".into(),
+            args: vec!["-c".into(), script.into(), "sh".into(), "a b".into(), "$HOME".into(), "it's".into()],
+            env: vec![("VALUE".into(), "v'1 2".into())],
+            dir: Some("sub".into()),
+            stderr: Some("err.txt".into()),
+        };
+        let mut build = Build::new("exec", program(exec), &[]);
+        std::fs::create_dir_all(build.dir.join("sub")).unwrap();
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(build.read("out"), "a b|$HOME|it's|v'1 2");
+        assert_eq!(build.read("err.txt"), "to-stderr\n");
+        // with nothing captured from stderr
+        assert_eq!(finished, [("out".to_string(), String::new())]);
+        assert!(build.build(&[]).1.is_empty());
+    }
+
+    #[test]
+    fn shows_a_failed_program_as_a_command_line() {
+        let exec = Exec {
+            program: "false".into(),
+            args: vec!["a b".into(), "c".into()],
+            env: vec![("X".into(), "1".into())],
+            ..Default::default()
+        };
+        let mut build = Build::new("exec-failed", program(exec), &[]);
+        let mut console = Console { out: Vec::new(), quiet: true, verbose: false };
+        super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
+        assert_eq!(String::from_utf8(console.out).unwrap(), "FAILED: out\nX=1 false 'a b' c\n");
+        // and a program which is not found fails
+        let exec = Exec { program: "rig-no-such-program".into(), ..Default::default() };
+        let mut build = Build::new("exec-missing", program(exec), &[]);
+        let (report, finished) = build.build(&[]);
+        assert_eq!(report.failed, 1, "{finished:?}");
     }
 
     #[test]

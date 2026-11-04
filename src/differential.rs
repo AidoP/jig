@@ -184,6 +184,8 @@ fn write(generated: &Generated, ninja_dir: &Path, rig_dir: &Path) {
                 implicit: &as_paths(&implicit),
                 order_only: &as_paths(&order_only),
                 variables: &variables,
+                // the commands are shell commands, which both engines run with `sh`
+                exec: None,
             })
             .unwrap_or_else(|error| panic!("{error}"));
     }
