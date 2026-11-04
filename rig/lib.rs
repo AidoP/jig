@@ -5,10 +5,13 @@
 //! be saved and loaded again in a compact binary format, so that what describes the build need not run again.
 //!
 //! What each edge last ran with is kept in a [`state::State`], from which [`plan::plan`] finds the edges which must run
-//! to bring targets up to date, and why, by comparing the [`Stamp`]s of their files with those recorded.
+//! to bring targets up to date, and why, by comparing the [`Stamp`]s of their files with those recorded, and
+//! [`exec::build`] runs them, in parallel.
 //!
 //! rig has no dependencies other than `std`.
 
+pub mod depfile;
+pub mod exec;
 mod format;
 mod graph;
 pub mod ninja;
