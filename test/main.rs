@@ -104,10 +104,13 @@ fn rebased(project: &Project, path: &Path) -> String {
     relative
 }
 
-/// Returns `build.ninja` without the flags which remap the paths rustc writes, each quoted and followed by a space.
+/// Returns `build.ninja` without the flags which remap the paths rustc writes, each quoted and followed by a space, and
+/// without the flag which gives Apple's linker the prefix of the paths of the object files it writes, which rustc is
+/// given where it links for the host on macOS.
 fn without_remaps(ninja: &str) -> String {
+    let ninja = ninja.replace(" -C link-arg=-Wl,-oso_prefix,.", "");
     let mut out = String::new();
-    let mut rest = ninja;
+    let mut rest = ninja.as_str();
     while let Some(start) = rest.find("'--remap-path-prefix=") {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
