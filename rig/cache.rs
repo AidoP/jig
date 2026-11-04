@@ -387,20 +387,14 @@ impl Cache {
     ///
     /// If the manifest cannot be written.
     pub fn add_to_manifest(&self, key: &Hash, discovery: Discovery) -> std::io::Result<()> {
-        let mut manifest = self.local_manifest(key);
+        let manifest = self.local_manifest(key);
         if manifest.first() == Some(&discovery) {
             return Ok(());
         }
-        manifest.retain(|other| *other != discovery);
-        manifest.insert(0, discovery);
-        manifest.truncate(MANIFEST_MAX);
-        let mut w = Writer::new(MANIFEST);
-        w.len(manifest.len());
-        for discovery in &manifest {
-            w.strs(&discovery.inputs);
-            w.strs(&discovery.env);
-        }
-        self.write(&self.keyed("mf", key), w)
+        let bytes = manifest_with(manifest, discovery);
+        let tmp = self.tmp();
+        std::fs::write(&tmp, &bytes)?;
+        Self::place(&tmp, &self.keyed("mf", key))
     }
     /// Returns the result of an edge by its second key, if the cache has it and every blob it needs, or else the
     /// remote cache has it, when it is added to this one, and its blobs are fetched when they are restored.
@@ -527,6 +521,29 @@ impl Cache {
         std::fs::write(&tmp, &bytes)?;
         Self::place(&tmp, path)
     }
+}
+
+/// Returns a manifest as it is stored, of its sets of discovered inputs with another as the latest, keeping the latest.
+fn manifest_with(mut manifest: Vec<Discovery>, discovery: Discovery) -> Vec<u8> {
+    manifest.retain(|other| *other != discovery);
+    manifest.insert(0, discovery);
+    manifest.truncate(MANIFEST_MAX);
+    let mut w = Writer::new(MANIFEST);
+    w.len(manifest.len());
+    for discovery in &manifest {
+        w.strs(&discovery.inputs);
+        w.strs(&discovery.env);
+    }
+    let mut bytes = w.0;
+    let hash = blake3::hash(&bytes);
+    bytes.extend_from_slice(&hash);
+    bytes
+}
+
+/// Returns a manifest as it is stored, as it was, if it is valid, with another set of discovered inputs as the latest.
+pub(crate) fn merged_manifest(stored: Option<&[u8]>, discovery: Discovery) -> Vec<u8> {
+    let manifest = stored.and_then(|bytes| read_manifest(valid(MANIFEST, bytes)?)).unwrap_or_default();
+    manifest_with(manifest, discovery)
 }
 
 /// Returns the blobs a result as it is stored refers to, if it is valid.

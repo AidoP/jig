@@ -574,7 +574,12 @@ impl core::fmt::Display for Error {
                 write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
             },
             Self::InvalidRemote(remote) => {
-                write!(f, "`JIG_REMOTE_CACHE` is {remote:?}, rather than `ssh://[<user>@]<host>[:<port>][/<jig>]` or a command")
+                write!(
+                    f,
+                    "the remote cache is {remote:?}, rather than `ssh://[<user>@]<host>[:<port>][/<jig>]`, \
+                     `tcp://<host>:<port>`, `http://[<user>:<password>@]<host>[:<port>][/<path>]` or a command, as \
+                     `https://` is not spoken, which a proxy which speaks TLS can be put in front of",
+                )
             },
             Self::Serve(error) => write!(f, "failed to serve the cache: {error}"),
             Self::InvalidColour(when) => write!(f, "`--color` is {when:?}, rather than `auto`, `always` or `never`"),

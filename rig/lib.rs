@@ -17,6 +17,7 @@ pub mod blake3;
 pub mod cache;
 pub mod depfile;
 pub mod exec;
+pub mod http;
 mod format;
 mod graph;
 pub mod jobserver;

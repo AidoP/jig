@@ -305,9 +305,13 @@ and inputs is fetched instead of run.
   hit updates) and `jig cache clear`. Blobs are verified against their hash when read, so a corrupt cache causes a
   miss and an eviction, not a bad build.
 - **Remote cache.** The remote cache sits behind the same interface as the local store, and the local store sits in
-  front of it. Since only `std` is available, which has no TLS, it has two transports:
-  - **HTTP/1.1**, with `GET`/`PUT /cas/<hash>` and `/ac/<key>`, compatible with existing simple HTTP caches such as
-    bazel-remote. It's for localhost, LAN, or behind a TLS proxy.
+  front of it. Since only `std` is available, which has no TLS, it has three transports:
+  - **HTTP/1.1**, with `GET`, `HEAD` and `PUT` of the files of a cache's directory, `/cas/<ab>/<cdef...>`,
+    `/ac/<key>` and `/mf/<key>`, as any server of files with `PUT` serves them, such as nginx with WebDAV. It's for
+    localhost, LAN, or behind a TLS proxy. bazel-remote's HTTP API doesn't fit, as it checks each blob against its
+    SHA-256 and each action result against Bazel's format, while rig's blobs are named by BLAKE3 and its results are
+    its own.
+  - **TCP**, `jig serve --listen`, with jig's own protocol and a shared token, for private networks.
   - **`ssh host jig serve --stdio`**: jig's own framed protocol over a child `ssh`'s stdin and stdout. ssh handles
     authentication and encryption, and no new dependency is needed.
   - Pulling from the remote cache is open to all clients. Pushing is configurable and meant for trusted machines,
@@ -1073,7 +1077,49 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Integration: `jig serve --listen 127.0.0.1:0`, with the user's configuration naming it and the token file.
        One checkout pushes, another with an empty local cache and no `rustc` fetches every edge, and a client with
        another token is warned of and builds without it.
-6. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
+6. **Done:** the HTTP/1.1 client, for a server of files.
+   - **Not bazel-remote.** The plan was for caches such as bazel-remote. But as far as I know, bazel-remote checks a
+     blob put to `/cas/` against its SHA-256, and an entry put to `/ac/` against Bazel's `ActionResult`, while rig
+     names blobs by BLAKE3 and stores its own results. So the client is for a generic server of files with `PUT`
+     instead.
+   - **The layout is a cache's directory.** Blobs are at `/cas/<the first two hex digits>/<the rest>`, results at
+     `/ac/<key>` and manifests at `/mf/<key>`. A server of files can therefore serve a jig cache's directory as it
+     is, and what is pushed is one, which `jig cache stats` reads.
+   - **`rig::http::Client`**
+     - It speaks `http://` only, as `std` has no TLS; a proxy that speaks TLS can be put in front. `https://` is an
+       error which says so.
+     - Connections are kept alive and pooled. A request on a pooled connection that fails before its response starts
+       is sent again once, on a new one, rewinding a file it sends.
+     - Bodies are sent with `Content-Length`, a file read as it is sent. They are read by `Content-Length`, in chunks,
+       or until the connection closes, and given to a sink a part at a time. `HEAD`, `204` and `304` have none.
+     - `http://user:password@host` authenticates with HTTP's Basic scheme. `cache/token-file` sends
+       `Authorization: Bearer`.
+   - **`Remote::http`** is a backend of the same `Remote`, so the local cache, lookups, background pushes and
+     failure handling are as for the other transports.
+     - Manifests are fetched once per key.
+     - Results are asked for by every set's key at once, the first in order taken.
+     - Blobs are fetched at once, each written to the cache in parts as it is read.
+     - A push finds missing blobs by `HEAD`, puts them from their files at once, then the result, then the manifest
+       merged with the server's. A push from elsewhere at once may lose one set of inputs or the other, as a miss.
+     - Requests from one call go on up to 8 threads, each with a connection of its own.
+     - Any status but `2xx` or `404`, or a failure to connect, turns the remote off, saying which request failed.
+   - **Tests.**
+     - rig, HTTP:
+       - URLs parsed, with ports, IPv6 hosts, users, and what isn't one.
+       - Base64 against known values.
+       - Bodies of 300 KB and from files, with `Content-Length` and chunked, with trailers.
+       - `HEAD`, and connections kept alive.
+       - Basic and bearer authentication, and refusal.
+     - rig, remote:
+       - A result with a blob of three parts pushed, with and without chunked responses, kept in a cache's layout,
+         and fetched by another cache.
+       - Manifests merged.
+       - A server which refuses with `401`, or isn't there, turns the remote off.
+     - jig: `http://` and `https://` addresses.
+     - Integration, with a small server of files:
+       - One checkout pushes, and `jig cache stats` reads the served directory as a cache.
+       - Another checkout with an empty local cache and no `rustc` fetches every edge.
+       - `https://` is an error.
 
 ### Phase 6: distributed execution
 
