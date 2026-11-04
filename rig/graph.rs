@@ -115,6 +115,10 @@ pub struct Edge {
     /// run when a file is changed back, or written again unchanged, and what depends on its outputs does not run when
     /// it writes them unchanged.
     pub hashed: bool,
+    /// Whether the edge's results are kept in a [`Cache`](crate::cache::Cache), and fetched from it rather than run
+    /// again, with what identifies everything else its action depends on but its inputs, such as its toolchain, which
+    /// is part of the key it is cached by. A cached edge's files are stamped by their contents, as a hashed edge's are.
+    pub cache: Option<String>,
 }
 
 /// The lists of nodes of an edge, in the order they are stored.
@@ -133,6 +137,7 @@ struct EdgeData {
     generator: bool,
     restat: bool,
     hashed: bool,
+    cache: Option<String>,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
 }
@@ -242,6 +247,7 @@ impl Graph {
             generator: edge.generator,
             restat: edge.restat,
             hashed: edge.hashed,
+            cache: edge.cache,
             lists,
         });
         Ok(id)
@@ -367,9 +373,19 @@ impl<'a> EdgeRef<'a> {
     pub fn restat(&self) -> bool {
         self.data.restat
     }
+    /// Whether the edge's files are stamped by their contents, as it is hashed or cached.
     #[must_use]
     pub fn hashed(&self) -> bool {
+        self.data.hashed || self.data.cache.is_some()
+    }
+    /// Whether the edge is hashed by its own flag, whether or not it is cached.
+    pub(crate) fn hashed_flag(&self) -> bool {
         self.data.hashed
+    }
+    /// What identifies what the edge's action depends on beside its inputs, if its results are cached.
+    #[must_use]
+    pub fn cache(&self) -> Option<&'a str> {
+        self.data.cache.as_deref()
     }
     /// Returns the edge as it would be added to a graph.
     #[must_use]
@@ -387,6 +403,7 @@ impl<'a> EdgeRef<'a> {
             generator: self.data.generator,
             restat: self.data.restat,
             hashed: self.data.hashed,
+            cache: self.data.cache.clone(),
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {

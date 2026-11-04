@@ -21,7 +21,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 16;
+const VERSION: u32 = 17;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {

@@ -7,12 +7,14 @@
 //!
 //! What each edge last ran with is kept in a [`state::State`], from which [`plan::plan`] finds the edges which must run
 //! to bring targets up to date, and why, by comparing the [`Stamp`]s of their files with those recorded, and
-//! [`exec::build`] runs them, in parallel.
+//! [`exec::build`] runs them, in parallel, fetching the outputs of an edge which has already run with the same action
+//! and inputs from a [`cache::Cache`] rather than running it, if the build has one and the edge is cached.
 //!
 //! rig has no dependencies other than `std`. What it needs of the system which `std` does not provide, such as
 //! signals and FIFOs, is declared from the C library in one module, behind a safe interface.
 
 pub mod blake3;
+pub mod cache;
 pub mod depfile;
 pub mod exec;
 mod format;

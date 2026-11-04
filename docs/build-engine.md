@@ -278,8 +278,9 @@ and inputs is fetched instead of run.
   - It is content-addressed: blobs are named by their BLAKE3 hash in sharded directories, and action results are
     stored separately.
   - Entries are written to a temporary file and renamed into place, so concurrent builds need no locks.
-  - Outputs are restored by reflink (`ioctl(FICLONE)`) where the filesystem supports it, by hard link where it's
-    safe (the output is read-only, which jig's are), and by copy otherwise.
+  - Outputs are restored by reflink (`ioctl(FICLONE)`) where the filesystem supports it, and by copy otherwise. Hard
+    links aren't used, as jig's outputs aren't read-only, so a command that wrote to one in place would change the
+    cache's blob.
 - **Keys.** Dependencies discovered from a depfile are only known after the action runs, so lookup takes two steps,
   as in ccache's manifest mode:
   1. `k1 = H(action hash, toolchain identity, hashes of the declared inputs)` leads to a manifest, which lists the
@@ -287,7 +288,7 @@ and inputs is fetched instead of run.
   2. For each set, `k2 = H(k1, hashes of those inputs as they are now)` leads to a result: output blobs, captured
      output, and the depfile rewritten with paths relative to the root.
 - **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host), the sysroot's manifest and the
-  `RUSTUP_TOOLCHAIN` in the action. It's computed once per configuration and recorded in `.jig`.
+  `RUSTUP_TOOLCHAIN` in the action. It's computed once per configuration and given to each cached edge in the graph.
 - **Relocation.** A hit in another checkout needs outputs that don't contain the checkout's path.
   - jig passes rustc `--remap-path-prefix=<root>=.`, and the equivalent for the sysroot.
   - The cache key uses paths relative to the project root.
@@ -702,12 +703,75 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ### Phase 4: the local global cache
 
-- Add the content-addressed store, two-step keys and toolchain identity.
-- Remap paths in jig's rustc, rustdoc and clippy commands, with tests that a second checkout in another directory gets
-  every edge from the cache.
-- Add the `cache` attribute for `custom`, and replay cached diagnostics.
-- Add the `pass-env` attribute and hermetic environments for cacheable actions.
-- Add `jig cache stats|gc|clear`.
+#### Steps
+
+1. **Done:** the content-addressed store, two-step keys and toolchain identity.
+   - **`rig::cache`.** A `Cache` is a directory of three stores, each file written to `tmp` and renamed into place, so
+     builds sharing it need no lock.
+     - `cas` holds the blobs, named by their BLAKE3 hash in directories of its first two hexadecimal digits: outputs,
+       depfiles, and what commands printed.
+     - `mf` holds the manifests, by first key.
+     - `ac` holds the results, by second key. A result lists each output's path, blob and whether it is executable,
+       and the blob of what was printed.
+     - A manifest or result ends with the BLAKE3 hash of what precedes it. One that doesn't match is a miss, and is
+       removed.
+   - **Keys.**
+     - The first is of the edge's cache identity, its action, the variables every command is given
+       (`Options::env`), its outputs and depfile, and the hashes of its declared inputs.
+     - The second is of the first, and of the hashes of one of the manifest's sets of discovered inputs and
+       variables, as they are now.
+     - Each part has its length before it, and a missing file or unset variable is marked as such.
+     - A manifest keeps the latest 16 sets.
+   - **Restoring.**
+     - A blob is copied, by `FICLONE` where the file system can (in `rig/sys.rs`), to a file beside the output, which is
+       checked against its hash, then renamed over the output.
+     - A blob that doesn't match is removed, every blob of that result is checked, and the edge runs instead.
+   - **In the executor.**
+     - A cached edge is looked up when it starts, once its inputs are stamped.
+     - A hit is restored on the job's thread in place of running the command. Its depfile is restored with its outputs,
+       so it is recorded as if it had run, keeping the duration of its last run for the critical path.
+     - A miss which succeeds adds its outputs, depfile and printed output to the cache, unless an output is missing.
+     - `Report::cached` counts the hits.
+     - A cache which can't be read or written is a miss, never a failure.
+   - **Cached edges are hashed.** An edge with a cache identity (`Edge::cache`, graph format version 4) is stamped by
+     its contents, as the keys need the hashes.
+   - **jig.**
+     - When `JIG_CACHE` is set while configuring, the rustc, check and clippy edges are cached, identified by the
+       toolchain's identity. rustdoc isn't, as it writes a directory rather than the files its edge lists.
+     - The identity is a hash of `rustc -vV`, the toolchain's name, and rustup's
+       `lib/rustlib/multirust-channel-manifest.toml` and `lib/rustlib/components` in the sysroot (or, without rustup,
+       `bin/rustc`). The configuration depends on those files, so that updating a toolchain in place configures the
+       project again and identifies the toolchain afresh.
+     - `JIG_CACHE` is read as one of the configuration's variables, so setting or unsetting it configures the project
+       again. A relative path is relative to the working directory of the build.
+   - **Opt-in for now.** The cache is used only with `JIG_CACHE`, not by default in `~/.cache/jig`, until
+     `jig cache gc` can bound its size.
+   - **Measured.** In one checkout, `librig.rlib` takes 4.3 s to compile.
+     - Undoing an edit fetches it in 0.05 s.
+     - After the build directory is removed, configuring and fetching it takes 0.16 s.
+     - A second checkout misses, as rustc is given the absolute paths of sources, until step 2 remaps them.
+   - **Not done yet.**
+     - The linker isn't part of the identity, though linked edges are cached.
+     - Hits don't update a last-used time, which `gc` will need.
+     - Blobs are stored on the build's own thread, copying and hashing each output again, rather than on a job's
+       thread. That should be measured on a large build.
+   - **Tests.**
+     - The store's blobs, manifests and results, with corruption.
+     - Keys differing by each part.
+     - A second build directory fetching outputs, depfile and printed output, and recording them.
+     - Discovered and declared inputs changing and changing back.
+     - Another identity or environment missing.
+     - A corrupted cache running the edge and being filled again.
+     - Executable outputs.
+     - An integration test, in which a crate whose outputs are removed is fetched, with its warning, with no `rustc` on
+       `PATH`, and unsetting `JIG_CACHE` configures again.
+2. Remap paths in jig's rustc, rustdoc and clippy commands, with tests that a second checkout in another directory gets
+   every edge from the cache.
+3. Add the `cache` attribute for `custom`. Cached diagnostics are already replayed for rustc and clippy: what they
+   print is restored with their outputs, and the diagnostics files of checks and lints are implicit outputs, which are
+   restored too.
+4. Add the `pass-env` attribute and hermetic environments for cacheable actions.
+5. Add `jig cache stats|gc|clear`, then use `~/.cache/jig` by default.
 
 ### Phase 5: the remote cache
 

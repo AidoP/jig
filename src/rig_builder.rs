@@ -14,6 +14,10 @@ use crate::{Error, ninja, rig_graph};
 /// The directory of the state of the build, in the build directory.
 pub const STATE: &str = ".rig";
 
+/// The environment variable which gives the directory of the cache, which rig keeps the results of rustc and clippy
+/// in, and fetches them from rather than running them again, if it is set when the project is configured.
+pub const CACHE: &str = "JIG_CACHE";
+
 /// rig, which builds in the build directory, with the toolchain the project is configured with.
 pub struct Rig<'a> {
     pub build_dir: &'a Path,
@@ -63,12 +67,18 @@ impl Rig<'_> {
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }
-    fn options(&self) -> rig::exec::Options {
+    /// The options of a build, with the cache in the directory `JIG_CACHE` gives, relative to the working directory, if
+    /// it is set.
+    fn options(&self) -> Result<rig::exec::Options, Error> {
         let mut options = rig::exec::Options::new(self.build_dir);
         if let Some(toolchain) = self.toolchain {
             options.env.push(("RUSTUP_TOOLCHAIN".into(), toolchain.into()));
         }
-        options
+        if let Some(dir) = std::env::var_os(CACHE).filter(|dir| !dir.is_empty()) {
+            let dir = std::path::absolute(&dir).map_err(|error| Error::Rig(rig::Error::Io(dir.into(), error)))?;
+            options.cache = Some(rig::cache::Cache::open(&dir).map_err(Error::Rig)?);
+        }
+        Ok(options)
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.
     ///
@@ -124,7 +134,7 @@ struct Console {
 impl Builder for Rig<'_> {
     fn build(&self, request: &Request) -> Result<bool, Error> {
         let args = Args::parse(request.args)?;
-        let mut options = self.options();
+        let mut options = self.options()?;
         if let Some(jobs) = args.jobs {
             options.jobs = jobs.max(1);
         }
@@ -139,7 +149,7 @@ impl Builder for Rig<'_> {
     }
     fn regenerate(&self, quiet: bool, output: Output) -> Result<(), Error> {
         let console = Console { quiet, verbose: false };
-        if self.run(&[ninja::FILE], &self.options(), console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
+        if self.run(&[ninja::FILE], &self.options()?, console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
     fn up_to_date(&self, target: &str) -> Result<bool, Error> {
         self.planned(&[target])

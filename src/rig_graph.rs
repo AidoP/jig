@@ -51,6 +51,7 @@ impl Graph for RigGraph {
                 bindings: edge.variables,
                 action: edge.exec.cloned().map(rig::Action::Exec),
                 hashed: edge.hashed,
+                cache: edge.cache.map(String::from),
             })
             .map_err(Error::Rig)
     }

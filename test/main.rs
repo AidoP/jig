@@ -1361,6 +1361,47 @@ fn environment_variables_reconfigure() {
 }
 
 #[test]
+fn rig_fetches_from_the_cache() {
+    if !rig_engine() {
+        return;
+    }
+    // rustc's results are kept in the cache `JIG_CACHE` gives, from which those which are removed are fetched, with
+    // what rustc printed, rather than running it, which here is not found
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let cache_dir = cache.display().to_string();
+    let project = Project::new("rig-cache", &[
+        ("Jig", "crate a 'a.rs'\ncrate app 'app.rs'\n    crate-type 'bin'\n    use a\n"),
+        ("a.rs", "pub fn value() -> u32 { let unused = 1; 42 }\n"),
+        ("app.rs", "fn main() { print!(\"{}\", a::value()); }\n"),
+    ]);
+    project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    let build = |path: Option<&str>| {
+        let mut command = Command::new(configure_path());
+        command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_contains(&build(None), "unused variable");
+    let host = project.host();
+    let (lib, app) = (project.dir.join(format!("build/{host}/liba.rlib")), project.dir.join(format!("build/{host}/app")));
+    std::fs::remove_file(&lib).unwrap();
+    std::fs::remove_file(&app).unwrap();
+    assert_contains(&build(Some("/nonexistent")), "unused variable");
+    let output = Command::new(&app).output().unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
+    // and unsetting it configures the project again, without the cache
+    let mut command = Command::new(configure_path());
+    let output = command.arg("build").env_remove("JIG_CACHE").current_dir(&project.dir).output().unwrap();
+    assert_contains(&String::from_utf8(output.stdout).unwrap(), "CONFIGURE build.ninja");
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn rig_rebuilds_when_a_crate_variable_changes() {
     // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info
     let project = Project::new("rig-env", &[

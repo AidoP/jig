@@ -10,6 +10,11 @@
 //! The outputs of a restat edge are found again once it has run, and if none of them changed, an edge which would run
 //! only because it depends on them is checked again, and does not run if it is otherwise up to date.
 //!
+//! A cached edge, when the build has a [`Cache`], is looked up in it before it runs, by its action and the contents of
+//! its inputs, and if it has run with them before, its outputs and depfile are restored from the cache, and what its
+//! command printed is shown, rather than running it. Otherwise its outputs, depfile and what it printed are added to the
+//! cache once it has run and succeeded. A cache which cannot be read or written is a miss, rather than a failure.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -21,6 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::cache::{self, Cache, Hash};
 use crate::graph::{Action, EdgeId, EdgeKind, Graph, NodeId, Pool};
 use crate::plan::{self, Reason};
 use crate::stamp::{Stamp, Stamps};
@@ -43,6 +49,8 @@ pub struct Options {
     pub cancel: Arc<AtomicBool>,
     /// Environment variables every command is run with, beside those rig is run with.
     pub env: Vec<(String, String)>,
+    /// The cache the results of cached edges are kept in, if there is one.
+    pub cache: Option<Cache>,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -55,7 +63,7 @@ impl Options {
             2 => 3,
             threads => threads + 2,
         };
-        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(), env: Vec::new() }
+        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(), env: Vec::new(), cache: None }
     }
 }
 
@@ -109,6 +117,8 @@ pub struct Report {
     pub not_run: usize,
     /// The edges which did not run, as the restat edges they depend on did not change their outputs.
     pub restat_skipped: usize,
+    /// The edges which ran whose outputs were fetched from the cache, rather than by running their commands.
+    pub cached: usize,
     /// Whether the build was interrupted, by a signal or [`Options::cancel`].
     pub interrupted: bool,
 }
@@ -130,11 +140,35 @@ enum Message {
     Finished(Finished),
 }
 
-/// An edge for a thread to run: its index in the plan, its action, and whether it is in the console pool.
+/// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and its result
+/// in the cache, which is restored rather than running the action, if it has one.
 struct Job {
     index: usize,
     action: Action,
     console: bool,
+    restore: Option<Restore>,
+}
+
+/// The result of an edge in the cache, which is restored to its outputs.
+struct Restore {
+    cache: Cache,
+    entry: cache::Entry,
+}
+impl Restore {
+    /// Restore the outputs of the edge, relative to the build's directory, returning what its command printed.
+    ///
+    /// If one cannot be, every blob of the result is checked, so that those which are corrupted are removed, and are
+    /// added again once the edge has run.
+    fn apply(&self, dir: &Path) -> std::io::Result<Vec<u8>> {
+        let restored = self.entry.outputs.iter().try_for_each(|output| {
+            self.cache.restore(&output.blob, &dir.join(&output.path), output.executable)
+        });
+        let printed = restored.and_then(|()| self.cache.read_blob(&self.entry.printed));
+        if printed.is_err() {
+            self.cache.check(&self.entry);
+        }
+        printed
+    }
 }
 
 /// An edge which has finished.
@@ -145,6 +179,8 @@ struct Finished {
     output: Vec<u8>,
     start: SystemTime,
     duration: std::time::Duration,
+    /// Whether its outputs were restored from the cache.
+    cached: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -207,6 +243,7 @@ pub fn build(
         implicit: None,
         directories: HashSet::new(),
         processes: HashMap::new(),
+        keys: HashMap::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -304,6 +341,8 @@ struct Run<'g, 's> {
     directories: HashSet<PathBuf>,
     /// The process group of each running edge which is not in the console pool.
     processes: HashMap<usize, u32>,
+    /// The first key in the cache of each running cached edge.
+    keys: HashMap<usize, Hash>,
 }
 
 impl Run<'_, '_> {
@@ -322,15 +361,23 @@ impl Run<'_, '_> {
                 let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
                 scope.spawn(move || {
                     // the lock is held while waiting for a job, which the other threads wait for in turn
-                    while let Ok(Ok(Job { index, action, console })) = work.lock().map(|work| work.recv()) {
+                    while let Ok(Ok(Job { index, action, console, restore })) = work.lock().map(|work| work.recv()) {
                         let start = SystemTime::now();
                         let clock = Instant::now();
-                        let spawned = |pid| {
-                            let _ = sender.send(Message::Spawned(index, pid));
+                        // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
+                        let restored = restore.and_then(|restore| restore.apply(dir).ok());
+                        let cached = restored.is_some();
+                        let (outcome, output) = if let Some(printed) = restored {
+                            (Outcome::Succeeded, printed)
+                        } else {
+                            let spawned = |pid| {
+                                let _ = sender.send(Message::Spawned(index, pid));
+                            };
+                            let environment = Environment { makeflags, env };
+                            run_command(&action, dir, console, &environment, &spawned)
                         };
-                        let environment = Environment { makeflags, env };
-                        let (outcome, output) = run_command(&action, dir, console, &environment, &spawned);
-                        let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
+                        let duration = clock.elapsed();
+                        let finished = Finished { index, outcome, output, start, duration, cached };
                         let _ = sender.send(Message::Finished(finished));
                     }
                 });
@@ -380,8 +427,9 @@ impl Run<'_, '_> {
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let action = self.action(index).clone();
+                    let restore = self.lookup(index);
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console });
+                    let _ = jobs.send(Job { index, action, console, restore });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -506,13 +554,22 @@ impl Run<'_, '_> {
         observer.started(self.graph, edge, &self.reasons[index], self.progress);
     }
     fn finish(&mut self, finished: Finished, observer: &mut dyn Observer) {
-        let Finished { index, mut outcome, output, start, duration } = finished;
+        let Finished { index, mut outcome, output, start, mut duration, cached } = finished;
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.progress.running -= 1;
         self.progress.finished += 1;
         self.report.ran += 1;
         let inputs = self.inputs.remove(&index).unwrap_or_default();
+        let key = self.keys.remove(&index);
+        if cached {
+            self.report.cached += 1;
+            // the time it took when it ran is kept, as what it would take if it is not in the cache next time
+            let previous = self.state.get(&plan::first_output(self.graph, edge));
+            if let Some(previous) = previous {
+                duration = Duration::from_millis(u64::from(previous.duration));
+            }
+        }
         if outcome.succeeded() {
             let discovered = match data.depfile() {
                 Some(path) => read_depfile(&self.options.dir.join(path)),
@@ -521,6 +578,10 @@ impl Run<'_, '_> {
             match discovered {
                 Ok(discovered) => {
                     let record = plan::record(self.graph, edge, inputs, &discovered, &mut self.stamps, start, duration);
+                    if let Some(key) = key.filter(|_| !cached) {
+                        // the cache is only an aid, so an edge which cannot be added to it is not a failure
+                        let _ = self.store(index, &key, &record, &output);
+                    }
                     let changed = match self.before.remove(&index) {
                         Some(before) => {
                             !record.outputs.iter().zip(&before).all(|((_, after), before)| after.same(*before))
@@ -555,6 +616,79 @@ impl Run<'_, '_> {
         } else {
             observer.finished(self.graph, edge, &outcome, &output, self.progress);
         }
+    }
+    /// Returns the result of a cached edge in the cache, if it has run with the same action and inputs before, finding
+    /// its first key, which its result is added to the cache by if it runs.
+    ///
+    /// Each set of inputs the edge discovered with that key, the latest first, is stamped by their contents as they
+    /// are now, which leads to the result with those contents if there is one.
+    fn lookup(&mut self, index: usize) -> Option<Restore> {
+        let cache = self.options.cache.as_ref()?;
+        let edge = self.graph.edge(self.edges[index]);
+        let identity = edge.cache()?;
+        if edge.pool() == Pool::Console {
+            return None;
+        }
+        let outputs = edge.outputs().iter().chain(edge.implicit_outputs());
+        let outputs: Vec<&str> = outputs.map(|&node| self.graph.path(node)).collect();
+        let inputs = self.inputs.get(&index)?;
+        let inputs: Vec<(&str, Option<&Hash>)> = inputs.iter().map(|(path, stamp)| (path.as_str(), stamp.hash())).collect();
+        let action = plan::action_bytes(edge);
+        let key = cache::first_key(identity, &action, &self.options.env, &outputs, edge.depfile(), &inputs);
+        self.keys.insert(index, key);
+        for discovery in cache.manifest(&key) {
+            let stamps: Vec<Stamp> = discovery.inputs.iter().map(|path| self.stamps.path_as(path, true, None)).collect();
+            let inputs = discovery.inputs.iter().zip(&stamps).map(|(path, stamp)| (path.as_str(), stamp.hash()));
+            let inputs: Vec<_> = inputs.collect();
+            let values: Vec<_> = discovery.env.iter().map(|name| self.stamps.env_hash(name)).collect();
+            let env = discovery.env.iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref()));
+            let second = cache::second_key(&key, &inputs, &env.collect::<Vec<_>>());
+            if let Some(entry) = cache.result(&second) {
+                return Some(Restore { cache: cache.clone(), entry });
+            }
+        }
+        None
+    }
+    /// Add the result of a cached edge which has run to the cache, by its first key: its outputs, its depfile and what
+    /// its command printed, which it is restored from by its second key, of the contents of the inputs it discovered,
+    /// which are added to the first key's manifest.
+    ///
+    /// An edge any of whose outputs is not a file it wrote is not added.
+    fn store(&mut self, index: usize, key: &Hash, record: &crate::state::Record, printed: &[u8]) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(cache) = &self.options.cache else {
+            return Ok(());
+        };
+        let edge = self.graph.edge(self.edges[index]);
+        let mut outputs = Vec::new();
+        for (path, stamp) in &record.outputs {
+            let Some(hash) = stamp.hash() else {
+                return Ok(());
+            };
+            let full = self.options.dir.join(path);
+            let executable = std::fs::metadata(&full)?.permissions().mode() & 0o111 != 0;
+            cache.put_file(&full, hash)?;
+            outputs.push(cache::Output { path: path.clone(), blob: *hash, executable });
+        }
+        if let Some(depfile) = edge.depfile() {
+            let full = self.options.dir.join(depfile);
+            if full.is_file() {
+                let hash = crate::blake3::hash_file(&full)?;
+                cache.put_file(&full, &hash)?;
+                outputs.push(cache::Output { path: depfile.to_string(), blob: hash, executable: false });
+            }
+        }
+        let printed = cache.put_bytes(printed)?;
+        let inputs: Vec<_> = record.discovered.iter().map(|(path, stamp)| (path.as_str(), stamp.hash())).collect();
+        let values: Vec<_> = record.env.iter().map(|(name, _)| self.stamps.env_hash(name)).collect();
+        let env: Vec<_> = record.env.iter().zip(&values).map(|((name, _), hash)| (name.as_str(), hash.as_ref())).collect();
+        let second = cache::second_key(key, &inputs, &env);
+        cache.put_result(&second, &cache::Entry { outputs, printed })?;
+        let discovery = cache::Discovery {
+            inputs: record.discovered.iter().map(|(path, _)| path.clone()).collect(),
+            env: record.env.iter().map(|(name, _)| name.clone()).collect(),
+        };
+        cache.add_to_manifest(key, discovery)
     }
     /// Mark an edge as done, making ready the edges which were waiting only for it.
     fn done(&mut self, index: usize, changed: bool) {
@@ -988,6 +1122,130 @@ mod tests {
             let plan = plan::plan(&build.graph, &build.state, &mut stamps, &[]).unwrap();
             assert_eq!(plan.edges[0].1, Reason::EnvChanged("RIG_TEST_VARIABLE".into()));
         }
+    }
+
+    /// A graph whose compiled edge is cached by `identity`, which prints, discovers `extra.h`, and is followed by an edge
+    /// which is not cached.
+    fn cached(identity: &str) -> Graph {
+        graph()
+            .rule("cat", &[("command", "cat $in > $out")])
+            .edge("cat", &["after"], &["a.o"])
+            .cached(identity)
+            .rule("cc", &[
+                ("command", "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d && echo compiled"),
+                ("depfile", "$out.d"),
+            ])
+            .edge("cc", &["a.o"], &["a.c"])
+            .finish()
+    }
+
+    /// A temporary directory for a cache, which is removed when it is dropped.
+    struct TempCache(Cache);
+    impl TempCache {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("rig-exec-cache-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(Cache::open(&dir).unwrap())
+        }
+    }
+    impl Drop for TempCache {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(self.0.dir());
+        }
+    }
+
+    #[test]
+    fn fetches_from_the_cache() {
+        let cache = TempCache::new("fetches");
+        let files = [("a.c", "a\n"), ("extra.h", "h\n")];
+        let mut first = Build::new("cache-first", cached("toolchain"), &files);
+        first.options.cache = Some(cache.0.clone());
+        let (report, finished) = first.build(&[]);
+        assert_eq!((report.ran, report.cached), (2, 0), "{finished:?}");
+        assert_eq!(finished[0], ("a.o".to_string(), "compiled\n".to_string()));
+        // another build in another directory, with the same action and inputs, fetches what it printed, its outputs and
+        // its depfile, while what follows runs
+        let mut second = Build::new("cache-second", cached("toolchain"), &files);
+        second.options.cache = Some(cache.0.clone());
+        let (report, finished) = second.build(&[]);
+        assert_eq!((report.ran, report.cached), (2, 1), "{finished:?}");
+        assert_eq!(finished[0], ("a.o".into(), "compiled\n".into()));
+        assert_eq!(second.read("a.o"), "a\nh\n");
+        assert_eq!(second.read("after"), "a\nh\n");
+        assert_eq!(second.read("a.o.d"), "a.o: a.c extra.h\n");
+        // and records it, as if it had run
+        assert_eq!(second.ran(&[]), Vec::<String>::new());
+        // an input it discovered which changes is a miss, and once it is changed back, a hit
+        second.write("extra.h", "changed\n");
+        assert_eq!(second.build(&[]).0.cached, 0);
+        assert_eq!(second.read("a.o"), "a\nchanged\n");
+        second.write("extra.h", "h\n");
+        assert_eq!(second.build(&[]).0.cached, 1);
+        assert_eq!(second.read("a.o"), "a\nh\n");
+        // as is a declared input which changes
+        second.write("a.c", "changed\n");
+        assert_eq!(second.build(&[]).0.cached, 0);
+        second.write("a.c", "a\n");
+        assert_eq!(second.build(&[]).0.cached, 1);
+        // an edge of another identity, such as another toolchain, is not found
+        let mut other = Build::new("cache-other", cached("other toolchain"), &files);
+        other.options.cache = Some(cache.0.clone());
+        assert_eq!(other.build(&[]).0.cached, 0);
+        // nor is one of another environment
+        let mut env = Build::new("cache-env", cached("toolchain"), &files);
+        env.options.cache = Some(cache.0.clone());
+        env.options.env.push(("RIG_TEST_VARIABLE".into(), "1".into()));
+        assert_eq!(env.build(&[]).0.cached, 0);
+    }
+
+    #[test]
+    fn runs_what_the_cache_cannot_restore() {
+        let cache = TempCache::new("corrupted");
+        let files = [("a.c", "a\n"), ("extra.h", "h\n")];
+        let mut first = Build::new("cache-corrupt-first", cached("toolchain"), &files);
+        first.options.cache = Some(cache.0.clone());
+        assert_eq!(first.build(&[]).0.cached, 0);
+        // every blob is corrupted
+        for shard in std::fs::read_dir(cache.0.dir().join("cas")).unwrap() {
+            for blob in std::fs::read_dir(shard.unwrap().path()).unwrap() {
+                std::fs::write(blob.unwrap().path(), "corrupted").unwrap();
+            }
+        }
+        let mut second = Build::new("cache-corrupt-second", cached("toolchain"), &files);
+        second.options.cache = Some(cache.0.clone());
+        let (report, finished) = second.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.cached), (2, 0));
+        assert_eq!(second.read("a.o"), "a\nh\n");
+        // and what it ran is added again
+        let mut third = Build::new("cache-corrupt-third", cached("toolchain"), &files);
+        third.options.cache = Some(cache.0.clone());
+        assert_eq!(third.build(&[]).0.cached, 1);
+        assert_eq!(third.read("a.o"), "a\nh\n");
+    }
+
+    #[test]
+    fn caches_programs_as_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let cache = TempCache::new("executable");
+        let exec = Exec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "printf '#!/bin/sh\\n' > out && chmod +x out".into()],
+            ..Default::default()
+        };
+        let mut graph = Graph::new();
+        let out = graph.file("out");
+        let kind = EdgeKind::Command(Action::Exec(exec));
+        let edge = crate::Edge { kind, outputs: vec![out], cache: Some("id".into()), ..Default::default() };
+        graph.add_edge(edge).unwrap();
+        let mut first = Build::new("cache-executable-first", graph.clone(), &[]);
+        first.options.cache = Some(cache.0.clone());
+        assert_eq!(first.build(&[]).0.cached, 0);
+        let mut second = Build::new("cache-executable-second", graph, &[]);
+        second.options.cache = Some(cache.0.clone());
+        assert_eq!(second.build(&[]).0.cached, 1);
+        let mode = std::fs::metadata(second.dir.join("out")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111);
     }
 
     #[test]

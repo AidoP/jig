@@ -112,6 +112,21 @@ if they are given a different toolchain. Without rustup, a toolchain cannot be s
 ./build/bootstrap/jig +nightly build
 ```
 
+With rig, the results of rustc and clippy are kept in a cache, and fetched from it rather than run again, when the
+`JIG_CACHE` environment variable gives its directory, relative to the working directory, as the project is configured.
+A crate which is built again with what it was built with before, such as once a change to it is undone, or another
+branch is checked out and back, or once the build directory is removed, is restored from the cache, with what rustc
+printed. The cache is found by the contents of each crate's sources, the crates it uses and the variables it read, and
+by the identity of the toolchain, from `rustc -vV` and the files rustup writes when it installs or updates it, so
+that the project is configured again when the toolchain is updated in place. Setting or unsetting `JIG_CACHE`
+configures the project again too, and the cache is not shared between checkouts yet, as rustc is given the absolute
+paths of their sources. Nothing is removed from the cache yet, so it grows until it is removed. The cache has no
+effect with ninja.
+
+```
+JIG_CACHE=~/.cache/jig ./build/bootstrap/jig build
+```
+
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
 builds as `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working

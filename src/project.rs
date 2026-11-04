@@ -47,6 +47,8 @@ pub struct Project {
     root: PathBuf,
     /// The rustup toolchain the project is configured with, which the programs `run` runs are given.
     pub toolchain: Option<String>,
+    /// What identifies the toolchain, by which rig caches the results of rustc and clippy, if it caches them.
+    pub cache: Option<String>,
     pub files: Vec<File>,
     /// Files read by expressions, which the configuration depends on as well as `files`.
     pub dependencies: Vec<PathBuf>,
@@ -137,6 +139,7 @@ impl Project {
             tests_idx: HashMap::new(),
             runners: Vec::new(),
             toolchain: None,
+            cache: None,
             can_run: HashMap::new(),
         }
     }

@@ -79,7 +79,17 @@ pub fn action_hash(edge: EdgeRef) -> u64 {
     match edge.kind() {
         EdgeKind::Alias => 0,
         EdgeKind::Command(Action::Shell(command)) => fnv1a(command.as_bytes()),
-        // each part with its length before it, so that parts which run together hash differently
+        EdgeKind::Command(Action::Exec(_)) => fnv1a(&action_bytes(edge)),
+    }
+}
+
+/// Returns an edge's action as bytes, which differ whenever it does: a shell command as it is, or each part of a
+/// program with its length before it, so that parts which run together differ.
+#[must_use]
+pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
+    match edge.kind() {
+        EdgeKind::Alias => Vec::new(),
+        EdgeKind::Command(Action::Shell(command)) => command.as_bytes().to_vec(),
         EdgeKind::Command(Action::Exec(exec)) => {
             let mut bytes = Vec::new();
             let mut part = |part: &str| {
@@ -95,7 +105,7 @@ pub fn action_hash(edge: EdgeRef) -> u64 {
             });
             part(exec.dir.as_deref().unwrap_or("\0"));
             part(exec.stderr.as_deref().unwrap_or("\0"));
-            fnv1a(&bytes)
+            bytes
         },
     }
 }

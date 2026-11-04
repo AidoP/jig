@@ -169,10 +169,15 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;
     let host = rustc_print("host-tuple", toolchain)?;
     let targets: Vec<String> = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
-    let version = rustc_version(toolchain)?;
+    let verbose_version = rustc_output("-vV", toolchain)?;
+    let version = rustc_version(&verbose_version)?;
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
+    // rig caches when there is a cache, which configures the project again when it is set or unset
+    if project.read_env(rig_builder::CACHE).is_some_and(|dir| !dir.is_empty()) {
+        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot, toolchain));
+    }
     let file = match project::File::read(input.clone()) {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
@@ -443,9 +448,31 @@ fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> 
     rustc_output(&format!("--print={request}"), toolchain)
 }
 
-/// Returns the version of rustc, from the `release` line of `rustc -vV`, with a toolchain if one is given.
-fn rustc_version(toolchain: Option<&str>) -> Result<String, Error> {
-    let output = rustc_output("-vV", toolchain)?;
+/// Returns what identifies a toolchain, by which rig caches what it compiles: a hash of rustc's version, with its
+/// commit and host, from `rustc -vV`, of the toolchain's name, and of the files which rustup writes to the sysroot when
+/// it installs or updates the toolchain, or without them, of rustc in the sysroot.
+///
+/// The configuration depends on those files, so that the toolchain is identified again when it is updated in place.
+fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str, toolchain: Option<&str>) -> String {
+    let mut key = rig::cache::Key::new("jig toolchain");
+    key.part(verbose_version.as_bytes()).part(toolchain.unwrap_or_default().as_bytes());
+    let sysroot = Path::new(sysroot);
+    let rustup = ["lib/rustlib/multirust-channel-manifest.toml", "lib/rustlib/components"].map(|path| sysroot.join(path));
+    let files = if rustup.iter().any(|path| path.is_file()) { rustup.to_vec() } else { vec![sysroot.join("bin/rustc")] };
+    for path in files {
+        key.part(path.as_os_str().as_encoded_bytes());
+        let hash = rig::blake3::hash_file(&path).ok();
+        key.hash(hash.as_ref());
+        // a file which is missing is not depended on, as ninja would configure the project again each time
+        if hash.is_some() {
+            project.depend(path);
+        }
+    }
+    rig::cache::hex(&key.finish())
+}
+
+/// Returns the version of rustc, from the `release` line of the output of `rustc -vV`.
+fn rustc_version(output: &str) -> Result<String, Error> {
     let version = output.lines().find_map(|line| line.strip_prefix("release: "));
     version.map(|version| version.trim().into()).ok_or_else(|| {
         let mut cmd = std::process::Command::new("rustc");

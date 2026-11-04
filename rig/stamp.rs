@@ -44,6 +44,14 @@ impl Stamp {
         };
         Self::File { mtime, size: metadata.len() }
     }
+    /// Returns the hash of the contents of the file, if it is stamped by them.
+    #[must_use]
+    pub fn hash(&self) -> Option<&[u8; 32]> {
+        match self {
+            Self::Content { hash, .. } => Some(hash),
+            Self::Missing | Self::File { .. } => None,
+        }
+    }
     #[must_use]
     pub fn exists(self) -> bool {
         self != Self::Missing
@@ -104,11 +112,20 @@ impl<'a> Stamps<'a> {
     /// A hash is kept rather than the value, which may be a secret, and is written to the state of the build.
     #[must_use]
     pub fn env(&self, name: &str) -> Option<u64> {
+        self.env_value(name, crate::state::fnv1a)
+    }
+    /// Returns the BLAKE3 hash of an environment variable's value, or `None` if it is not set, as a command sees it,
+    /// as the key of a cache is made of.
+    #[must_use]
+    pub fn env_hash(&self, name: &str) -> Option<[u8; 32]> {
+        self.env_value(name, crate::blake3::hash)
+    }
+    fn env_value<T>(&self, name: &str, hash: impl Fn(&[u8]) -> T) -> Option<T> {
         use std::os::unix::ffi::OsStrExt;
         if let Some((_, value)) = self.env.iter().rev().find(|(variable, _)| variable == name) {
-            return Some(crate::state::fnv1a(value.as_bytes()));
+            return Some(hash(value.as_bytes()));
         }
-        std::env::var_os(name).map(|value| crate::state::fnv1a(value.as_bytes()))
+        std::env::var_os(name).map(|value| hash(value.as_bytes()))
     }
     /// Returns the stamp of a node, finding it if it has not been.
     pub fn node(&mut self, node: NodeId) -> Stamp {
