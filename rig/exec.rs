@@ -711,7 +711,10 @@ impl Run<'_, '_> {
             inputs: record.discovered.iter().map(|(path, _)| path.clone()).collect(),
             env: record.env.iter().map(|(name, _)| name.clone()).collect(),
         };
-        cache.add_to_manifest(key, discovery)
+        cache.add_to_manifest(key, discovery.clone())?;
+        // and to the remote cache, if it takes pushes, which is only an aid too
+        let _ = cache.push(key, &second, &discovery);
+        Ok(())
     }
     /// Mark an edge as done, making ready the edges which were waiting only for it.
     fn done(&mut self, index: usize, changed: bool) {
@@ -1229,6 +1232,29 @@ mod tests {
         env.options.cache = Some(cache.0.clone());
         env.options.env.push(("RIG_TEST_VARIABLE".into(), "1".into()));
         assert_eq!(env.build(&[]).0.cached, 0);
+    }
+
+    #[test]
+    fn fetches_from_a_remote_cache() {
+        // a build pushes what it runs to the remote cache, from which a build with an empty cache of its own fetches it
+        let (server, first_cache, second_cache) =
+            (TempCache::new("remote-server"), TempCache::new("remote-first"), TempCache::new("remote-second"));
+        let files = [("a.c", "a\n"), ("extra.h", "h\n")];
+        let mut first = Build::new("remote-first", cached("toolchain"), &files);
+        let remote = Arc::new(crate::remote::served(server.0.clone(), true, true));
+        first.options.cache = Some(first_cache.0.clone().with_remote(remote));
+        assert_eq!(first.build(&[]).0.cached, 0);
+        assert_eq!(server.0.stats().results, 1);
+        let mut second = Build::new("remote-second", cached("toolchain"), &files);
+        let remote = Arc::new(crate::remote::served(server.0.clone(), false, true));
+        second.options.cache = Some(second_cache.0.clone().with_remote(remote));
+        let (report, finished) = second.build(&[]);
+        assert_eq!((report.ran, report.cached), (2, 1), "{finished:?}");
+        assert_eq!(finished[0], ("a.o".to_string(), "compiled\n".to_string()));
+        assert_eq!(second.read("a.o"), "a\nh\n");
+        assert_eq!(second.read("a.o.d"), "a.o: a.c extra.h\n");
+        // which it keeps, with the blobs it fetched
+        assert_eq!(second_cache.0.stats().results, 1);
     }
 
     #[test]

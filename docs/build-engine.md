@@ -898,8 +898,62 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ### Phase 5: the remote cache
 
-- Add `jig serve`, with the framed protocol over `--stdio` and TCP, and the HTTP/1.1 client.
-- Add policies for pulling and pushing, so that CI fills the cache and developers read from it.
+#### Steps
+
+1. **Done:** `jig serve --stdio`, the framed protocol, and the remote cache behind the local one, over ssh.
+   - **`rig::remote`.** A request then its reply, in turn, each a frame: a kind byte, a `u64` length, the payload.
+     - After `HELLO`, which checks the magic bytes and the version and says whether the server takes pushes, there
+       are `GET_MANIFEST`, `GET_RESULT` and `GET_BLOB`, which are replied to with `FOUND` or `NOT_FOUND`.
+     - `MISSING` asks which of a list of blobs the server lacks.
+     - `PUT_BLOB`, `PUT_RESULT` and `ADD_TO_MANIFEST` push, and are replied to with `OK` or `ERROR`.
+     - Manifests and results travel as they are stored, so the client checks them by the hash that ends them, and
+       blobs by their hash, as it does what it reads from disk.
+     - A result is only found if the server has all its blobs.
+   - **`serve(cache, reader, writer, push)`** answers until the stream ends. It refuses pushes unless `push`, a blob
+     that doesn't have its hash, and a result that isn't valid. It touches what it sends, so the server's `gc` keeps
+     what clients use.
+   - **`Remote`**
+     - It runs a command, such as ssh, and speaks to it on its stdin and stdout, connecting when first used. It can
+       also use given streams, which the tests do.
+     - One connection is shared, behind a mutex, so requests from the build's threads take turns.
+     - Its stderr is kept, so that a failure says why, with the server's last line.
+     - Any failure, a lost connection or an `ERROR` reply, turns it off for the rest of the build, and
+       `Remote::error` says why.
+   - **`Cache::with_remote`.** The local cache is in front of the remote one.
+     - `manifest` adds the remote's sets of discovered inputs after the local ones.
+     - `result` asks the remote when the local cache doesn't have a complete result, and keeps what it gets.
+     - A blob that isn't local is fetched when it is restored or read, on the job's thread rather than the build's.
+     - `push` sends the blobs the remote is missing, then the result, then the manifest entry, so the remote never
+       has a result without its blobs. The executor pushes each result it adds.
+   - **jig.**
+     - `jig serve --stdio [--push]` serves the local cache, then collects it if due.
+     - `JIG_REMOTE_CACHE=ssh://[<user>@]<host>[:<port>][/<jig>]` runs `ssh -o BatchMode=yes [-p <port>] <host> --
+       <jig> serve --stdio`, with `--push` when `JIG_REMOTE_CACHE_PUSH=1`. Any other value is a command split at
+       spaces.
+     - A remote that failed is warned of after the build.
+     - The remote isn't part of the configuration, as it changes nothing that is built.
+   - **Policy.** Pulling is open to whoever can run the server. Pushing needs both the client to ask
+     (`JIG_REMOTE_CACHE_PUSH=1`) and the server to allow it (`--push`). With ssh, `command="jig serve --stdio"` in
+     `authorized_keys` makes a key read-only whatever the client asks. ssh handles authentication and encryption.
+   - **Tests.**
+     - rig, over pipes:
+       - Pushing fills the server, and a second push sends no blobs.
+       - Another cache finds the manifest and result there, fetches blobs as they are restored, and keeps them.
+       - A server that doesn't take pushes refuses them.
+       - A server that sends corrupted blobs, results and manifests is a miss.
+       - A server that can't be run, or ends, fails with its stderr.
+       - Another version is refused.
+       - The executor: one build pushes, and another with an empty local cache fetches the edge.
+     - jig: the commands `JIG_REMOTE_CACHE` gives.
+     - Integration, with `jig serve --stdio --push` run by `env` with its own cache in place of ssh:
+       - One checkout pushes, and another, with an empty local cache and no `rustc`, fetches every edge.
+       - A remote that fails is warned of, and the build succeeds.
+   - **Not done yet.**
+     - Requests take turns on one connection, and blobs are sent whole in a frame. Several connections, or
+       streaming large blobs, should be measured first.
+     - The manifest is asked for on every lookup of a cached edge, a round trip each.
+2. A TCP transport for `jig serve`, with a shared token for private networks.
+3. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
 
 ### Phase 6: distributed execution
 

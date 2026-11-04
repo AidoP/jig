@@ -1527,6 +1527,53 @@ fn cache_command() {
 }
 
 #[test]
+fn remote_cache() {
+    if !rig_engine() {
+        return;
+    }
+    // a build pushes to the remote cache which `jig serve --stdio` serves, here from its own cache rather than by ssh,
+    // from which a build in another checkout, with an empty cache of its own, fetches every edge, with no `rustc`
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-remote-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let server = dir.join("server").display().to_string();
+    let remote = format!("/usr/bin/env JIG_CACHE={server} {} serve --stdio --push", configure_path().display());
+    let files = [
+        ("Jig", "crate a 'a.rs'\ncrate app 'app.rs'\n    crate-type 'bin'\n    use a\n"),
+        ("a.rs", "pub fn value() -> u32 { let unused = 1; 42 }\n"),
+        ("app.rs", "fn main() { print!(\"{}\", a::value()); }\n"),
+    ];
+    let build = |project: &Project, local: &str, env: &[(&str, &str)]| {
+        let mut command = jig_command();
+        command.arg("build").env("JIG_CACHE", local).env("JIG_REMOTE_CACHE", &remote).current_dir(&project.dir);
+        let output = command.envs(env.iter().copied()).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stdout}");
+        stdout
+    };
+    let first = Project::new("remote-first", &files);
+    let local = dir.join("first").display().to_string();
+    first.configure_with(&[("JIG_CACHE", &local)]).ok();
+    let output = build(&first, &local, &[("JIG_REMOTE_CACHE_PUSH", "1")]);
+    assert!(!output.contains("warning: the remote cache"), "{output}");
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &server).output().unwrap();
+    let stats = String::from_utf8(stats.stdout).unwrap();
+    assert!(!stats.contains("\n0 results"), "{stats}");
+    let second = Project::new("remote-second", &files);
+    let local = dir.join("second").display().to_string();
+    second.configure_with(&[("JIG_CACHE", &local)]).ok();
+    assert_contains(&build(&second, &local, &[("PATH", "/nonexistent")]), "unused variable");
+    let output = Command::new(second.dir.join(format!("build/{}/app", second.host()))).output().unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
+    // a remote cache which fails is warned of, and the build goes on without it
+    let third = Project::new("remote-failed", &files);
+    let local = dir.join("third").display().to_string();
+    third.configure_with(&[("JIG_CACHE", &local)]).ok();
+    let output = build(&third, &local, &[("JIG_REMOTE_CACHE", "/usr/bin/env JIG_CACHE=off jig-no-such-server")]);
+    assert_contains(&output, "warning: the remote cache failed, so the build went on without it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn rig_caches_custom_commands() {
     if !rig_engine() {
         return;
