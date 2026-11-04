@@ -153,6 +153,12 @@ authenticates and encrypts the connection, so a key in `authorized_keys` can be 
 is warned of, and the build goes on with the local cache. `JIG_REMOTE_CACHE` can also be a command, split at spaces,
 which serves the cache on its stdin and stdout, such as `ssh -i key cache jig serve --stdio`.
 
+A remote cache can also be a server of files over HTTP, `http://[<user>:<password>@]<host>[:<port>][/<path>]`, which
+serves `GET` and `HEAD`, and `PUT` to push to, such as nginx with WebDAV. The files are laid out as a cache's directory
+is, so a server of files can serve a jig cache's directory as it is. A user and password in the URL are sent by HTTP's
+Basic scheme, and `cache/token-file` as a bearer token. Only `http://` is spoken, so a cache which is not on the
+machine or a trusted network is put behind a proxy which speaks TLS to it.
+
 On a private network, a remote cache can instead be served over TCP, by `jig serve --listen <address> --token-file
 <path> [--push]`, and reached as `tcp://<host>:<port>`, with the `cache/token-file` property giving the file of the
 same token. A client proves it has the token by the hash of it and a random nonce the server sends, so the token is

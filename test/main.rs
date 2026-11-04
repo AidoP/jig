@@ -1512,6 +1512,100 @@ fn cache_command() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// Serve the files in a directory over HTTP, as a remote cache is: `GET`, `HEAD` and `PUT`, on connections which are
+/// kept alive, returning the address it listens at. It serves until the tests end.
+fn serve_files(dir: PathBuf) -> String {
+    use std::io::{BufRead, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut writer = stream;
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|read| read > 0) {
+                    let mut words = line.split(' ');
+                    let (method, path) = (words.next().unwrap_or_default().to_string(), words.next().unwrap_or_default());
+                    let path = dir.join(path.trim_start_matches('/'));
+                    let mut length = 0;
+                    loop {
+                        let mut header = String::new();
+                        reader.read_line(&mut header).unwrap();
+                        if header.trim().is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = header.split_once(':')
+                            && name.eq_ignore_ascii_case("content-length")
+                        {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).unwrap();
+                    let (status, contents) = match method.as_str() {
+                        "PUT" => {
+                            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                            std::fs::write(&path, &body).unwrap();
+                            ("201 Created", Vec::new())
+                        },
+                        _ => std::fs::read(&path).map_or(("404 Not Found", Vec::new()), |contents| ("200 OK", contents)),
+                    };
+                    let mut reply = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n", contents.len()).into_bytes();
+                    if method != "HEAD" {
+                        reply.extend_from_slice(&contents);
+                    }
+                    writer.write_all(&reply).unwrap();
+                    line.clear();
+                }
+            });
+        }
+    });
+    address
+}
+
+#[test]
+fn remote_cache_over_http() {
+    if !rig_engine() {
+        return;
+    }
+    // a server of files over HTTP is a remote cache, laid out as a cache's directory is, so that the cache of the
+    // checkout which pushed is served as it is
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-http-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let address = serve_files(dir.join("served"));
+    let config = dir.join("config");
+    std::fs::write(&config, format!("set cache/remote 'http://{address}/rig'\nset cache/push true\n")).unwrap();
+    let files = [("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() { let unused = 1; }\n")];
+    let jig = |project: &Project, args: &[&str], local: &str, path: Option<&str>| {
+        let mut command = jig_command();
+        command.args(args).env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = command.output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let first = Project::new("http-first", &files);
+    jig(&first, &["generate"], "first", None);
+    assert!(!jig(&first, &["build"], "first", None).contains("warning: the remote cache"));
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", dir.join("served/rig")).output().unwrap();
+    assert!(!String::from_utf8(stats.stdout).unwrap().contains("\n0 results"));
+    let second = Project::new("http-second", &files);
+    jig(&second, &["generate"], "second", None);
+    assert_contains(&jig(&second, &["build"], "second", Some("/nonexistent")), "unused variable");
+    // and `https://`, which is not spoken, is an error
+    std::fs::write(&config, "set cache/remote 'https://cache'\n").unwrap();
+    let output = jig_command().arg("generate").env("JIG_CONFIG", &config).current_dir(&first.dir).output().unwrap();
+    assert!(!output.status.success());
+    assert_contains(&String::from_utf8(output.stderr).unwrap(), "`https://` is not spoken");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn remote_cache_over_tcp() {
     if !rig_engine() {

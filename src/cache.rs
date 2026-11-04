@@ -11,10 +11,13 @@
 //! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache it is in front of, if any, as
 //!   `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there with ssh, or as a command, split at
 //!   spaces, which serves it on its stdin and stdout.
-//!   It can also be `tcp://<host>:<port>`, which `jig serve --listen` serves.
+//!   It can also be `tcp://<host>:<port>`, which `jig serve --listen` serves, or
+//!   `http://[<user>:<password>@]<host>[:<port>][/<path>]`, a server of files over HTTP, laid out as a cache's
+//!   directory is.
 //! - `cache/push`, or `JIG_REMOTE_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
 //! - `cache/token-file`: the file of the token which proves the client to a remote cache which needs one, as one
-//!   reached over TCP does, read when it is connected to, so that the token is not recorded with the project.
+//!   reached over TCP does, or which is sent as a bearer token over HTTP, read when it is connected to, so that the
+//!   token is not recorded with the project.
 //!
 //! The settings are resolved when the project is configured, as the variables are read by the configuration, and
 //! recorded in its database, which a build reads them from.
@@ -111,6 +114,10 @@ impl Settings {
         let mut remote = match transport {
             Some(Transport::Command(command)) => rig::remote::Remote::command(command, self.push),
             Some(Transport::Tcp(address)) => rig::remote::Remote::tcp(address, self.push),
+            Some(Transport::Http(url)) => {
+                let token = self.token_file.as_deref().map(read_token).transpose()?;
+                rig::remote::Remote::http(url, token.as_deref(), self.push)
+            },
             None => return Ok(Some(cache)),
         };
         if let Some(path) = &self.token_file {
@@ -131,11 +138,20 @@ pub enum Transport {
     Command(Vec<String>),
     /// A server which listens at `<host>:<port>` over TCP.
     Tcp(String),
+    /// A server of files over HTTP, under a URL.
+    Http(rig::http::Url),
 }
 
 /// Returns how a remote cache is reached, from `cache/remote`, which pushes if `push`: `tcp://<host>:<port>` over TCP,
-/// or otherwise by a command, as [`remote_command`] finds it, or `None` if it is neither.
+/// `http://...` over HTTP, or otherwise by a command, as [`remote_command`] finds it, or `None` if it is none of them.
 pub fn remote_transport(remote: &str, push: bool) -> Option<Transport> {
+    if remote.starts_with("http://") {
+        return rig::http::Url::parse(remote).map(Transport::Http);
+    }
+    // TLS is not spoken, which a proxy speaks for it
+    if remote.starts_with("https://") {
+        return None;
+    }
     let Some(address) = remote.strip_prefix("tcp://") else {
         return remote_command(remote, push).map(Transport::Command);
     };
@@ -386,5 +402,9 @@ mod tests {
         assert_eq!(remote_transport("tcp://cache", false), None);
         assert_eq!(remote_transport("tcp://:7000", false), None);
         assert_eq!(remote_transport("tcp://cache:port", false), None);
+        let url = rig::http::Url::parse("http://cache:8080/rig").unwrap();
+        assert_eq!(remote_transport("http://cache:8080/rig", false), Some(Transport::Http(url)));
+        assert_eq!(remote_transport("https://cache/rig", false), None);
+        assert_eq!(remote_transport("http://", false), None);
     }
 }

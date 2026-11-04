@@ -1,5 +1,13 @@
 //! A remote cache: a [`Cache`] on another machine, or in another process, spoken to over a stream of bytes, such as
-//! the stdin and stdout of `ssh host jig serve --stdio`, which [`serve`] answers.
+//! the stdin and stdout of `ssh host jig serve --stdio`, which [`serve`] answers, or a store of files served over
+//! HTTP, by [`crate::http`].
+//!
+//! Over HTTP, a blob is at `<url>/cas/<the first two digits of its hash>/<the rest>`, a result at `<url>/ac/<key>` and a
+//! manifest at `<url>/mf/<key>`, in hexadecimal, as they are in a cache's directory, so that a server of the files of
+//! one serves it as it is, which are got with `GET`, and pushed with `PUT`, after
+//! `HEAD` finds which blobs the server does not have. A manifest is pushed merged with the server's, which a push from
+//! elsewhere at once may replace, which loses one set of inputs or the other, as a miss. Requests from several threads,
+//! such as for the blobs of a result, go at once, on connections of their own.
 //!
 //! The protocol is of requests and their replies, each a frame: its kind as a byte, the id of the request as a
 //! little-endian `u32`, which its reply has, the length of its payload as a little-endian `u64`, then the payload.
@@ -361,6 +369,8 @@ impl Drop for Connection {
 /// How a remote cache is reached.
 #[derive(Debug)]
 enum Transport {
+    /// A server of files over HTTP, which `http` speaks to.
+    Http,
     /// A program and arguments which run the server, speaking the protocol on its stdin and stdout.
     Command(Vec<String>),
     /// The address of a server which listens for connections over TCP, as `<host>:<port>`.
@@ -397,6 +407,14 @@ pub struct Remote {
     manifests: Mutex<HashMap<Hash, Option<Vec<u8>>>>,
     /// The queue of results to push, and the thread which pushes them, once one has been given.
     pusher: Mutex<Option<(Sender<Push>, std::thread::JoinHandle<()>)>>,
+    /// The client of a server over HTTP, with why it failed, once it has, if the remote cache is one.
+    http: Option<Arc<Http>>,
+}
+
+/// A server of files over HTTP, and why it failed, once it has, after which it is not used.
+struct Http {
+    client: crate::http::Client,
+    failed: Mutex<Option<String>>,
 }
 impl std::fmt::Debug for Remote {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -407,7 +425,7 @@ impl std::fmt::Debug for Remote {
 impl Remote {
     fn with_state(transport: Transport, push: bool, state: State) -> Self {
         let (manifests, pusher) = (Mutex::default(), Mutex::default());
-        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher }
+        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher, http: None }
     }
     /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
     /// results are pushed to with `push`, if it takes them.
@@ -426,6 +444,15 @@ impl Remote {
         let streams: (Box<dyn Read + Send>, Box<dyn Write + Send>) = (Box::new(reader), Box::new(writer));
         Self::with_state(Transport::Streams, push, State::Unconnected(Some(streams)))
     }
+    /// A remote cache which is a store of files served over HTTP, under a URL, which results are pushed to with
+    /// `push`, which authenticates with a bearer token, if there is one, or else the URL's user and password.
+    #[must_use]
+    pub fn http(url: crate::http::Url, token: Option<&[u8]>, push: bool) -> Self {
+        let mut remote = Self::with_state(Transport::Http, push, State::Unconnected(None));
+        let client = crate::http::Client::new(url, token);
+        remote.http = Some(Arc::new(Http { client, failed: Mutex::default() }));
+        remote
+    }
     /// Prove the client with a token, to a server which needs one.
     #[must_use]
     pub fn with_token(mut self, token: Vec<u8>) -> Self {
@@ -435,6 +462,9 @@ impl Remote {
     /// Returns why the remote cache failed, if it did, after which it is not used.
     #[must_use]
     pub fn error(&self) -> Option<String> {
+        if let Some(http) = &self.http {
+            return http.failed.lock().ok()?.clone();
+        }
         match &*self.state.lock().ok()? {
             State::Failed(error) => Some(error.clone()),
             State::Connected(connection) => connection.failure(),
@@ -445,6 +475,9 @@ impl Remote {
     /// out.
     #[must_use]
     pub fn pushes(&self) -> bool {
+        if let Some(http) = &self.http {
+            return self.push && !http.has_failed();
+        }
         self.push && self.connection().is_some_and(|connection| connection.pushes)
     }
     /// Returns the connection, connecting first if it is not, or `None` if it failed.
@@ -557,11 +590,15 @@ impl Remote {
         if let Some(found) = self.manifests.lock().ok()?.get(key) {
             return found.clone();
         }
-        let connection = self.connection()?;
-        let reply = connection.request(GET_MANIFEST, key);
         // a manifest which could not be asked for is asked for again, while one which was not found is not
-        reply.as_ref()?;
-        let found = Self::get(&connection, reply);
+        let found = if let Some(http) = &self.http {
+            http.get(&format!("/mf/{}", crate::cache::hex(key))).ok()?
+        } else {
+            let connection = self.connection()?;
+            let reply = connection.request(GET_MANIFEST, key);
+            reply.as_ref()?;
+            Self::get(&connection, reply)
+        };
         self.manifests.lock().ok()?.insert(*key, found.clone());
         found
     }
@@ -572,6 +609,11 @@ impl Remote {
         if keys.is_empty() {
             return None;
         }
+        if let Some(http) = &self.http {
+            // each asked for at once, of which the first found in order is taken
+            let found = in_parallel(keys, |key| http.get(&format!("/ac/{}", crate::cache::hex(key))).ok().flatten());
+            return found.into_iter().enumerate().find_map(|(index, result)| Some((index, result?)));
+        }
         let connection = self.connection()?;
         let found = Self::get(&connection, connection.request(GET_RESULTS, &hashes(keys)))?;
         let mut payload = Payload(&found);
@@ -581,6 +623,10 @@ impl Remote {
     /// Fetch blobs into a cache, asking for them at once, returning those which were added. The parts of each are
     /// written to the cache as they are received, and each is added once it is whole and has its hash.
     pub fn fetch_blobs(&self, local: &Cache, blobs: &[Hash]) -> Vec<Hash> {
+        if let Some(http) = &self.http {
+            let fetched = in_parallel(blobs, |blob| http.fetch_blob(local, blob).then_some(*blob));
+            return fetched.into_iter().flatten().collect();
+        }
         let Some(connection) = self.connection() else {
             return Vec::new();
         };
@@ -617,6 +663,9 @@ impl Remote {
     /// Returns those of the blobs the remote cache does not have, or `None` if it failed.
     #[must_use]
     pub fn missing(&self, blobs: &[Hash]) -> Option<Vec<Hash>> {
+        if let Some(http) = &self.http {
+            return http.missing(blobs);
+        }
         let connection = self.connection()?;
         if let (MISSING, payload) = connection.request(MISSING, &hashes(blobs))? {
             return Payload(&payload).hashes();
@@ -627,6 +676,9 @@ impl Remote {
     /// Push a blob, returning whether it was taken.
     #[must_use]
     pub fn put_blob(&self, hash: &Hash, contents: &[u8]) -> bool {
+        if let Some(http) = &self.http {
+            return http.put(&cas_path(hash), crate::http::Body::Bytes(contents));
+        }
         self.connection().is_some_and(|connection| {
             let receiver = connection.send_parts(PUT_BLOB, hash, contents, contents.len() as u64);
             Self::put(&connection, connection.wait(receiver).map(|(kind, _)| kind))
@@ -638,8 +690,12 @@ impl Remote {
         if !self.pushes() {
             return false;
         }
-        let Some(connection) = self.connection() else {
-            return false;
+        let backend = match &self.http {
+            Some(http) => Backend::Http(Arc::clone(http)),
+            None => match self.connection() {
+                Some(connection) => Backend::Rig(connection),
+                None => return false,
+            },
         };
         let Ok(mut pusher) = self.pusher.lock() else {
             return false;
@@ -648,7 +704,10 @@ impl Remote {
             let (sender, receiver) = std::sync::mpsc::channel::<Push>();
             let pushing = std::thread::spawn(move || {
                 for push in receiver {
-                    push_result(&connection, &push);
+                    match &backend {
+                        Backend::Rig(connection) => push_result(connection, &push),
+                        Backend::Http(http) => http.push_result(&push),
+                    }
                 }
             });
             (sender, pushing)
@@ -663,6 +722,123 @@ impl Remote {
             drop(sender);
             let _ = pushing.join();
         }
+    }
+}
+
+/// Returns the path of a blob over HTTP, as it is in a cache's directory: `/cas/<the first two hexadecimal digits of
+/// its hash>/<the rest>`.
+fn cas_path(hash: &Hash) -> String {
+    let hex = crate::cache::hex(hash);
+    format!("/cas/{}/{}", &hex[..2], &hex[2..])
+}
+
+/// What a remote cache is spoken to by, which the thread which pushes has.
+enum Backend {
+    Rig(Arc<Connection>),
+    Http(Arc<Http>),
+}
+
+/// That a server over HTTP failed, which [`Http::fail`] has recorded why.
+struct Failed;
+
+/// The most requests over HTTP which are sent at once, each on a connection of its own.
+const HTTP_AT_ONCE: usize = 8;
+
+/// Returns what `f` returns for each of `items`, in their order, running it for several at once, each on a thread.
+fn in_parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    if items.len() <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(HTTP_AT_ONCE);
+    std::thread::scope(|scope| {
+        let f = &f;
+        let threads: Vec<_> = items.chunks(chunk).map(|items| scope.spawn(move || items.iter().map(f).collect::<Vec<_>>())).collect();
+        threads.into_iter().flat_map(|thread| thread.join().unwrap_or_default()).collect()
+    })
+}
+
+impl Http {
+    fn has_failed(&self) -> bool {
+        self.failed.lock().map_or(true, |failed| failed.is_some())
+    }
+    fn fail(&self, why: String) {
+        if let Ok(mut failed) = self.failed.lock() {
+            failed.get_or_insert(why);
+        }
+    }
+    /// Send a request, returning its status, if it was answered with one which is `2xx` or `404`, or `None` if the
+    /// server failed, or failed now, when it is not used again.
+    fn request(&self, method: &str, path: &str, body: crate::http::Body, sink: &mut dyn FnMut(&[u8])) -> Option<u16> {
+        if self.has_failed() {
+            return None;
+        }
+        let url = self.client.url();
+        match self.client.request(method, path, body, sink) {
+            Ok(status) if (200..300).contains(&status) || status == 404 => Some(status),
+            Ok(status) => {
+                self.fail(format!("{method} {}{path} was answered with {status}", url.path));
+                None
+            },
+            Err(error) => {
+                self.fail(format!("failed to {method} {}{path} at {}: {error}", url.path, url.authority));
+                None
+            },
+        }
+    }
+    /// Returns a file, or `None` if the server does not have it, failing if the server did.
+    fn get(&self, path: &str) -> Result<Option<Vec<u8>>, Failed> {
+        let mut body = Vec::new();
+        let status = self.request("GET", path, crate::http::Body::None, &mut |part| body.extend_from_slice(part));
+        Ok((status.ok_or(Failed)? != 404).then_some(body))
+    }
+    fn put(&self, path: &str, body: crate::http::Body) -> bool {
+        self.request("PUT", path, body, &mut |_| ()).is_some_and(|status| status != 404)
+    }
+    /// Fetch a blob into a cache, written to it in parts as they are read, returning whether it was added.
+    fn fetch_blob(&self, local: &Cache, blob: &Hash) -> bool {
+        let Ok(mut writer) = local.blob_writer() else {
+            return false;
+        };
+        let path = cas_path(blob);
+        let status = self.request("GET", &path, crate::http::Body::None, &mut |part| writer.write(part));
+        status == Some(200) && writer.finish(blob)
+    }
+    /// Returns those of the blobs the server does not have, asking for each at once.
+    fn missing(&self, blobs: &[Hash]) -> Option<Vec<Hash>> {
+        let found = in_parallel(blobs, |blob| {
+            let path = cas_path(blob);
+            self.request("HEAD", &path, crate::http::Body::None, &mut |_| ()).map(|status| (*blob, status == 404))
+        });
+        let found: Option<Vec<_>> = found.into_iter().collect();
+        Some(found?.into_iter().filter(|&(_, missing)| missing).map(|(blob, _)| blob).collect())
+    }
+    /// Push a result: the blobs the server does not have, at once, each sent from its file, then the result, then the
+    /// manifest, merged with the server's, so that it never has a result without its blobs.
+    fn push_result(&self, push: &Push) {
+        let Some(result) = push.local.raw_result(&push.second) else {
+            return;
+        };
+        let Some(missing) = crate::cache::result_blobs(&result).and_then(|blobs| self.missing(&blobs)) else {
+            return;
+        };
+        let pushed = in_parallel(&missing, |blob| {
+            let Ok((mut file, size)) = push.local.open_blob(blob) else {
+                return false;
+            };
+            self.put(&cas_path(blob), crate::http::Body::File(&mut file, size))
+        });
+        if !pushed.into_iter().all(|pushed| pushed) {
+            return;
+        }
+        if !self.put(&format!("/ac/{}", crate::cache::hex(&push.second)), crate::http::Body::Bytes(&result)) {
+            return;
+        }
+        let path = format!("/mf/{}", crate::cache::hex(&push.first));
+        let Ok(stored) = self.get(&path) else {
+            return;
+        };
+        let manifest = crate::cache::merged_manifest(stored.as_deref(), push.discovery.clone());
+        let _ = self.put(&path, crate::http::Body::Bytes(&manifest));
     }
 }
 
@@ -1295,6 +1471,75 @@ mod tests {
         for cache in [server, local] {
             let _ = std::fs::remove_dir_all(cache.dir());
         }
+    }
+
+    #[test]
+    fn pushes_to_and_fetches_from_a_server_of_files_over_http() {
+        for chunked in [false, true] {
+            let files = std::env::temp_dir().join(format!("rig-remote-{}-http-{chunked}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&files);
+            let address = crate::http::serve_directory(files.clone(), chunked, None);
+            let url = || crate::http::Url::parse(&format!("http://{address}/cache")).unwrap();
+            let (first, second) = (crate::blake3::hash(b"first"), crate::blake3::hash(b"second"));
+            let discovery = Discovery { inputs: vec!["a.h".into()], env: Vec::new() };
+            // a result with a large blob, which is sent from its file, and one which is small
+            let contents = large(3 * PART + 7, 5);
+            let pusher = cache("http-pusher").with_remote(Arc::new(Remote::http(url(), None, true)));
+            let blob = pusher.put_bytes(&contents).unwrap();
+            let printed = pusher.put_bytes(b"printed").unwrap();
+            let entry = Entry { outputs: vec![Output { path: "out".into(), blob, executable: false }], printed };
+            pusher.put_result(&second, &entry).unwrap();
+            pusher.add_to_manifest(&first, discovery.clone()).unwrap();
+            assert!(pusher.push(&first, &second, &discovery));
+            pusher.wait_for_pushes();
+            assert!(pusher.remote().unwrap().error().is_none(), "{:?}", pusher.remote().unwrap().error());
+            // which the server keeps as a cache's directory has them
+            let server = Cache::open(&files.join("cache")).unwrap();
+            assert_eq!(server.read_blob(&blob).unwrap(), contents);
+            assert!(server.result(&second).is_some());
+            assert_eq!(server.manifest(&first), std::slice::from_ref(&discovery));
+            assert_eq!(pusher.remote().unwrap().missing(&[blob, crate::blake3::hash(b"other")]).unwrap().len(), 1);
+            // another set of inputs is merged into the server's manifest
+            let other = Discovery { inputs: vec!["b.h".into()], env: Vec::new() };
+            let third = crate::blake3::hash(b"third");
+            pusher.put_result(&third, &entry).unwrap();
+            assert!(pusher.push(&first, &third, &other));
+            pusher.wait_for_pushes();
+            assert_eq!(server.manifest(&first), [other.clone(), discovery.clone()]);
+            // and another cache finds the result there, and fetches its blobs
+            let puller = cache("http-puller").with_remote(Arc::new(Remote::http(url(), None, false)));
+            let second_of = |found: &Discovery| if *found == discovery { second } else { crate::blake3::hash(b"unknown") };
+            let (key, found) = puller.find(&first, second_of).unwrap();
+            assert_eq!((key, found.outputs.len()), (second, 1));
+            puller.fetch_blobs(&[blob, printed]);
+            assert_eq!(puller.read_blob(&blob).unwrap(), contents);
+            assert!(puller.without_remote().find(&first, second_of).is_some());
+            assert!(puller.remote().unwrap().error().is_none());
+            for cache in [pusher, puller] {
+                let _ = std::fs::remove_dir_all(cache.dir());
+            }
+            let _ = std::fs::remove_dir_all(&files);
+        }
+    }
+
+    #[test]
+    fn stops_using_a_server_over_http_which_refuses() {
+        let files = std::env::temp_dir().join(format!("rig-remote-{}-http-refuses", std::process::id()));
+        let address = crate::http::serve_directory(files.clone(), false, Some("Bearer token".into()));
+        let url = crate::http::Url::parse(&format!("http://{address}")).unwrap();
+        let remote = Remote::http(url.clone(), Some(b"wrong"), true);
+        assert!(remote.manifest(&[0; 32]).is_none());
+        assert!(remote.error().unwrap().contains("GET /mf/"), "{:?}", remote.error());
+        assert!(remote.error().unwrap().contains("401"));
+        assert!(!remote.pushes());
+        let remote = Remote::http(url, Some(b"token"), true);
+        assert!(remote.manifest(&[0; 32]).is_none());
+        assert!(remote.error().is_none() && remote.pushes());
+        // and one which nothing listens at
+        let closed = Remote::http(crate::http::Url::parse("http://127.0.0.1:1").unwrap(), None, false);
+        assert!(closed.manifest(&[0; 32]).is_none());
+        assert!(closed.error().unwrap().contains("at 127.0.0.1:1"));
+        let _ = std::fs::remove_dir_all(&files);
     }
 
     #[test]
