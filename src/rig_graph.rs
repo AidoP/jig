@@ -50,6 +50,7 @@ impl Graph for RigGraph {
                 order_only: &order_only,
                 bindings: edge.variables,
                 action: edge.exec.cloned().map(rig::Action::Exec),
+                hashed: edge.hashed,
             })
             .map_err(Error::Rig)
     }

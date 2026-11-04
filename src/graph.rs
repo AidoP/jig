@@ -55,6 +55,8 @@ pub struct Edge<'a> {
     /// The program the edge runs, as rig runs it, without a shell, in place of the command of its rule, which
     /// `build.ninja` has.
     pub exec: Option<&'a rig::Exec>,
+    /// Whether rig stamps the edge's files by their contents, which ninja cannot.
+    pub hashed: bool,
 }
 
 /// What a build graph is written to.

@@ -12,6 +12,7 @@
 //! rig has no dependencies other than `std`. What it needs of the system which `std` does not provide, such as
 //! signals and FIFOs, is declared from the C library in one module, behind a safe interface.
 
+pub mod blake3;
 pub mod depfile;
 pub mod exec;
 mod format;

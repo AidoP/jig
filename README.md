@@ -614,6 +614,9 @@ A `custom` statement is followed by indented attributes:
   value, it is `true`
 - `install <bool>`, `install-dir <str>`, `install-mode <mode>`: install the outputs with `jig install`, as for a
   crate, in `'share'` with the permissions `0o644` by default, which `'+x'` makes executable
+- `change-detection <str>`: how rig finds that the command's files have changed, `'timestamp'` or `'hash'`, in place
+  of the `change-detection` property, such as to hash the small file a generator writes, so that what reads it is not
+  rebuilt when it is written again unchanged
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output
@@ -717,6 +720,12 @@ target bluemetal-riscv64
   `/usr/local` by default
 - `test-tags`: the tags of the tests `jig test` runs without names or tags, beside the tests without tags, as a list,
   which is empty by default
+- `change-detection`: how rig finds that a file has changed, `'timestamp'` by default, by its modification time and
+  size, or `'hash'`, by a BLAKE3 hash of its contents too. With `'hash'`, a file which is written again unchanged, or
+  changed and changed back, rebuilds nothing, and what depends on an output which is written unchanged is not rebuilt.
+  A file is only read again when its time or size has changed, or when it is a source which was modified within a tick
+  of the file system's clock of being hashed, as it may have changed again without its time showing it. ninja always
+  uses timestamps
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no

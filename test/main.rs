@@ -2073,6 +2073,53 @@ set a contains(flags)
 }
 
 #[test]
+fn change_detection() {
+    // `first` writes the first character of its input, which a change to the rest of it leaves as it was, so with its
+    // files hashed, `after` does not run again, while with their times it does
+    let jig = |global: &str, after: &str| format!("\
+{global}
+custom first
+    input 'gen.in'
+    output 'gen.h'
+    command 'sh' '-c' 'cut -c1 \"$1\" > \"$2\"' 'sh' input output
+custom after
+    input first
+    output 'after.txt'
+    command 'cp' input output
+    default
+{after}
+");
+    let ran = |global: &str, after: &str| {
+        let project = Project::new("change-detection", &[("Jig", &jig(global, after)), ("gen.in", "abc\n")]);
+        project.configure().ok();
+        let build = || {
+            let output = Command::new(configure_path()).arg("build").current_dir(&project.dir).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap()
+        };
+        build();
+        std::fs::write(project.dir.join("gen.in"), "axy\n").unwrap();
+        let stdout = build();
+        (stdout.contains("CUSTOM first"), stdout.contains("CUSTOM after"))
+    };
+    // ninja cannot hash, so it is only checked with rig
+    if rig_engine() {
+        assert_eq!(ran("", ""), (true, true));
+        assert_eq!(ran("set change-detection 'hash'", ""), (true, false));
+        // a command's own `change-detection` replaces the property, here for the command which reads the file
+        assert_eq!(ran("", "    change-detection 'hash'"), (true, false));
+        assert_eq!(ran("set change-detection 'hash'", "    change-detection 'timestamp'"), (true, true));
+    }
+    let project = Project::new("invalid-change-detection", &[("Jig", "set change-detection 'sometimes'\n")]);
+    project.configure().failed().stderr("`change-detection` is \"sometimes\", rather than `'timestamp'` or `'hash'`");
+    let project = Project::new("invalid-change-detection-attribute", &[(
+        "Jig",
+        "custom c\n    output 'c'\n    command 'true'\n    change-detection 'never'\n",
+    )]);
+    project.configure().failed().stderr("`'timestamp'` or `'hash'`");
+}
+
+#[test]
 fn test_tags() {
     let jig = |test_tags: &str| format!("\
 {test_tags}

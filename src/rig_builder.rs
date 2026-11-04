@@ -192,7 +192,7 @@ pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Erro
         Err(error) => return Err(Error::Rig(error)),
     };
     let mut stamps = rig::Stamps::new(graph, build_dir);
-    let inputs = rig::plan::input_stamps(graph, edge, &mut stamps);
+    let inputs = rig::plan::input_stamps(graph, &state, edge, &mut stamps);
     let discovered = match graph.edge(edge).depfile() {
         Some(depfile) => {
             let path: PathBuf = build_dir.join(depfile);

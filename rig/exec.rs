@@ -419,23 +419,28 @@ impl Run<'_, '_> {
             EdgeKind::Alias => unreachable!("an alias is not run"),
         }
     }
-    /// Whether an edge which would run only as an input is built again is up to date after all, as a restat edge it
-    /// depends on left its outputs alone.
+    /// Whether an edge which would run only as an input is built again is up to date after all, as a restat or hashed
+    /// edge it depends on left its outputs alone, or as it is hashed and its inputs' contents are as they were.
     ///
     /// It is checked again once the edges it depends on have run, if one of them left its outputs alone, by the inputs
     /// which make it run, so that another which it depends on only through an order-only input may have changed.
+    ///
+    /// A hashed edge is checked again whatever the edges it depends on did, as it compares the contents of its inputs,
+    /// rather than whether they were built again.
     fn restat_clean(&mut self, index: usize) -> bool {
         let unchanged = |dep: &usize| self.status[*dep] == Status::Done { changed: false };
-        if !self.deps[index].iter().any(unchanged) || !matches!(self.reasons[index], Reason::InputRebuilt(_)) {
+        let hashed = self.graph.edge(self.edges[index]).hashed();
+        let rebuilt = matches!(self.reasons[index], Reason::InputRebuilt(_));
+        if !rebuilt || !(hashed || self.deps[index].iter().any(unchanged)) {
             return false;
         }
         let (graph, index_of, status) = (self.graph, &self.index, &self.status);
-        let changed = |edge: EdgeId| changed(graph, edge, index_of, status, &mut HashSet::new());
+        let changed = |edge: EdgeId| !hashed && changed(graph, edge, index_of, status, &mut HashSet::new());
         plan::reason(graph, self.state, &mut self.stamps, self.edges[index], &changed).is_none()
     }
     fn start(&mut self, index: usize, observer: &mut dyn Observer) {
         let edge = self.edges[index];
-        self.inputs.insert(index, plan::input_stamps(self.graph, edge, &mut self.stamps));
+        self.inputs.insert(index, plan::input_stamps(self.graph, self.state, edge, &mut self.stamps));
         let data = self.graph.edge(edge);
         // the directories of the outputs and depfile are created first, as ninja creates them, which the command
         // fails without if it needs them
@@ -448,9 +453,21 @@ impl Run<'_, '_> {
                 let _ = std::fs::create_dir_all(self.options.dir.join(dir));
             }
         }
-        if data.restat() {
+        // the outputs of a restat or hashed edge are stamped before it runs, to find whether it changed them, by their
+        // contents if it is hashed, reusing its last record's hashes
+        if data.restat() || data.hashed() {
+            let previous = self.state.get(&plan::first_output(self.graph, edge));
             let outputs = data.outputs().iter().chain(data.implicit_outputs());
-            let before = outputs.map(|&output| self.stamps.node(output)).collect();
+            let before = outputs
+                .map(|&output| {
+                    let path = self.graph.path(output);
+                    let recorded = previous.and_then(|record| {
+                        let (_, stamp) = record.outputs.iter().find(|(recorded, _)| recorded == path)?;
+                        Some((stamp, record.start.saturating_add(u64::from(record.duration))))
+                    });
+                    self.stamps.node_as(output, data.hashed(), recorded)
+                })
+                .collect();
             self.before.insert(index, before);
         }
         if data.pool() == Pool::Console {
@@ -478,7 +495,9 @@ impl Run<'_, '_> {
                 Ok(discovered) => {
                     let record = plan::record(self.graph, edge, inputs, &discovered, &mut self.stamps, start, duration);
                     let changed = match self.before.remove(&index) {
-                        Some(before) => record.outputs.iter().map(|(_, stamp)| *stamp).ne(before),
+                        Some(before) => {
+                            !record.outputs.iter().zip(&before).all(|((_, after), before)| after.same(*before))
+                        },
                         None => true,
                     };
                     if let Err(error) = self.state.record(record) {
@@ -973,6 +992,28 @@ mod tests {
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         // while a change to what is generated builds what depends on it
         build.write("gen.in", "different\n");
+        assert_eq!(build.ran(&[]), ["gen.h", "a.o", "app"]);
+    }
+
+    #[test]
+    fn hashed_edges_cut_off_what_does_not_change() {
+        // the first character of the input is generated, so a change to the rest leaves the generated file as it was,
+        // though it is written again
+        let graph = cat()
+            .rule("first", &[("command", "cut -c1 $in > $out")])
+            .hashed()
+            .edge("first", &["gen.h"], &["gen.in"])
+            .edge("cat", &["a.o"], &["gen.h"])
+            .edge("cat", &["app"], &["a.o"]);
+        let mut build = Build::new("cutoff", graph.finish(), &[("gen.in", "abc\n")]);
+        assert_eq!(build.ran(&[]), ["gen.h", "a.o", "app"]);
+        build.write("gen.in", "axy\n");
+        let (report, finished) = build.build(&[]);
+        assert_eq!(finished.into_iter().map(|(output, _)| output).collect::<Vec<_>>(), ["gen.h"]);
+        assert_eq!(report.restat_skipped, 2);
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
+        // while a change to what is generated builds what depends on it
+        build.write("gen.in", "bxy\n");
         assert_eq!(build.ran(&[]), ["gen.h", "a.o", "app"]);
     }
 
