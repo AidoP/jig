@@ -71,8 +71,10 @@ impl Rig<'_> {
         if let Some(toolchain) = self.toolchain {
             options.env.push(("RUSTUP_TOOLCHAIN".into(), toolchain.into()));
         }
-        // rustup's proxies, such as `rustc`, find the toolchain with these, which is identified by its contents instead
-        options.locating.extend(["RUSTUP_HOME", "CARGO_HOME"].map(String::from));
+        // rustup's proxies, such as `rustc`, find the toolchain with these, and `RUSTUP_TOOLCHAIN` chooses it, which is
+        // identified by its contents instead, as it was when the project was configured, which it is again when the
+        // variable changes, so that a cached command runs the toolchain it is identified by, rather than rustup's default
+        options.locating.extend(["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"].map(String::from));
         options.cache = self.cache.open(true)?;
         Ok(options)
     }

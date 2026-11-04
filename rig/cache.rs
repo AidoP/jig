@@ -41,7 +41,10 @@ use crate::remote::Remote;
 pub type Hash = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"RIGC";
-const VERSION: u32 = 1;
+/// The version of the format of manifests and results, which is 2 since results compiled by another toolchain than
+/// the one they were identified by, which the hermetic environment chose before `RUSTUP_TOOLCHAIN` was passed on, were
+/// kept, so that they are not found.
+const VERSION: u32 = 2;
 pub(crate) const MANIFEST: u8 = 1;
 pub(crate) const RESULT: u8 = 2;
 
