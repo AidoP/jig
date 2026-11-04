@@ -2251,11 +2251,12 @@ build {host}/lint/libapp.rmeta | {host}/lint/app.txt: clippy app.rs | {host}/che
     std::fs::write(project.dir.join("app.rs"), "fn four() -> u32 { util::two() * 2 }\nfn main() { four(); }\n").unwrap();
     let (success, stdout, _) = lint(&["util"]);
     assert!(success, "{stdout}");
-    assert_contains(&stdout, ": no work to do.\nwarning: unneeded `return` statement\n");
+    assert_contains(&stdout, "warning: unneeded `return` statement\n");
+    assert!(!stdout.contains("CLIPPY"), "{stdout}");
     // which fails with `-D`, without linting again
     let (success, stdout, stderr) = lint(&["-D", "util"]);
     assert!(!success, "{stdout}");
-    assert_contains(&stdout, ": no work to do.\n");
+    assert!(!stdout.contains("CLIPPY"), "{stdout}");
     assert_contains(&stderr, "linting raised warnings, which `-D` denies");
     let (success, stdout, _) = lint(&[]);
     assert!(success, "{stdout}");
@@ -4100,7 +4101,7 @@ fn install_nothing() {
     let output = Command::new(configure_path()).arg("install").current_dir(&project.dir).output().unwrap();
     assert!(output.status.success(), "install failed:\n{}", String::from_utf8_lossy(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.ends_with("\nnothing to install\n"), "{stdout}");
+    assert_eq!(stdout.lines().last(), Some("nothing to install"), "{stdout}");
 }
 
 #[test]

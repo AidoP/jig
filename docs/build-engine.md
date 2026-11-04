@@ -506,16 +506,18 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **`jig build`'s arguments.** Under rig it takes a subset of ninja's options: `-j`, `-k`, `-n` (a dry run that
      prints each edge with the reason it would run), `-v` (commands rather than descriptions) and `--quiet`. Any
      other option is an error that names it.
-   - **Errors and output.** An unknown target, a missing input or a cycle is printed as `rig: error: ...`, and the
-     build fails, as ninja's do. A build with nothing to do prints `rig: no work to do.`, except while regenerating.
+   - **Errors and output.** rig doesn't copy ninja's log messages. An unknown target, a missing input or a cycle is
+     printed on stderr as the error alone, such as `unknown target "x"`, and the build fails. A build with nothing to
+     do prints nothing.
    - **The generator edge is recorded by `jig generate`.** It records the edge in rig's state directly, so the first
      build doesn't regenerate the graph as it would with no record. That is skipped while rig holds the state, as when
      rig itself runs the configure edge, which it records afterwards.
    - **Output directories.** rig now creates the directories of an edge's outputs and depfile before running it, as
      ninja does. Building jig itself showed it was needed.
    - **`configured::ensure`** regenerates when `graph` is missing as well as `build.ninja`.
-   - **The suite runs with both engines.** The integration tests now check engine-neutral output (`: no work to do.`),
-     and look in rig's log instead of `ninja -t deps` under rig. With `JIG_ENGINE=rig`, all 160 integration tests
+   - **The suite runs with both engines.** The integration tests no longer rely on ninja's "no work to do" line:
+     they check that nothing ran, as no `CLIPPY` line is shown. Under rig they look in rig's log instead of using
+     `ninja -t deps`. With `JIG_ENGINE=rig`, all 160 integration tests
      and the unit and perf tests pass, and CI runs the suite a second time with it.
 6. The standalone `rig` binary, which builds ninja files with the reader.
 7. **Differential tests.** Generate random graphs and sequences of edits, run both ninja and `rig` on them, and compare
