@@ -41,6 +41,7 @@
 //!   succeeded, `1` or `0`, and its result as a cache stores one, whose blobs the worker has, `NOT_FOUND` if it does
 //!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
 //!   that requests for blobs are answered while they run.
+//! - `GET_CAPABILITIES` is replied to by a worker with `FOUND` and its [`crate::worker::Capabilities`].
 //!
 //! A blob larger than a part, a MiB, is sent in parts, whether it is a reply to `GET_BLOB` or the request `PUT_BLOB`:
 //! a frame of the kind `MORE` with the id of the request for each part but the last, then the frame of the reply or
@@ -69,7 +70,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -81,6 +82,7 @@ const PUT_RESULT: u8 = 7;
 const ADD_TO_MANIFEST: u8 = 8;
 const AUTH: u8 = 9;
 const EXECUTE: u8 = 10;
+const GET_CAPABILITIES: u8 = 11;
 const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
@@ -748,6 +750,25 @@ impl Remote {
             _ => 0,
         }
     }
+    /// Returns what the server, as a worker, has: its host, tags and toolchains.
+    ///
+    /// # Errors
+    ///
+    /// If it is not a worker, or cannot be reached.
+    pub fn capabilities(&self) -> Result<crate::worker::Capabilities, String> {
+        let failed = || self.error().unwrap_or_else(|| "the worker cannot be reached".into());
+        let connection = self.connection().ok_or_else(failed)?;
+        if connection.jobs == 0 {
+            return Err("the server is not a worker".into());
+        }
+        match connection.send(GET_CAPABILITIES, &[]).and_then(|receiver| receiver.recv().ok()) {
+            Some((FOUND, payload)) => {
+                crate::worker::Capabilities::decode(&payload).ok_or_else(|| "an invalid reply from the worker".into())
+            },
+            Some((ERROR, message)) => Err(String::from_utf8_lossy(&message).into_owned()),
+            _ => Err(failed()),
+        }
+    }
     /// Whether the server, as a worker, may have a toolchain: whether it has not refused an action of it.
     #[must_use]
     pub fn may_have(&self, identity: &str) -> bool {
@@ -1153,6 +1174,10 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                         send_blob(cache, &key, &|kind, payload| reply(kind, id, payload));
                         continue;
                     }
+                    if kind == GET_CAPABILITIES && let Some(executor) = executor {
+                        reply(FOUND, id, &executor.capabilities().encode());
+                        continue;
+                    }
                     let (kind, payload) = answer(cache, push, blobs, kind, &payload);
                     reply(kind, id, &payload);
                 }
@@ -1268,7 +1293,7 @@ fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (
     if (matches!(kind, PUT_RESULT | ADD_TO_MANIFEST) && !push) || (kind == PUT_BLOB && !blobs) {
         return error("the server does not take pushes");
     }
-    if kind == EXECUTE {
+    if matches!(kind, EXECUTE | GET_CAPABILITIES) {
         return error("the server is not a worker");
     }
     if matches!(kind, MISSING | GET_RESULTS) {
@@ -1432,7 +1457,7 @@ mod tests {
 
     #[test]
     fn runs_actions_only_as_a_worker() {
-        use crate::worker::{Executor, Input, Refused, Request, Toolchain};
+        use crate::worker::{Capabilities, Executor, Input, Toolchain};
         let dir = std::env::temp_dir().join(format!("rig-remote-{}-worker", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("build")).unwrap();
@@ -1440,6 +1465,7 @@ mod tests {
         let blob = crate::blake3::hash(b"input\n");
         let request = Request {
             identity: "toolchain".into(),
+            install: String::new(),
             action: crate::Action::Shell("cp in out && echo copied".into()),
             env: Vec::new(),
             locating: vec!["PATH".into()],
@@ -1451,13 +1477,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(plain.dir());
         let server = served(plain, false, false);
         assert_eq!(server.jobs(), 0);
+        assert!(server.capabilities().is_err());
         assert!(matches!(server.execute(&dir.join("build"), &request), Err(Refused::Error(_))));
         // a worker is sent the input, runs the action, and keeps its output for the client to fetch
         let store = cache("worker-store");
-        let toolchains = vec![Toolchain { identity: "toolchain".into(), env: Vec::new() }];
-        let executor = Executor::new(store.dir().join("work"), 3, move || toolchains.clone());
+        let toolchain = Toolchain { identity: "toolchain".into(), release: "1.97.0".into(), ..Toolchain::default() };
+        let capabilities = Capabilities { host: "host".into(), tags: vec!["fast".into()], toolchains: vec![toolchain] };
+        let reported = capabilities.clone();
+        let executor = Executor::new(store.dir().join("work"), 3, move || reported.clone());
         let worker = served_worker(store.clone(), executor);
         assert_eq!(worker.jobs(), 3);
+        assert_eq!(worker.capabilities(), Ok(capabilities));
         let executed = worker.execute(&dir.join("build"), &request).unwrap();
         assert!(executed.succeeded);
         assert!(store.has_blob(&blob));

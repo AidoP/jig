@@ -1444,9 +1444,10 @@ fn rig_fetches_from_the_cache() {
     ];
     let project = Project::new("rig-cache", &files);
     project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
-    // the configuration depends on the files which identify the toolchain, which rustup writes when it updates it
+    // the configuration depends on the file which identifies the toolchain, which rustup writes when it updates it
     let depfile = std::fs::read_to_string(project.dir.join("build/build.ninja.d")).unwrap();
-    assert!(depfile.contains("/rustlib/components") || depfile.contains("/bin/rustc"), "{depfile}");
+    let manifest = depfile.contains("/rustlib/multirust-channel-manifest.toml");
+    assert!(manifest || depfile.contains("/bin/rustc"), "{depfile}");
     let build_in = |project: &Project, path: Option<&str>| {
         let mut command = jig_command();
         command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
@@ -1828,7 +1829,8 @@ fn workers() {
     let dir = std::env::temp_dir().join(format!("jig-test-{}-workers", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = dir.join("store").display().to_string();
-    let worker = format!("/usr/bin/env JIG_CACHE={store} {} worker --stdio --jobs 4", configure_path().display());
+    let jig = configure_path().display().to_string();
+    let worker = format!("/usr/bin/env JIG_CACHE={store} {jig} worker --stdio --jobs 4 --tag fast");
     let project = Project::new("workers", &[
         (
             "Jig",
@@ -1878,6 +1880,14 @@ fn workers() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
     // and are added to the build's cache, as what runs here is
     assert!(!stats(&second).contains("\n0 results"), "{}", stats(&second));
+    // `jig workers` shows the worker's host, jobs and tags, and its toolchains, among them the one which built here
+    let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast\n"));
+    let release = Command::new("rustc").arg("-vV").output().unwrap();
+    let release = String::from_utf8(release.stdout).unwrap();
+    let release = release.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
+    assert_contains(&shown, &format!(": {release} for "));
     // a worker which cannot be run builds nothing, and the build goes on without it
     std::fs::remove_dir_all(&outputs).unwrap();
     let mut command = jig_command();

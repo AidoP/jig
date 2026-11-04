@@ -287,10 +287,11 @@ and inputs is fetched instead of run.
      sets of discovered inputs that have been seen for `k1`.
   2. For each set, `k2 = H(k1, hashes of those inputs as they are now)` leads to a result: output blobs, captured
      output, and the depfile rewritten with paths relative to the root.
-- **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host) and the files rustup writes to
-  the sysroot, its channel's manifest and list of components, by their paths within the sysroot, so that a toolchain
-  has the same identity wherever it is installed, as a worker finds it. A `RUSTUP_TOOLCHAIN` given by `+<toolchain>` is
-  in the action. It's computed once per configuration and given to each cached edge in the graph.
+- **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host) and the channel's manifest which
+  rustup writes to the sysroot, or without it, of `bin/rustc`, by its path within the sysroot, so that a toolchain has
+  the same identity wherever it is installed, and whichever components it has, as a worker finds it. A
+  `RUSTUP_TOOLCHAIN` given by `+<toolchain>` is in the action. It's computed once per configuration and given to each
+  cached edge in the graph.
 - **Relocation.** A hit in another checkout needs outputs that don't contain the checkout's path.
   - Every path jig gives rustc is relative to the build directory, and rustc's paths are remapped to be relative to
     the project root. The sysroot's sources are already remapped by rustup's builds of the standard library.
@@ -1198,8 +1199,38 @@ implementation of that trait, so `generate.rs` doesn't change.
      - An edge which runs here after its worker failed it runs beyond the build's jobs.
      - A worker must have the identical toolchain, of the same host, so it's of the client's platform; step 3 relaxes
        that.
-2. Capability reports: on connecting, a worker reports its host triple, its toolchains with their installed targets,
-   and its tags, and can install a toolchain with rustup if it is allowed to. `jig workers` shows them.
+     - A worker must have the same components as the client; step 2 relaxes that.
+2. **Done:** capability reports, and installing toolchains (protocol version 6).
+   - **`GET_CAPABILITIES`.** A worker replies with its `Capabilities`: its host, the tags it was given, and each
+     toolchain's identity, rustup name, release, host and the targets it has standard libraries for, found from the
+     directories of `lib/rustlib` which have a `lib`. They are found when they are first needed, and again once a
+     toolchain is installed.
+   - **The identity is of the channel's manifest alone,** rather than also the list of components, so that a worker
+     with clippy, or another target, has the same toolchain. A target's standard library which a worker doesn't have
+     fails the action there, which then runs here.
+   - **Installing.** A request names the toolchain as rustup installs it, which configuring finds in the manifest:
+     the version of a stable release, such as `1.97.0`, or the channel and date of a nightly or beta, such as
+     `nightly-2026-11-03`. It's recorded in `.jig` (version 22), with the identity it's for, and given to rig as
+     `Options::installable`.
+     - A worker run with `--install` that doesn't have the identity runs `rustup toolchain install <name> --profile
+       minimal --no-self-update`, finds its toolchains again, and runs the action if the identity is among them.
+     - Installs take turns, and each name is tried once, so a name which doesn't give the identity, as a channel's
+       manifest which was changed since, isn't installed again for each action.
+     - A name has only letters, digits, `.` and `-`, as it is given to rustup as an argument.
+   - **jig.**
+     - `jig worker --tag <tag>`, which may be repeated, and `--install`.
+     - `jig workers` asks each worker of `workers` at once, and shows its host, jobs and tags, with each toolchain's
+       name, release and targets, or why it can't be reached.
+   - **Tests.**
+     - rig: capabilities encoded and decoded.
+     - rig: a toolchain installed by the name a request gives, and found again, refused without an installer or a
+       name, and a name which gives another identity tried once.
+     - rig, remote: a worker's capabilities fetched, and a cache which isn't a worker refused.
+     - jig: the names of stable, nightly and beta releases, a beta with a number which rustup names otherwise, and a
+       date which isn't a name. A toolchain's identity is the same in another directory, and differs by version.
+     - Integration: `jig workers` shows the worker's host, jobs and tag, and the release which built here.
+   - **Not done yet:** a toolchain is installed with its host's standard library alone, and the targets an edge needs
+     aren't known to rig, so step 3 adds them to the platform an edge needs.
 3. Platform constraints on edges: `any`, `host == <triple>` or tags, matched against what workers report.
    - Proc-macro crates and edges linked with a system linker need the platform they were built on. Edges which link
      with `rust-lld` can run on any platform.

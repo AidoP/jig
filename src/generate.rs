@@ -937,6 +937,8 @@ fn write_database(
         push: settings.push,
         token_file: &token_file,
         workers: settings.workers.iter().map(String::as_str).collect(),
+        toolchain_identity: settings.installable.as_ref().map_or("", |(identity, _)| identity),
+        toolchain_install: settings.installable.as_ref().map_or("", |(_, name)| name),
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {
