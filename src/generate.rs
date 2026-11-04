@@ -546,26 +546,33 @@ fn write_graph(
         let target = TargetFlag::new(&c.target, project, build_dir);
         let spec = at.paths(&target.spec);
         let input = at.path(&c.path);
-        let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &codegen(c, project), &input, at);
+        let codegen = codegen(c, project);
+        let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &codegen, &input, at);
         flags.cfg(&c.cfg);
+        let mut harness_flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &harness_codegen(&codegen), &input, at);
+        harness_flags.cfg(&c.cfg);
         let crate_env = crate_env(&c.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
         // test harness and any crate but a library, which then depends on it
         let link_script = c.link_script.as_ref().or_else(|| project.target(&c.target)?.link_script.as_ref());
         let link_script = link_script.map(|path| at.path(path));
-        let mut linked_flags = flags.clone();
-        if let Some(path) = &link_script {
-            linked_flags.codegen(&format!("link-arg=-T{}", path.display()));
-        }
         // Apple's linker writes the absolute paths of the object files into what it links, as the map by which debug
         // info is found in them, which `--remap-path-prefix` does not reach, so they are made relative to its working
         // directory, the build directory, by `-oso_prefix .`, as `cc`, the linker of the host, takes it
         let host = project.host();
-        let default_linker = !codegen(c, project).iter().any(|option| option.starts_with("linker="));
-        if c.target == host && host.contains("-apple-") && default_linker {
-            linked_flags.codegen("link-arg=-Wl,-oso_prefix,.");
-        }
+        let default_linker = !codegen.iter().any(|option| option.starts_with("linker="));
+        let link = |flags: &Flags| {
+            let mut linked_flags = flags.clone();
+            if let Some(path) = &link_script {
+                linked_flags.codegen(&format!("link-arg=-T{}", path.display()));
+            }
+            if c.target == host && host.contains("-apple-") && default_linker {
+                linked_flags.codegen("link-arg=-Wl,-oso_prefix,.");
+            }
+            linked_flags
+        };
+        let linked_flags = link(&flags);
         let link_deps: Vec<_> = deps.iter().copied().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
@@ -598,7 +605,7 @@ fn write_graph(
         if c.test {
             everything.push(at.path(&c.test_harness()));
             let tmpdir = Path::new("tmp").join(&c.target).join("test").join(&c.name);
-            let mut test_flags = linked_flags.clone();
+            let mut test_flags = link(&harness_flags);
             test_flags.plain(&["--test"]);
             let harness = at.path(&c.test_harness());
             let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &harness), &test_flags, None);
@@ -644,7 +651,9 @@ fn write_graph(
         let spec = at.paths(&target.spec);
         let outdir = at.path(&unit.check_dir());
         let root = at.path(&unit.root);
-        let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &unit.codegen, &root, at);
+        // a crate with tests is checked or linted with `--test`, so with the codegen options of its test harness
+        let codegen = if unit.harness { harness_codegen(&unit.codegen) } else { unit.codegen.clone() };
+        let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &codegen, &root, at);
         flags.cfg(&unit.cfg);
         let crate_env = crate_env(&unit.env);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
@@ -947,6 +956,12 @@ fn rustc_flags(
         flags.plain(&["--extern", &format!("{}={}", dep.name, dep.path.display())]);
     }
     flags
+}
+
+/// Returns the codegen options of a crate for its test harness, without `panic`, as the harness must unwind on stable
+/// rustc, which catches each test's panic.
+fn harness_codegen(codegen: &[String]) -> Vec<String> {
+    codegen.iter().filter(|option| !option.starts_with("panic=")).cloned().collect()
 }
 
 /// The flags of rustc, rustdoc or clippy, both as the arguments of the program, which rig runs directly, and as they are

@@ -4313,6 +4313,12 @@ crate macro 'macro.rs'
 crate forced 'forced.rs'
     crate-type 'proc-macro'
     codegen/lto 'thin'
+crate app 'app.rs'
+    crate-type 'bin'
+    test
+crate aborts 'aborts.rs'
+    codegen/panic 'abort'
+    test
 ")]);
     let host = project.host();
     let output = project.configure().ok();
@@ -4331,8 +4337,26 @@ crate forced 'forced.rs'
     );
     output.stderr(
         "note: codegen-units: 1, debug-assertions: false, debuginfo: 0, lto: fat, opt-level: 3, overflow-checks: false, \
-strip: symbols",
+panic: abort, strip: symbols",
     );
+    // only a binary is given `panic` by the properties, as a library built with `panic=abort` cannot be linked into a
+    // test harness, while a crate's own attribute gives it to a library
+    assert_contains(output.build(&format!("{host}/app")), "-C overflow-checks=false -C panic=abort -C strip=symbols");
+    assert!(!output.build(&format!("{host}/libother.rlib")).contains("panic"), "{}", output.ninja);
+    assert_contains(output.build(&format!("{host}/libaborts.rlib")), "-C panic=abort");
+    // a test harness unwinds, as it catches each test's panic, as do the checks and lints, which are of the harness
+    for harness in [format!("{host}/test/app"), format!("{host}/test/aborts")] {
+        assert_contains(output.build(&harness), "-C overflow-checks=false -C strip=symbols");
+        assert!(!output.build(&harness).contains("panic"), "{}", output.ninja);
+    }
+    for check in [format!("{host}/check/libapp.rmeta"), format!("{host}/lint/libaborts.rmeta")] {
+        // the statement has the diagnostics as an implicit output
+        let start = output.ninja.find(&format!("build {check} |")).expect(&check);
+        let statement = &output.ninja[start..];
+        let statement = &statement[..statement.find("\n\n").unwrap_or(statement.len())];
+        assert_contains(statement, "-C overflow-checks=false -C strip=symbols");
+        assert!(!statement.contains("panic"), "{statement}");
+    }
     // a procedural macro is not given LTO by the properties, as rustc refuses it, but is by its own attribute
     let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     let proc_macro = output.build(&format!("{host}/{prefix}macro{suffix}"));
