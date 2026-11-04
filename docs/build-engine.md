@@ -641,8 +641,21 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Left for step 3: line breaks.** Lifting the restriction on line breaks waits for step 3. rig's configure edge
      still has `build.ninja` as its output, so `build.ninja` can't yet be left out for a graph which ninja can't
      express.
-3. **Configuring natively.** Remove the missing-path stamp in favour of missing-path inputs, and run the configure
-   edge in the same process.
+3. **Deferred:** configuring natively, and line breaks.
+   - **What it would do.**
+     - Replace `reconfigure.stamp` with inputs of rig's generator edge for missing paths.
+     - Run the configure edge in jig's own process rather than as a `jig generate` subprocess.
+     - Write `build.ninja` only when ninja can express the graph, so that paths with line breaks work under rig.
+   - **Why it is deferred.** What it would replace already works for both engines:
+     - the stamp, for missing paths and for the configuration's environment variables;
+     - the configure subprocess, which runs only when the configuration changes;
+     - the line-break check, which rejects what ninja can't write, and is rarely met.
+
+     Doing it natively saves one process when the configuration changes, and allows line breaks in paths. That is
+     little for a rework of how both engines regenerate, since rig's generator edge would have to produce `graph`
+     rather than `build.ninja`.
+   - **When to revisit.** When something else needs rig's generator edge reworked, such as a resident daemon, or
+     dropping the ninja engine.
 
 ### Phase 3: hashing and early cutoff
 
