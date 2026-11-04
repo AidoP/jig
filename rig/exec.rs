@@ -180,6 +180,7 @@ pub fn build(
             dependents[dep].push(index);
         }
     }
+    let priority = critical_paths(graph, state, &edges, &dependents);
     let mut run = Run {
         graph,
         state,
@@ -193,6 +194,7 @@ pub fn build(
         dependents,
         status: Vec::new(),
         ready: BTreeSet::new(),
+        priority,
         inputs: HashMap::new(),
         before: HashMap::new(),
         progress: Progress::default(),
@@ -211,10 +213,29 @@ pub fn build(
     }
     run.status = vec![Status::Waiting; run.edges.len()];
     run.progress.total = run.edges.len();
-    run.ready = (0..run.edges.len()).filter(|&index| run.waiting[index] == 0).collect();
+    let ready: Vec<usize> = (0..run.edges.len()).filter(|&index| run.waiting[index] == 0).collect();
+    for index in ready {
+        run.make_ready(index);
+    }
     run.run(observer)?;
     run.report.not_run = run.status.iter().filter(|status| matches!(status, Status::Waiting)).count();
     Ok(run.report)
+}
+
+/// Returns the priority of each edge in the plan: how long it took when it last ran, in milliseconds, or one if it has
+/// not run, with the longest of the edges which depend on it, as the time of the longest path from it to the end of the
+/// build. Edges on that path, the critical one, run first, so that a long chain does not start last.
+///
+/// The plan is in an order in which each edge runs after those it depends on, so the priorities are found from its end.
+fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[Vec<usize>]) -> Vec<u64> {
+    let mut priority = vec![0; edges.len()];
+    for index in (0..edges.len()).rev() {
+        let record = state.get(&plan::first_output(graph, edges[index]));
+        let duration = record.map_or(1, |record| u64::from(record.duration).max(1));
+        let longest = dependents[index].iter().map(|&dependent| priority[dependent]).max().unwrap_or(0);
+        priority[index] = duration.saturating_add(longest);
+    }
+    priority
 }
 
 /// Returns the edges in the plan which an edge depends on, through aliases, by its inputs, declared and discovered.
@@ -258,8 +279,10 @@ struct Run<'g, 's> {
     /// The number of edges each is waiting for.
     waiting: Vec<usize>,
     status: Vec<Status>,
-    /// The edges which are ready to run, by their order in the plan.
-    ready: BTreeSet<usize>,
+    /// The edges which are ready to run, by their priority, highest first, then their order in the plan.
+    ready: BTreeSet<(std::cmp::Reverse<u64>, usize)>,
+    /// The priority of each edge, the time of the longest path from it to the end of the build.
+    priority: Vec<u64>,
     /// The stamps of the declared inputs of each running edge, when it started.
     inputs: HashMap<usize, Vec<(String, Stamp)>>,
     /// The stamps of the outputs of each running restat edge, before it started.
@@ -346,7 +369,7 @@ impl Run<'_, '_> {
                     match &self.jobserver {
                         Some(jobserver) if self.implicit.is_some() => {
                             let Some(token) = jobserver.try_acquire() else {
-                                self.ready.insert(index);
+                                self.make_ready(index);
                                 waiting_for_token = true;
                                 break;
                             };
@@ -404,13 +427,17 @@ impl Run<'_, '_> {
         let failed = self.options.keep_going != 0 && self.report.failed >= self.options.keep_going;
         failed || self.error.is_some() || self.report.interrupted
     }
-    /// Returns the first edge which is ready to run, other than one in the console pool while another runs.
+    /// Returns the edge of the highest priority which is ready to run, other than one in the console pool while
+    /// another runs.
     fn next_ready(&mut self) -> Option<usize> {
-        let index = *self.ready.iter().find(|&&index| {
+        let entry = *self.ready.iter().find(|&&(_, index)| {
             !self.console || self.graph.edge(self.edges[index]).pool() != Pool::Console
         })?;
-        self.ready.remove(&index);
-        Some(index)
+        self.ready.remove(&entry);
+        Some(entry.1)
+    }
+    fn make_ready(&mut self, index: usize) {
+        self.ready.insert((std::cmp::Reverse(self.priority[index]), index));
     }
     fn action(&self, index: usize) -> &Action {
         match self.graph.edge(self.edges[index]).kind() {
@@ -532,10 +559,10 @@ impl Run<'_, '_> {
     /// Mark an edge as done, making ready the edges which were waiting only for it.
     fn done(&mut self, index: usize, changed: bool) {
         self.status[index] = Status::Done { changed };
-        for &dependent in &self.dependents[index] {
+        for dependent in self.dependents[index].clone() {
             self.waiting[dependent] -= 1;
             if self.waiting[dependent] == 0 {
-                self.ready.insert(dependent);
+                self.make_ready(dependent);
             }
         }
     }
@@ -806,6 +833,27 @@ mod tests {
         let mut build = Build::new("directories", graph.finish(), &[]);
         assert_eq!(build.ran(&[]), ["out/sub/a.o"]);
         assert!(build.dir.join("deps/out/sub").is_dir());
+    }
+
+    #[test]
+    fn runs_the_critical_path_first() {
+        // one job, so that the order they finish in is the order they start in
+        let sleep = |graph: Graphs, output: &str, time: &str, inputs: &[&str]| {
+            graph.edge_with("sleep", &[output], inputs, &[("time", time)])
+        };
+        let rules = || graph().rule("sleep", &[("command", "sleep $time && touch $out")]);
+        let chain = sleep(sleep(sleep(rules(), "short", "0", &["in"]), "long", "0", &["in"]), "after", "0", &["long"]);
+        let mut build = Build::new("critical-path", chain.finish(), &[("in", "1\n")]);
+        build.options.jobs = 1;
+        // before any edge has run, the longer path is taken first, from `long` to `after`
+        assert_eq!(build.ran(&[]), ["long", "short", "after"]);
+        // then by how long each took when it last ran, where `slow` took longer
+        let pair = sleep(sleep(rules(), "quick", "0", &["in"]), "slow", "0.2", &["in"]);
+        let mut build = Build::new("durations", pair.finish(), &[("in", "1\n")]);
+        build.options.jobs = 1;
+        assert_eq!(build.ran(&[]), ["quick", "slow"]);
+        build.write("in", "2\n");
+        assert_eq!(build.ran(&[]), ["slow", "quick"]);
     }
 
     #[test]
