@@ -332,8 +332,6 @@ enum Error {
     ProxyNotInstalled(PathBuf),
     /// rig could not build, save or read a graph.
     Rig(rig::Error),
-    /// The graph rig read from a ninja file differs from the one it was built from, with the first difference.
-    GraphMismatch(PathBuf, String),
     /// An argument of `jig build` which rig does not take, or a depfile it could not read.
     RigArgument(String),
     /// A value of `JIG_ENGINE` which is not an engine.
@@ -401,9 +399,6 @@ impl core::fmt::Display for Error {
             Self::Rig(error) => write!(f, "rig: {error}"),
             Self::RigArgument(argument) => write!(f, "rig does not take {argument:?}"),
             Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
-            Self::GraphMismatch(path, difference) => {
-                write!(f, "the graph rig reads from {path:?} differs from the one it was built from: {difference}")
-            },
         }
     }
 }

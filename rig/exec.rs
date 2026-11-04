@@ -631,6 +631,7 @@ impl<W: std::io::Write> Observer for Console<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Graphs, graph};
     use std::time::Duration;
 
     /// A build in a temporary directory, which runs real commands.
@@ -641,7 +642,7 @@ mod tests {
         options: Options,
     }
     impl Build {
-        fn new(name: &str, ninja: &str, files: &[(&str, &str)]) -> Self {
+        fn new(name: &str, graph: Graph, files: &[(&str, &str)]) -> Self {
             let dir = std::env::temp_dir().join(format!("rig-exec-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -650,7 +651,7 @@ mod tests {
             }
             let state = State::open(&dir.join(".rig")).unwrap();
             let options = Options::new(&dir);
-            Self { graph: crate::ninja::read(ninja).unwrap(), state, options, dir }
+            Self { dir, graph, state, options }
         }
         /// Build targets, returning the report and the first output of each edge which finished, with its output.
         fn build(&mut self, targets: &[&str]) -> (Report, Vec<(String, String)>) {
@@ -688,12 +689,14 @@ mod tests {
         }
     }
 
-    const CAT: &str = "rule cat\n  command = cat $in > $out\n";
+    fn cat() -> Graphs {
+        graph().rule("cat", &[("command", "cat $in > $out")])
+    }
 
     #[test]
     fn builds_and_records() {
-        let ninja = format!("{CAT}build ab: cat a b\nbuild abc: cat ab c\n");
-        let mut build = Build::new("records", &ninja, &[("a", "a\n"), ("b", "b\n"), ("c", "c\n")]);
+        let graph = cat().edge("cat", &["ab"], &["a", "b"]).edge("cat", &["abc"], &["ab", "c"]);
+        let mut build = Build::new("records", graph.finish(), &[("a", "a\n"), ("b", "b\n"), ("c", "c\n")]);
         assert_eq!(build.ran(&[]), ["ab", "abc"]);
         assert_eq!(build.read("abc"), "a\nb\nc\n");
         assert_eq!(build.ran(&[]), Vec::<String>::new());
@@ -704,16 +707,18 @@ mod tests {
 
     #[test]
     fn creates_the_directories_of_outputs() {
-        let ninja = "rule cc\n  command = touch $out $out.d\n  depfile = deps/$out.d\nbuild out/sub/a.o: cc\n";
-        let mut build = Build::new("directories", ninja, &[]);
+        let graph = graph().rule("cc", &[("command", "touch $out $out.d"), ("depfile", "deps/$out.d")])
+            .edge("cc", &["out/sub/a.o"], &[]);
+        let mut build = Build::new("directories", graph.finish(), &[]);
         assert_eq!(build.ran(&[]), ["out/sub/a.o"]);
         assert!(build.dir.join("deps/out/sub").is_dir());
     }
 
     #[test]
     fn runs_in_parallel() {
-        let ninja = "rule sleep\n  command = sleep 0.4 && touch $out\nbuild a: sleep\nbuild b: sleep\nbuild c: sleep\n";
-        let mut build = Build::new("parallel", ninja, &[]);
+        let graph = graph().rule("sleep", &[("command", "sleep 0.4 && touch $out")])
+            .edge("sleep", &["a"], &[]).edge("sleep", &["b"], &[]).edge("sleep", &["c"], &[]);
+        let mut build = Build::new("parallel", graph.finish(), &[]);
         build.options.jobs = 3;
         let start = Instant::now();
         assert_eq!(build.ran(&[]).len(), 3);
@@ -722,18 +727,17 @@ mod tests {
 
     #[test]
     fn captures_output() {
-        let ninja = "rule say\n  command = echo out && echo err >&2 && touch $out\nbuild a: say\n";
-        let mut build = Build::new("output", ninja, &[]);
+        let graph = graph().rule("say", &[("command", "echo out && echo err >&2 && touch $out")]);
+        let graph = graph.edge("say", &["a"], &[]);
+        let mut build = Build::new("output", graph.finish(), &[]);
         assert_eq!(build.build(&[]).1, [("a".to_string(), "out\nerr\n".to_string())]);
     }
 
     #[test]
     fn stops_at_a_failure() {
-        let ninja = format!(
-            "{CAT}rule fail\n  command = echo failing && exit 3\n\
-             build bad: fail\nbuild after: cat bad\nbuild other: cat a\nbuild more: cat a\n"
-        );
-        let mut build = Build::new("failure", &ninja, &[("a", "a\n")]);
+        let graph = cat().rule("fail", &[("command", "echo failing && exit 3")]).edge("fail", &["bad"], &[])
+            .edge("cat", &["after"], &["bad"]).edge("cat", &["other"], &["a"]).edge("cat", &["more"], &["a"]);
+        let mut build = Build::new("failure", graph.finish(), &[("a", "a\n")]);
         build.options.jobs = 1;
         let (report, finished) = build.build(&[]);
         assert_eq!(finished, [("bad".to_string(), "failing\n".to_string())]);
@@ -749,9 +753,14 @@ mod tests {
 
     #[test]
     fn records_discovered_inputs() {
-        let ninja = "rule cc\n  command = cat $in > $out && echo \"$out: $in extra\\ file.h\" > $out.d\n  \
-                     depfile = $out.d\n  deps = gcc\nbuild a.o: cc a.c\n";
-        let mut build = Build::new("depfile", ninja, &[("a.c", "a\n"), ("extra file.h", "h\n")]);
+        let graph = graph()
+            .rule("cc", &[
+                ("command", "cat $in > $out && echo \"$out: $in extra\\ file.h\" > $out.d"),
+                ("depfile", "$out.d"),
+                ("deps", "gcc"),
+            ])
+            .edge("cc", &["a.o"], &["a.c"]);
+        let mut build = Build::new("depfile", graph.finish(), &[("a.c", "a\n"), ("extra file.h", "h\n")]);
         assert_eq!(build.ran(&[]), ["a.o"]);
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         build.write("extra file.h", "changed\n");
@@ -760,20 +769,22 @@ mod tests {
 
     #[test]
     fn fails_with_an_invalid_depfile() {
-        let ninja = "rule cc\n  command = touch $out && echo nonsense > $out.d\n  depfile = $out.d\nbuild a.o: cc\n";
-        let mut build = Build::new("bad-depfile", ninja, &[]);
+        let graph = graph().rule("cc", &[("command", "touch $out && echo nonsense > $out.d"), ("depfile", "$out.d")])
+            .edge("cc", &["a.o"], &[]);
+        let mut build = Build::new("bad-depfile", graph.finish(), &[]);
         assert_eq!(build.build(&[]).0.failed, 1);
     }
 
     #[test]
     fn restat_skips_what_did_not_change() {
         // the generated file is only written when its contents change, as jig writes generated files
-        let ninja = format!(
-            "{CAT}rule gen\n  \
-             command = cat $in > $out.tmp && (cmp -s $out.tmp $out || mv $out.tmp $out) && rm -f $out.tmp\n  \
-             restat = 1\nbuild gen.h: gen gen.in\nbuild a.o: cat gen.h\nbuild app: cat a.o\n"
-        );
-        let mut build = Build::new("restat", &ninja, &[("gen.in", "same\n")]);
+        let graph = cat()
+            .rule("gen", &[
+                ("command", "cat $in > $out.tmp && (cmp -s $out.tmp $out || mv $out.tmp $out) && rm -f $out.tmp"),
+                ("restat", "1"),
+            ])
+            .edge("gen", &["gen.h"], &["gen.in"]).edge("cat", &["a.o"], &["gen.h"]).edge("cat", &["app"], &["a.o"]);
+        let mut build = Build::new("restat", graph.finish(), &[("gen.in", "same\n")]);
         assert_eq!(build.ran(&[]), ["gen.h", "a.o", "app"]);
         // the input changes without changing what is generated, so only the generator runs
         build.write("gen.in", "same\n");
@@ -792,10 +803,13 @@ mod tests {
     #[test]
     fn console_edges_run_alone() {
         // a console edge fails if another is running, as the directory exists
-        let ninja = "rule alone\n  command = mkdir running && sleep 0.1 && rmdir running && touch $out\n  \
-                     pool = console\n\
-                     build a: alone\nbuild b: alone\nbuild c: alone\n";
-        let mut build = Build::new("console", ninja, &[]);
+        let graph = graph()
+            .rule("alone", &[
+                ("command", "mkdir running && sleep 0.1 && rmdir running && touch $out"),
+                ("pool", "console"),
+            ])
+            .edge("alone", &["a"], &[]).edge("alone", &["b"], &[]).edge("alone", &["c"], &[]);
+        let mut build = Build::new("console", graph.finish(), &[]);
         build.options.jobs = 3;
         let (report, _) = build.build(&[]);
         assert!(report.succeeded(), "{report:?}");
@@ -803,10 +817,10 @@ mod tests {
     }
 
     #[test]
-    fn shows_progress_as_ninja_does() {
-        let fail = "rule fail\n  command = echo why && false\n  description = FAIL $out\n";
-        let ninja = format!("{CAT}{fail}build ab: cat a b\nbuild bad: fail\n");
-        let mut build = Build::new("console-output", &ninja, &[("a", "a\n"), ("b", "b\n")]);
+    fn shows_progress() {
+        let graph = cat().rule("fail", &[("command", "echo why && false"), ("description", "FAIL $out")])
+            .edge("cat", &["ab"], &["a", "b"]).edge("fail", &["bad"], &[]);
+        let mut build = Build::new("console-output", graph.finish(), &[("a", "a\n"), ("b", "b\n")]);
         build.options.jobs = 1;
         let mut console = Console { out: Vec::new(), quiet: false, verbose: false };
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
@@ -817,9 +831,9 @@ mod tests {
     #[test]
     fn cancelling_stops_the_commands() {
         // a command whose process starts another, which is in its process group
-        let ninja = "rule wait\n  command = sleep 30 & echo $$! > $out.pid; wait; touch $out\n\
-                     build a: wait\nbuild b: wait\n";
-        let mut build = Build::new("cancel", ninja, &[]);
+        let graph = graph().rule("wait", &[("command", "sleep 30 & echo $$! > $out.pid; wait; touch $out")])
+            .edge("wait", &["a"], &[]).edge("wait", &["b"], &[]);
+        let mut build = Build::new("cancel", graph.finish(), &[]);
         build.options.jobs = 2;
         let cancel = build.options.cancel.clone();
         let start = Instant::now();
@@ -848,9 +862,10 @@ mod tests {
     #[test]
     fn commands_share_the_jobs() {
         // the only edge running takes the tokens of the other jobs, as a compiler's threads would, and gives them back
-        let ninja = "rule hold\n  command = f=$${MAKEFLAGS#*fifo:}; head -c 2 \"$$f\" > $out && printf ++ > \"$$f\"\n\
-                     build a: hold\n";
-        let mut build = Build::new("jobserver", ninja, &[]);
+        let graph = graph()
+            .rule("hold", &[("command", "f=$${MAKEFLAGS#*fifo:}; head -c 2 \"$$f\" > $out && printf ++ > \"$$f\"")])
+            .edge("hold", &["a"], &[]);
+        let mut build = Build::new("jobserver", graph.finish(), &[]);
         build.options.jobs = 3;
         assert_eq!(build.ran(&[]), ["a"]);
         assert_eq!(build.read("a"), "++");
@@ -858,8 +873,8 @@ mod tests {
 
     #[test]
     fn runs_without_a_jobserver() {
-        let ninja = "rule check\n  command = echo \"[$$MAKEFLAGS]\" > $out\nbuild a: check\n";
-        let mut build = Build::new("no-jobserver", ninja, &[]);
+        let graph = graph().rule("check", &[("command", "echo \"[$$MAKEFLAGS]\" > $out")]).edge("check", &["a"], &[]);
+        let mut build = Build::new("no-jobserver", graph.finish(), &[]);
         build.options.jobserver = false;
         // a jobserver which rig is run by is in the environment either way
         if std::env::var_os("MAKEFLAGS").is_none() {

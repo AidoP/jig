@@ -46,7 +46,8 @@ platform module (`rig/sys.rs`).
 
 - **The graph is built through an API, not parsed from text.** jig hands the engine a graph directly. The engine saves
   it in its own binary format, as jig saves `.jig`, so that `jig build` can load it without evaluating the
-  configuration again. A text manifest exists only for tests and for standalone users.
+  configuration again. rig reads no text format of its own, and no ninja files: a graph is only ever built through
+  the API, or loaded from the binary format.
 - **Actions are argument vectors, not shell strings.** An action has a program, arguments, environment variables, a
   working directory and optional redirections. Spawning programs directly means no `sh`, no quoting, no `$` escaping
   and no line-break limit. It also makes an action precise enough to hash for the cache and to send to a worker. A
@@ -65,7 +66,7 @@ platform module (`rig/sys.rs`).
 ## Architecture
 
 ```
-            jig (configuration → graph)                 standalone users
+            jig (configuration → graph)              other users of the crate
                        │                                       │
                        ▼                                       ▼
  ┌───────────────────────────── rig ───────────────────────────────┐
@@ -87,9 +88,7 @@ platform module (`rig/sys.rs`).
   other.
 - No jig types appear in its API: no properties, no diagnostics, nothing about rustc. jig turns crates and custom
   commands into edges.
-- A standalone binary, `rig/main.rs`, reads a text manifest and builds it. The manifest is a subset of ninja's
-  syntax, enough for `bootstrap.ninja` and the files jig writes now. That makes it possible to compare the engine
-  against ninja in tests, and gives users a direct replacement for simple ninja files.
+- It is a library only, with no binary of its own.
 - `rig/` also has a `Cargo.toml`, with no dependencies and `publish = false`, so that cargo projects can use it as a
   git or path dependency. It isn't published on crates.io, and cargo doesn't build jig itself.
 
@@ -393,8 +392,7 @@ implementation of that trait, so `generate.rs` doesn't change.
   - `$in` and `$out` are the explicit paths, escaped for the shell as ninja escapes them.
 
   Each edge becomes an `Action::Shell` command, still run by `sh`. `pool = console`, `deps = gcc`, `depfile`,
-  `generator` and `restat` become fields of the edge, and `phony` edges become aliases. Both `RigGraph` and the reader
-  of ninja files use the same `Manifest`, so there is one implementation of ninja's string rules.
+  `generator` and `restat` become fields of the edge, and `phony` edges become aliases.
 - **`rig::Graph`.**
   - Paths are interned as `u32` IDs.
   - Edges and nodes are flat arrays, and each node records the edge that produces it.
@@ -402,10 +400,8 @@ implementation of that trait, so `generate.rs` doesn't change.
     `validate`, as ninja finds them only when building.
   - The saved format is magic bytes, a version, the paths, the edges and the defaults, then a checksum. A version
     mismatch means "regenerate".
-- **Checked against ninja on every configuration in the suite.** With `JIG_VERIFY_GRAPH=1`, which the integration
-  tests set, `jig generate` reads the `build.ninja` it wrote back with `rig::ninja::read`. If the result differs from
-  the graph it built directly, generation fails and the first difference is reported. Every project the integration
-  tests configure therefore checks the translation, including paths with spaces, `$` and `:`.
+- **rig never parses ninja files.** `Manifest` takes rules, edges and variables as calls, not as text. rig's own
+  tests build their graphs the same way, through a small test helper.
 - **What stays as it is.**
   - The configure edge stays an ordinary generator edge, with its inputs in `build.ninja.d`.
   - Missing paths keep using `reconfigure.stamp`, which is just a file input to `rig`.
@@ -416,8 +412,8 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 #### Steps
 
-1. **Done:** the graph, its format, `Manifest`, the ninja reader, `RigGraph` and `Tee`, `JIG_VERIFY_GRAPH`, `rig` as
-   a crate that jig uses (and the bootstrap builds), and `rig/Cargo.toml` with a CI step that tests it with cargo.
+1. **Done:** the graph, its format, `Manifest`, `RigGraph` and `Tee`, `rig` as a crate that jig uses (and the
+   bootstrap builds), and `rig/Cargo.toml` with a CI step that tests it with cargo.
 2. **Done:** the state log, the timestamp scan and dry-run plans.
    - **State log.** `rig::state::State` opens `log` in a directory, and holds an exclusive lock on `lock` beside it
      while it's open.
@@ -519,14 +515,13 @@ implementation of that trait, so `generate.rs` doesn't change.
      they check that nothing ran, as no `CLIPPY` line is shown. Under rig they look in rig's log instead of using
      `ninja -t deps`. With `JIG_ENGINE=rig`, all 160 integration tests
      and the unit and perf tests pass, and CI runs the suite a second time with it.
-6. The standalone `rig` binary, which builds ninja files with the reader.
-7. **Differential tests.** Generate random graphs and sequences of edits, run both ninja and `rig` on them, and compare
-   which edges run. The only allowed differences are the cases where `rig` rebuilds on purpose because a stamp went
-   backwards.
-8. Environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and `PATH`,
+6. **Differential tests.** Generate random graphs and sequences of edits through jig's `Graph` trait, which writes
+   both `build.ninja` and rig's graph, run both engines on them, and compare which edges run. The only allowed
+   differences are the cases where `rig` rebuilds on purpose because a stamp went backwards.
+7. Environment variables as inputs: `Env` nodes, rustc's `env-dep` lines, and the configuration's `env()` and `PATH`,
    recorded in `.jig`. The configuration's variables are tracked with the ninja backend too, by touching the
    reconfigure stamp, after which `env()` stops being an error.
-9. Performance tests in `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
+8. Performance tests in `test/perf.rs` for no-op and full builds of large graphs, compared with ninja's times.
 
 ### Phase 2: make the engine the default
 
@@ -598,7 +593,7 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ## Decisions
 
-1. **Name.** The crate and its binary are called `rig`.
+1. **Name.** The crate is called `rig`. It has no binary of its own.
 2. **`unsafe` and `extern "C"`.** Both are allowed, in `rig/sys.rs`: `mkfifo` for the jobserver, `ioctl(FICLONE)` for
    reflinks, and `signal` and `kill` for process groups. io_uring was tried and removed, as it gained nothing and
    wasn't worth maintaining; see [Batched stat](#batched-stat-and-why-there-is-no-io_uring).

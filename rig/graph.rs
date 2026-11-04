@@ -257,34 +257,6 @@ impl Graph {
         let lists = &self.edges[edge].lists;
         &self.ids[lists[INPUTS].0 as usize..lists[ORDER_ONLY].1 as usize]
     }
-    /// Returns the first difference between two graphs, if they differ, as a description of it.
-    #[must_use]
-    pub fn diff(&self, other: &Graph) -> Option<String> {
-        let edges = self.edges().zip(other.edges());
-        for (index, (lhs, rhs)) in edges.enumerate() {
-            let (lhs, rhs) = (lhs.to_edge_paths(), rhs.to_edge_paths());
-            if lhs != rhs {
-                return Some(format!("edge {index} differs:\n{lhs:#?}\nrather than\n{rhs:#?}"));
-            }
-        }
-        if self.edges.len() != other.edges.len() {
-            return Some(format!("{} edges rather than {}", self.edges.len(), other.edges.len()));
-        }
-        let defaults = |graph: &Graph| {
-            graph.defaults.iter().map(|&node| graph.path(node).to_string()).collect::<Vec<_>>()
-        };
-        if defaults(self) != defaults(other) {
-            return Some(format!("defaults {:?} rather than {:?}", defaults(self), defaults(other)));
-        }
-        if self.paths != other.paths {
-            let first = self.paths.iter().zip(&other.paths).position(|(lhs, rhs)| lhs != rhs);
-            return Some(match first {
-                Some(index) => format!("node {index} is {:?} rather than {:?}", self.paths[index], other.paths[index]),
-                None => format!("{} nodes rather than {}", self.paths.len(), other.paths.len()),
-            });
-        }
-        None
-    }
 }
 
 /// An edge of a [`Graph`].
@@ -359,32 +331,6 @@ impl<'a> EdgeRef<'a> {
         let (start, end) = self.data.lists[list];
         &self.graph.ids[start as usize..end as usize]
     }
-    /// The edge with the paths of its nodes, rather than their IDs, which are compared between graphs.
-    fn to_edge_paths(self) -> EdgePaths<'a> {
-        let paths = |list| self.list(list).iter().map(|&node| self.graph.path(node)).collect();
-        let data = self.data;
-        EdgePaths {
-            kind: &data.kind,
-            description: &data.description,
-            depfile: data.depfile.as_deref(),
-            pool: data.pool,
-            generator: data.generator,
-            restat: data.restat,
-            nodes: [paths(OUTPUTS), paths(IMPLICIT_OUTPUTS), paths(INPUTS), paths(IMPLICIT), paths(ORDER_ONLY)],
-        }
-    }
-}
-
-/// An edge with the paths of its nodes, in the order of its lists, as two graphs are compared.
-#[derive(Debug, PartialEq)]
-struct EdgePaths<'a> {
-    kind: &'a EdgeKind,
-    description: &'a str,
-    depfile: Option<&'a str>,
-    pool: Pool,
-    generator: bool,
-    restat: bool,
-    nodes: [Vec<&'a str>; 5],
 }
 
 #[cfg(test)]
@@ -447,15 +393,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn finds_differences() {
-        let mut lhs = Graph::new();
-        command(&mut lhs, &["a"], &["b"]).unwrap();
-        let mut rhs = lhs.clone();
-        assert_eq!(lhs.diff(&rhs), None);
-        rhs.add_default(&[NodeId(0)]);
-        assert!(lhs.diff(&rhs).unwrap().starts_with("defaults"));
-        command(&mut rhs, &["c"], &[]).unwrap();
-        assert_eq!(lhs.diff(&rhs).unwrap(), "1 edges rather than 2");
-    }
 }

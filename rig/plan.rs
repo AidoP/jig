@@ -377,6 +377,7 @@ pub(crate) fn reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{Graphs, graph};
     use std::path::{Path, PathBuf};
 
     /// A build in a temporary directory, whose edges are run by writing their outputs.
@@ -386,7 +387,7 @@ mod tests {
         state: State,
     }
     impl Build {
-        fn new(name: &str, ninja: &str, files: &[&str]) -> Self {
+        fn new(name: &str, graph: Graph, files: &[&str]) -> Self {
             let dir = std::env::temp_dir().join(format!("rig-plan-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -394,7 +395,7 @@ mod tests {
                 write(&dir.join(file), "source");
             }
             let state = State::open(&dir.join(".rig")).unwrap();
-            Self { graph: crate::ninja::read(ninja).unwrap(), dir, state }
+            Self { dir, graph, state }
         }
         fn plan(&mut self, targets: &[&str]) -> Result<Vec<(String, Reason)>, Error> {
             let mut stamps = Stamps::new(&self.graph, &self.dir);
@@ -439,13 +440,20 @@ mod tests {
         std::fs::write(path, contents).unwrap();
     }
 
-    const CHAIN: &str = "rule cc\n  command = cc $in -o $out\n\
-                         build a.o: cc a.c | a.h\nbuild lib.a: cc a.o\nbuild app: cc lib.a main.c\n\
-                         build all: phony app\n";
+    fn cc() -> Graphs {
+        graph().rule("cc", &[("command", "cc $in -o $out")])
+    }
+
+    /// A chain of edges, `a.o` from `a.c` with implicit inputs, `lib.a` from it, and `app` from that, with an alias.
+    fn chain(implicit: &[&str]) -> Graph {
+        let inputs: Vec<&str> = ["a.c", "|"].into_iter().chain(implicit.iter().copied()).collect();
+        let graph = cc().edge("cc", &["a.o"], &inputs).edge("cc", &["lib.a"], &["a.o"]);
+        graph.edge("cc", &["app"], &["lib.a", "main.c"]).edge("phony", &["all"], &["app"]).finish()
+    }
 
     #[test]
     fn builds_what_has_not_run() {
-        let mut build = Build::new("not-run", CHAIN, &["a.c", "a.h", "main.c"]);
+        let mut build = Build::new("not-run", chain(&["a.h"]), &["a.c", "a.h", "main.c"]);
         let plan = build.plan(&["all"]).unwrap();
         // each edge after those it depends on
         let not_run = |output: &str| (output.to_string(), Reason::NoRecord);
@@ -458,7 +466,7 @@ mod tests {
 
     #[test]
     fn builds_again_what_depends_on_a_change() {
-        let mut build = Build::new("change", CHAIN, &["a.c", "a.h", "main.c"]);
+        let mut build = Build::new("change", chain(&["a.h"]), &["a.c", "a.h", "main.c"]);
         build.run(&["all"], &[]);
         build.write("a.h", "changed");
         let plan = build.plan(&["app"]).unwrap();
@@ -473,7 +481,7 @@ mod tests {
 
     #[test]
     fn builds_again_when_a_time_goes_back() {
-        let mut build = Build::new("back", CHAIN, &["a.c", "a.h", "main.c"]);
+        let mut build = Build::new("back", chain(&["a.h"]), &["a.c", "a.h", "main.c"]);
         build.run(&["all"], &[]);
         // as when an older version is checked out, of the same size
         let file = std::fs::File::options().write(true).open(build.dir.join("a.c")).unwrap();
@@ -483,7 +491,7 @@ mod tests {
 
     #[test]
     fn builds_again_when_an_output_changes() {
-        let mut build = Build::new("outputs", CHAIN, &["a.c", "a.h", "main.c"]);
+        let mut build = Build::new("outputs", chain(&["a.h"]), &["a.c", "a.h", "main.c"]);
         build.run(&["all"], &[]);
         build.write("lib.a", "tampered with");
         assert_eq!(build.plan(&["lib.a"]).unwrap(), [("lib.a".into(), Reason::OutputModified("lib.a".into()))]);
@@ -493,28 +501,31 @@ mod tests {
 
     #[test]
     fn builds_again_when_a_command_changes() {
-        let ninja = "rule cc\n  command = cc $flags $in -o $out\nrule gen\n  command = gen $flags\n  generator = 1\n";
-        let edges = "build a.o: cc a.c\nbuild build.ninja: gen a.c\n";
-        let mut build = Build::new("command", &format!("{ninja}{edges}"), &["a.c"]);
+        let with_flags = |flags: &str| {
+            let graph = graph().variable("flags", flags).rule("cc", &[("command", "cc $flags $in -o $out")]);
+            let graph = graph.rule("gen", &[("command", "gen $flags"), ("generator", "1")]);
+            graph.edge("cc", &["a.o"], &["a.c"]).edge("gen", &["build.ninja"], &["a.c"]).finish()
+        };
+        let mut build = Build::new("command", with_flags(""), &["a.c"]);
         build.run(&[], &[]);
-        build.graph = crate::ninja::read(&format!("{ninja}flags = -O\n{edges}")).unwrap();
+        build.graph = with_flags("-O");
         // except a generator, as in ninja
         assert_eq!(build.plan(&[]).unwrap(), [("a.o".into(), Reason::CommandChanged)]);
     }
 
     #[test]
     fn builds_again_when_inputs_are_declared() {
-        let mut build = Build::new("declared", CHAIN, &["a.c", "a.h", "main.c", "b.c"]);
+        let mut build = Build::new("declared", chain(&["a.h"]), &["a.c", "a.h", "main.c", "b.c"]);
         build.run(&["all"], &[]);
         // an implicit input, which is not part of the command
-        build.graph = crate::ninja::read(&CHAIN.replace("| a.h", "| a.h b.c")).unwrap();
+        build.graph = chain(&["a.h", "b.c"]);
         assert_eq!(build.plan(&["a.o"]).unwrap(), [("a.o".into(), Reason::InputsChanged)]);
     }
 
     #[test]
     fn order_only_inputs_are_built_first() {
-        let ninja = "rule cc\n  command = cc $in -o $out\nbuild gen.h: cc gen.in\nbuild a.o: cc a.c || gen.h\n";
-        let mut build = Build::new("order-only", ninja, &["a.c", "gen.in"]);
+        let graph = cc().edge("cc", &["gen.h"], &["gen.in"]).edge("cc", &["a.o"], &["a.c", "||", "gen.h"]);
+        let mut build = Build::new("order-only", graph.finish(), &["a.c", "gen.in"]);
         assert_eq!(build.run(&["a.o"], &[]), ["gen.h", "a.o"]);
         // but do not make what depends on them run
         build.write("gen.in", "changed");
@@ -523,9 +534,9 @@ mod tests {
 
     #[test]
     fn discovered_inputs() {
-        let ninja = "rule cc\n  command = cc $in -o $out\n  depfile = $out.d\n\
-                     build gen.h: cc gen.in\nbuild a.o: cc a.c || gen.h\n";
-        let mut build = Build::new("discovered", ninja, &["a.c", "gen.in", "sys.h"]);
+        let graph = graph().rule("cc", &[("command", "cc $in -o $out"), ("depfile", "$out.d")]);
+        let graph = graph.edge("cc", &["gen.h"], &["gen.in"]).edge("cc", &["a.o"], &["a.c", "||", "gen.h"]);
+        let mut build = Build::new("discovered", graph.finish(), &["a.c", "gen.in", "sys.h"]);
         build.run(&["a.o"], &[("a.o", &["gen.h", "sys.h"])]);
         build.write("sys.h", "changed");
         assert_eq!(build.plan(&["a.o"]).unwrap(), [("a.o".into(), Reason::DiscoveredChanged("sys.h".into()))]);
@@ -541,10 +552,9 @@ mod tests {
 
     #[test]
     fn aliases() {
-        let ninja = "rule cc\n  command = cc $in -o $out\n\
-                     build sources: phony a.c b.c\nbuild out: cc | sources\n\
-                     build force: phony\nbuild forced: cc | force\n";
-        let mut build = Build::new("aliases", ninja, &["a.c", "b.c"]);
+        let graph = cc().edge("phony", &["sources"], &["a.c", "b.c"]).edge("cc", &["out"], &["|", "sources"]);
+        let graph = graph.edge("phony", &["force"], &[]).edge("cc", &["forced"], &["|", "force"]);
+        let mut build = Build::new("aliases", graph.finish(), &["a.c", "b.c"]);
         build.run(&["out"], &[]);
         // an edge which takes an alias as an input runs when an input of the alias changes
         build.write("b.c", "changed");
@@ -556,12 +566,12 @@ mod tests {
 
     #[test]
     fn reports_missing_inputs_and_cycles() {
-        let mut build = Build::new("errors", CHAIN, &["a.c", "main.c"]);
+        let mut build = Build::new("errors", chain(&["a.h"]), &["a.c", "main.c"]);
         let missing = "\"a.h\", needed by \"a.o\", is missing and no edge produces it";
         assert_eq!(build.plan(&["app"]).unwrap_err().to_string(), missing);
         assert_eq!(build.plan(&["nothing"]).unwrap_err().to_string(), "unknown target \"nothing\"");
-        let ninja = "rule cc\n  command = cc\nbuild a: cc b\nbuild b: cc c\nbuild c: cc a\n";
-        let mut build = Build::new("cycle", ninja, &[]);
+        let graph = cc().edge("cc", &["a"], &["b"]).edge("cc", &["b"], &["c"]).edge("cc", &["c"], &["a"]);
+        let mut build = Build::new("cycle", graph.finish(), &[]);
         assert_eq!(build.plan(&["a"]).unwrap_err().to_string(), "dependency cycle: a -> b -> c -> a");
     }
 }

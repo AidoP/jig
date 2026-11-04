@@ -37,8 +37,7 @@ uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path 
 writes rig's graph to `graph` in the build directory beside `build.ninja`, from the same description. ninja builds the
 project by default, while with `JIG_ENGINE=rig`, rig does, keeping the state of the build in `.rig` in the build
 directory. `jig build` then takes a subset of ninja's options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run,
-which shows why each edge would run, `-v` and `--quiet`. With `JIG_VERIFY_GRAPH=1`, as the integration tests set, `jig generate` reads `build.ninja` back
-with rig and fails if it differs from rig's graph.
+which shows why each edge would run, `-v` and `--quiet`.
 
 The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
 

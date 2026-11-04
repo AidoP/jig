@@ -34,10 +34,10 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     let units = units(&project, &crates, sysroot, &build_dir);
-    // `build.ninja` and rig's graph are written from the same description, `build.ninja` first, so that rig's can be
-    // compared with it
+    // `build.ninja` and rig's graph are written from the same description, `build.ninja` first, as rig records the
+    // edge which generates it once the graph is written
     let mut ninja_file = NinjaFile::new(build_dir.join(ninja::FILE))?;
-    let mut rig_graph = RigGraph::new(build_dir.join(rig_graph::FILE), &build_dir.join(ninja::FILE));
+    let mut rig_graph = RigGraph::new(build_dir.join(rig_graph::FILE));
     write_graph(&mut Tee(&mut ninja_file, &mut rig_graph), &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
     retire_build_dir(&build_dir)?;
