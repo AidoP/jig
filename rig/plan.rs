@@ -89,8 +89,37 @@ pub fn action_hash(edge: EdgeRef) -> u64 {
 pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
     match edge.kind() {
         EdgeKind::Alias => Vec::new(),
-        EdgeKind::Command(Action::Shell(command)) => command.as_bytes().to_vec(),
-        EdgeKind::Command(Action::Exec(exec)) => {
+        EdgeKind::Command(action) => bytes_of(action),
+    }
+}
+
+/// Returns an edge's action as bytes, as [`action_bytes`] does, with a marker in place of each occurrence of the
+/// build's directory, which is absolute, so that the action is the same in a build in another directory, as for the
+/// key of a cache which builds in several share.
+///
+/// A command given the build's directory, such as to remap it in what it writes, then has its results shared with
+/// builds elsewhere, so it should write nothing which depends on it.
+#[must_use]
+pub fn relocated_action_bytes(edge: EdgeRef, dir: &str) -> Vec<u8> {
+    const MARKER: &str = "\0build-dir";
+    let relocate = |string: &str| if dir.is_empty() { string.to_string() } else { string.replace(dir, MARKER) };
+    match edge.kind() {
+        EdgeKind::Alias => Vec::new(),
+        EdgeKind::Command(Action::Shell(command)) => bytes_of(&Action::Shell(relocate(command))),
+        EdgeKind::Command(Action::Exec(exec)) => bytes_of(&Action::Exec(crate::graph::Exec {
+            program: relocate(&exec.program),
+            args: exec.args.iter().map(|arg| relocate(arg)).collect(),
+            env: exec.env.iter().map(|(name, value)| (name.clone(), relocate(value))).collect(),
+            dir: exec.dir.as_deref().map(relocate),
+            stderr: exec.stderr.as_deref().map(relocate),
+        })),
+    }
+}
+
+fn bytes_of(action: &Action) -> Vec<u8> {
+    match action {
+        Action::Shell(command) => command.as_bytes().to_vec(),
+        Action::Exec(exec) => {
             let mut bytes = Vec::new();
             let mut part = |part: &str| {
                 bytes.extend_from_slice(&part.len().to_le_bytes());

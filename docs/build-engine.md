@@ -290,10 +290,12 @@ and inputs is fetched instead of run.
 - **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host), the sysroot's manifest and the
   `RUSTUP_TOOLCHAIN` in the action. It's computed once per configuration and given to each cached edge in the graph.
 - **Relocation.** A hit in another checkout needs outputs that don't contain the checkout's path.
-  - jig passes rustc `--remap-path-prefix=<root>=.`, and the equivalent for the sysroot.
-  - The cache key uses paths relative to the project root.
-  - Depfiles are stored relative and rewritten on restore.
-  - Actions whose arguments contain absolute paths outside the root and the sysroot aren't cacheable.
+  - Every path jig gives rustc is relative to the build directory, and rustc's paths are remapped to be relative to
+    the project root. The sysroot's sources are already remapped by rustup's builds of the standard library.
+  - The cache key uses paths relative to the build directory, and the build directory, where an action names it, is
+    replaced by a marker.
+  - Depfiles are relative already, so they are restored as they are.
+  - Actions whose arguments contain other absolute paths aren't shared between checkouts, as their keys differ.
 - **What is cached.** By default: rustc, rustdoc, clippy and check edges, whose inputs are complete because of their
   depfiles.
   - A `custom` command is cached only with a `cache` attribute, since jig can't know it is pure.
@@ -749,7 +751,7 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Measured.** In one checkout, `librig.rlib` takes 4.3 s to compile.
      - Undoing an edit fetches it in 0.05 s.
      - After the build directory is removed, configuring and fetching it takes 0.16 s.
-     - A second checkout misses, as rustc is given the absolute paths of sources, until step 2 remaps them.
+     - A second checkout missed, as rustc was given the absolute paths of sources, until step 2.
    - **Not done yet.**
      - The linker isn't part of the identity, though linked edges are cached.
      - Hits don't update a last-used time, which `gc` will need.
@@ -765,8 +767,37 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Executable outputs.
      - An integration test, in which a crate whose outputs are removed is fetched, with its warning, with no `rustc` on
        `PATH`, and unsetting `JIG_CACHE` configures again.
-2. Remap paths in jig's rustc, rustdoc and clippy commands, with tests that a second checkout in another directory gets
-   every edge from the cache.
+2. **Done:** relative and remapped paths, so that builds are reproducible.
+   - **Every path is relative to the build directory.** `Rebase::path` gives a path within the build directory
+     relative to it, as before, and any other leading out of it with `..` rather than as an absolute path.
+     - The `..` start from the build directory once symbolic links are followed, as the system resolves them, so they
+       lead to the same files when the build directory is a link.
+     - Paths outside the project are relative too, so that nothing rustc is given depends on where the project is.
+     - It applies to every node, as rustc's dep-info names the paths it was given, which must be the nodes the edges
+       declare, such as the outputs of custom commands which crates read.
+   - **What rustc writes is remapped.** rustc, rustdoc and clippy are given `--remap-path-prefix` three times, in this
+     order, as the last that matches applies:
+     1. `<build dir>=.`, as the working directory of debug info, which is the project root.
+     2. `<build dir to root>=`, usually `..=`, so that `../src/main.rs` is written as `src/main.rs`.
+     3. For a root module in the build directory, as a generated one, its first component as itself under the build
+        directory, such as `gen.rs=build/gen.rs`. Its modules share it.
+   - **What it covers.** Diagnostics, panics, `file!()` and debug info, of which the compilation directory is `.` and
+     the file names are relative to the project root, as cargo's are.
+     - rustc's dep-info isn't remapped, so ninja and rig find what it lists.
+     - The JSON diagnostics `jig check` replays are relative to the project root, which rust-analyzer resolves them
+       against.
+   - **The build directory in cache keys.** The remapping names the absolute build directory, so rig's first key
+     takes the action with the build's directory (`Options::dir`, made absolute) replaced by a marker,
+     by `plan::relocated_action_bytes`. The build's own state still keeps the action's hash as it is.
+   - **Tests.**
+     - rig: a cached program given its build's directory is fetched by a build in another directory. Without the
+       replacement it is not.
+     - A crate and a binary using a generated crate, with debug info, built in two directories:
+       - They are the same bytes, and neither has its directory in it.
+       - Diagnostics and panics name `app.rs` and `build/gen.rs`.
+     - A second checkout configured with the same `JIG_CACHE` fetches every edge, with no `rustc` on `PATH`.
+     - The tests of `build.ninja` expect paths relative to the build directory. A helper leaves out the remapping
+       flags, which `rebased_paths` checks.
 3. Add the `cache` attribute for `custom`. Cached diagnostics are already replayed for rustc and clippy: what they
    print is restored with their outputs, and the diagnostics files of checks and lints are implicit outputs, which are
    restored too.
