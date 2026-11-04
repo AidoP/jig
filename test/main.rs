@@ -2066,6 +2066,55 @@ set a contains(flags)
 }
 
 #[test]
+fn test_tags() {
+    let jig = |test_tags: &str| format!("\
+{test_tags}
+test plain
+    command 'true'
+test slow
+    command 'true'
+    tag 'slow'
+test both
+    command 'true'
+    tag ['slow', 'io']
+crate unit 'unit.rs'
+    test
+    tag 'unit'
+");
+    let project = Project::new("test-tags", &[("Jig", &jig("")), ("unit.rs", "#[test]\nfn passes() {}\n")]);
+    project.configure().ok();
+    // the names of the tests which ran, in the order they did
+    let run = |args: &[&str]| {
+        let output = Command::new(configure_path()).arg("test").args(args).current_dir(&project.dir).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let ran: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("test "))
+            .filter(|line| !line.starts_with("result"))
+            .map(|line| line.split_whitespace().next().unwrap().to_string())
+            .collect();
+        (output.status.success(), ran, String::from_utf8(output.stderr).unwrap())
+    };
+    // only the tests without tags run by default
+    assert_eq!(run(&[]).1, ["plain"]);
+    // or those with a tag, or named, whatever their tags
+    assert_eq!(run(&["--tag", "slow"]).1, ["slow", "both"]);
+    assert_eq!(run(&["--tag", "io", "plain"]).1, ["plain", "both"]);
+    assert_eq!(run(&["--tag", "unit"]).1, ["unit"]);
+    assert_eq!(run(&["slow"]).1, ["slow"]);
+    assert_eq!(run(&["--all"]).1, ["plain", "slow", "both", "unit"]);
+    let (success, _, stderr) = run(&["--tag", "nope"]);
+    assert!(!success);
+    assert_contains(&stderr, "no test tagged \"nope\"");
+    // `test-tags` runs tagged tests by default
+    std::fs::write(project.dir.join("Jig"), jig("set test-tags ['slow']")).unwrap();
+    assert_eq!(run(&[]).1, ["plain", "slow", "both"]);
+    // a tag is not empty, and has no whitespace
+    let project = Project::new("invalid-tags", &[("Jig", "test t\n    command 'true'\n    tag ['ok', 'not ok']\n")]);
+    project.configure().failed().stderr("tag, or list of tags, which are not empty and have no whitespace");
+}
+
+#[test]
 fn tests() {
     let project = Project::new("tests", &[
         ("Jig", "use 'sub'\n"),

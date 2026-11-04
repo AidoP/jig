@@ -30,6 +30,9 @@ pub struct Custom {
     /// The program, if it is a path, which the outputs depend on.
     pub program: Option<PathBuf>,
     pub kind: CustomKind,
+    /// The tags of a test, by which `jig test` chooses it, which only run without being asked for if one of them is in
+    /// `test-tags`.
+    pub tags: Vec<String>,
 }
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
@@ -88,7 +91,7 @@ impl Custom {
 
 impl Project {
     /// Take a custom build command, with `input`, `output`, `depends`, `command`, `default` and install attributes, or
-    /// a test, which has `input`, `depends` and `command` attributes.
+    /// a test, which has `input`, `depends`, `command` and `tag` attributes.
     ///
     /// The output of a command is named after it in the build directory, unless an `output` attribute replaces it.
     /// While its attributes are evaluated, the paths of the inputs and outputs are the values of the `input` and
@@ -115,6 +118,7 @@ impl Project {
         }
         let mut command: Option<Runner> = None;
         let mut default = false;
+        let mut tags = Vec::new();
         let mut install = Install::data();
         // an attribute which failed has been reported, so it is not also reported as missing
         let mut failed = false;
@@ -146,6 +150,14 @@ impl Project {
                         continue;
                     };
                     depends.extend(new);
+                },
+                "tag" if test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    tags.extend(self.tags(&operand).unwrap_or_default());
                 },
                 "default" | "install" | "install-dir" | "install-mode" if !test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -222,11 +234,28 @@ impl Project {
             command: runner.command,
             program: runner.program,
             kind,
+            tags,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {
             self.declare_reference(declared, span, Item::CustomCommand, reference);
         }
+    }
+    /// Returns the tags of a `tag` attribute, which is a tag or a list of them, each of which is not empty and has no
+    /// whitespace, reporting one which is not.
+    pub(super) fn tags(&mut self, operand: &Operand) -> Option<Vec<String>> {
+        let tags = match &operand.data {
+            Data::Str(tag) => vec![tag.clone()],
+            Data::List(tags) if tags.iter().all(|tag| matches!(tag, Data::Str(_))) => {
+                tags.iter().map(Data::coerce_string).collect()
+            },
+            _ => Vec::new(),
+        };
+        if tags.is_empty() || tags.iter().any(|tag| tag.is_empty() || tag.contains(char::is_whitespace)) {
+            self.invalid_operand(operand, "tag, or list of tags, which are not empty and have no whitespace", false);
+            return None;
+        }
+        Some(tags)
     }
     /// Returns a command whose program, as in `run`, is a path relative to a file if it has a `/`, and which it then
     /// depends on, while otherwise it is searched for in `PATH`.

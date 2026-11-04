@@ -47,9 +47,11 @@ commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
                          directory
     build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
-    test [-v] [<name> ...]
-                         build and run the tests, or only those named, where `-v` or `--verbose` shows the output of
-                         each test, such as the tests of a crate's test harness, rather than only those which fail
+    test [-v] [--all] [--tag <tag> ...] [<name> ...]
+                         build and run the tests without tags and those with a tag in `test-tags`, or only those named
+                         or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the
+                         output of each test, such as the tests of a crate's test harness, rather than only those which
+                         fail
     run [<name>] [--] [<argument> ...]
                          build a binary crate and run it with arguments, by its target's runner if it has one, where
                          a crate for a target other than the host is `<name>@<target>`, unless it is the only one with
@@ -111,10 +113,18 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             Ok(ExitCode::SUCCESS)
         },
         "test" => {
-            let mut args = args.peekable();
-            let verbose = args.next_if(|arg| arg == "-v" || arg == "--verbose").is_some();
-            let names: Vec<_> = args.map(|name| name.to_string_lossy().into_owned()).collect();
-            test_runner::test(&names, verbose).map(|()| ExitCode::SUCCESS)
+            let mut selection = test_runner::Selection::default();
+            let mut verbose = false;
+            let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "-v" | "--verbose" => verbose = true,
+                    "--all" => selection.all = true,
+                    "--tag" => selection.tags.push(args.next().ok_or(Error::MissingArg("tag"))?),
+                    _ => selection.names.push(arg),
+                }
+            }
+            test_runner::test(&selection, verbose).map(|()| ExitCode::SUCCESS)
         },
         "run" => {
             let mut args = args.peekable();
@@ -229,12 +239,19 @@ fn declare_builtins(
             toolchain.unwrap_or_default().into(),
         ),
     ];
-    let lists = [(
-        project::Property::new("rustc/targets".into(), project::Type::List)
-            .info("the builtin targets of rustc, as printed by `rustc --print=target-list`")
-            .read_only(),
-        project::Data::List(target_list),
-    )];
+    let lists = [
+        (
+            project::Property::new("rustc/targets".into(), project::Type::List)
+                .info("the builtin targets of rustc, as printed by `rustc --print=target-list`")
+                .read_only(),
+            project::Data::List(target_list),
+        ),
+        (
+            project::Property::new("test-tags".into(), project::Type::List)
+                .info("the tags of the tests `jig test` runs without names or tags, beside the tests without tags"),
+            project::Data::List(Vec::new()),
+        ),
+    ];
     let builtins = builtins.into_iter().map(|(property, value)| (property, project::Data::Str(value))).chain(lists);
     for (property, value) in builtins {
         let name = property.name().to_string();
@@ -313,6 +330,8 @@ enum Error {
         stderr: String,
     },
     UnknownTest(String),
+    /// A tag given to `jig test` which no test has.
+    UnknownTag(String),
     TestsFailed(usize),
     /// Text which cannot be written to a file of ninja's, as it has a line break.
     LineBreak(std::path::PathBuf, String),
@@ -372,6 +391,7 @@ impl core::fmt::Display for Error {
                  reported:\n{stderr}",
             ),
             Self::UnknownTest(name) => write!(f, "no test named {name:?}"),
+            Self::UnknownTag(tag) => write!(f, "no test tagged {tag:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
             Self::LineBreak(path, text) => write!(f, "cannot write {text:?} to {path:?}, as ninja cannot write a line break"),

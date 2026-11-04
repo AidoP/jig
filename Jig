@@ -64,8 +64,9 @@ crate integration 'test/main.rs'
     test
     depends {release-target}/jig
 
-# the performance tests time jig on large projects
+# the performance tests time jig on large projects, which are slow, so are run with `jig test --tag perf` or `--all`
 crate perf 'test/perf.rs'
     target release-target
     test
+    tag 'perf'
     depends {release-target}/jig

@@ -707,6 +707,7 @@ struct TestCommand<'a> {
     name: &'a str,
     command: Vec<String>,
     libtest: bool,
+    tags: &'a [String],
 }
 
 fn write_database(
@@ -732,7 +733,8 @@ fn write_database(
     for custom in &project.customs {
         if custom.is_test() {
             let command = custom.command(&project.runners);
-            commands.push(TestCommand { name: &custom.name, command, libtest: custom.is_libtest() });
+            let (name, libtest, tags) = (&custom.name, custom.is_libtest(), &custom.tags);
+            commands.push(TestCommand { name, command, libtest, tags });
         }
     }
 
@@ -748,6 +750,7 @@ fn write_database(
     }
 
     let missing = missing.iter().map(String::as_str).collect();
+    let test_tags = project.test_tags();
     let env_hashes: Vec<String> = project.env.iter().map(|(_, hash)| hash.map(env_hash).unwrap_or_default()).collect();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets: Vec<_> = installed.iter().map(|file| at.path(&file.path).display().to_string()).collect();
@@ -758,6 +761,7 @@ fn write_database(
         missing,
         env: project.env.iter().map(|(name, _)| name.as_str()).collect(),
         env_hashes: env_hashes.iter().map(String::as_str).collect(),
+        test_tags: test_tags.iter().map(String::as_str).collect(),
         install_prefix: &install_prefix,
         proxy_build: &proxy_build,
         other_jig: &other_jig,
@@ -776,7 +780,8 @@ fn write_database(
     }
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
-        database.tests.push(database::Test { name: test.name, command, libtest: test.libtest });
+        let tags = test.tags.iter().map(String::as_str).collect();
+        database.tests.push(database::Test { name: test.name, command, libtest: test.libtest, tags });
     }
     for (name, path, target, runner, default) in &programs {
         let runner = runner.iter().map(String::as_str).collect();
