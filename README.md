@@ -637,6 +637,12 @@ A `custom` statement is followed by indented attributes:
 - `change-detection <str>`: how rig finds that the command's files have changed, `'timestamp'` or `'hash'`, in place
   of the `change-detection` property, such as to hash the small file a generator writes, so that what reads it is not
   rebuilt when it is written again unchanged
+- `cache <bool>`: keep the command's outputs, and what it printed, in rig's cache when `JIG_CACHE` is set, as rustc's
+  are, so that it is fetched rather than run when it has run with the same inputs before, in this checkout or another.
+  It is for a command whose outputs depend only on its inputs, its arguments and its program, and not on the time, the
+  directory it is in, or files which are not inputs. A program found in `PATH` is identified by its contents, and the
+  project is configured again when it changes, while one which is a path is an input. A command which is cached is
+  stamped by the contents of its files, whatever its `change-detection`. A test cannot be cached
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output

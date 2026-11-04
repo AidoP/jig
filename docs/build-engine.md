@@ -798,9 +798,31 @@ implementation of that trait, so `generate.rs` doesn't change.
      - A second checkout configured with the same `JIG_CACHE` fetches every edge, with no `rustc` on `PATH`.
      - The tests of `build.ninja` expect paths relative to the build directory. A helper leaves out the remapping
        flags, which `rebased_paths` checks.
-3. Add the `cache` attribute for `custom`. Cached diagnostics are already replayed for rustc and clippy: what they
-   print is restored with their outputs, and the diagnostics files of checks and lints are implicit outputs, which are
-   restored too.
+3. **Done:** the `cache` attribute for `custom`, and replaying diagnostics.
+   - **`cache`.** A custom command with `cache` (or `cache true`) is cached when `JIG_CACHE` is set, as rustc's edges
+     are. Tests are never cached, so the attribute is an error on one.
+   - **Its identity.**
+     - It is a hash of the toolchain's identity, which the command is run with.
+     - A program without a `/` is found in `PATH` while configuring, and its contents are hashed in too. The
+       configuration depends on it, as on the directories `which` searches and on `PATH`, so a program which changes
+       configures the project again.
+     - A program which is a path is already an input of the edge.
+   - **The identity is part of the action hash.** rig's `plan::action_hash` now includes an edge's cache identity, so
+     an edge runs again when it changes, as when its program or toolchain changes, rather than only missing in the
+     cache. Without that, a program which changed would reconfigure the project and then build nothing.
+   - **Relocatable.** A custom command's working directory, the project root, is given to rig as the path from the
+     build directory (`..`) rather than an absolute path, so its action, and its key, are the same in another checkout.
+     Its arguments are already relative to the project root.
+   - **Diagnostics were already replayed.**
+     - What rustc and clippy print is restored with their outputs.
+     - The diagnostics files of checks and lints are implicit outputs, which are restored too.
+   - **Tests.**
+     - rig: an edge whose identity changes is planned to run, as its command has changed.
+     - An integration test of a cached command and one without `cache`:
+       - Once their outputs are removed, only the one without `cache` runs.
+       - A second checkout, whose program is a copy in another directory, fetches it.
+       - Changing the program configures the project again and runs it.
+       - `cache` on a test is an error.
 4. Add the `pass-env` attribute and hermetic environments for cacheable actions.
 5. Add `jig cache stats|gc|clear`, then use `~/.cache/jig` by default.
 

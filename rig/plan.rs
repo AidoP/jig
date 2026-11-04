@@ -73,13 +73,18 @@ impl Plan {
     }
 }
 
-/// Returns the hash of an edge's action, which it runs again when it changes.
+/// Returns the hash of an edge's action, which it runs again when it changes, with what identifies it in the cache if
+/// it is cached, as that identifies what else the action depends on, such as its toolchain.
 #[must_use]
 pub fn action_hash(edge: EdgeRef) -> u64 {
-    match edge.kind() {
+    let hash = match edge.kind() {
         EdgeKind::Alias => 0,
         EdgeKind::Command(Action::Shell(command)) => fnv1a(command.as_bytes()),
         EdgeKind::Command(Action::Exec(_)) => fnv1a(&action_bytes(edge)),
+    };
+    match edge.cache() {
+        Some(identity) => fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", identity.as_bytes()].concat()),
+        None => hash,
     }
 }
 
@@ -597,6 +602,19 @@ mod tests {
         build.run(&[], &[]);
         build.graph = with_flags("-O");
         // except a generator, as in ninja
+        assert_eq!(build.plan(&[]).unwrap(), [("a.o".into(), Reason::CommandChanged)]);
+    }
+
+    #[test]
+    fn builds_again_when_its_identity_in_the_cache_changes() {
+        // as it identifies what else the action depends on, such as a toolchain
+        let cached = |identity: &str| {
+            graph().cached(identity).rule("cc", &[("command", "cc $in -o $out")]).edge("cc", &["a.o"], &["a.c"]).finish()
+        };
+        let mut build = Build::new("identity", cached("one"), &["a.c"]);
+        build.run(&[], &[]);
+        assert_eq!(build.plan(&[]).unwrap(), []);
+        build.graph = cached("two");
         assert_eq!(build.plan(&[]).unwrap(), [("a.o".into(), Reason::CommandChanged)]);
     }
 

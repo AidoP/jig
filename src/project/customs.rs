@@ -35,6 +35,9 @@ pub struct Custom {
     pub tags: Vec<String>,
     /// How rig finds that the files of a command have changed, in place of `change-detection`, if it is given.
     pub change_detection: Option<String>,
+    /// What identifies the command in rig's cache, if it has the `cache` attribute and rig caches: the toolchain, and
+    /// the program, if it is found in `PATH`.
+    pub cache: Option<String>,
 }
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
@@ -122,6 +125,7 @@ impl Project {
         let mut default = false;
         let mut tags = Vec::new();
         let mut change_detection = None;
+        let mut cache = false;
         let mut install = Install::data();
         // an attribute which failed has been reported, so it is not also reported as missing
         let mut failed = false;
@@ -177,15 +181,15 @@ impl Project {
                     };
                     tags.extend(self.tags(&operand).unwrap_or_default());
                 },
-                "default" | "install" | "install-dir" | "install-mode" if !test => {
+                "default" | "cache" | "install" | "install-dir" | "install-mode" if !test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         failed = true;
                         continue;
                     };
-                    if attribute == "default" {
+                    if attribute == "default" || attribute == "cache" {
                         if let Some(value) = self.flag(&operand) {
-                            default = value;
+                            *if attribute == "default" { &mut default } else { &mut cache } = value;
                         }
                     } else {
                         self.install_attribute(&mut install, attribute, operand);
@@ -241,6 +245,7 @@ impl Project {
             return;
         }
         let runner = command.unwrap_or_default();
+        let cache = if cache { self.custom_identity(&runner) } else { None };
         // the outputs are declared as a property named after the command, once it is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test { CustomKind::Test { runner: None, harness: false } } else { CustomKind::Command { outputs, default, install } };
@@ -254,11 +259,30 @@ impl Project {
             kind,
             tags,
             change_detection,
+            cache,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {
             self.declare_reference(declared, span, Item::CustomCommand, reference);
         }
+    }
+    /// Returns what identifies a command with the `cache` attribute in rig's cache, if rig caches: a hash of the
+    /// toolchain's identity, which the command is run with, and of the contents of its program, if it is found in `PATH`,
+    /// which the configuration then depends on, so that a program which changes is identified again. A program which is
+    /// a path is an input of the command instead, and one which is not found is identified as missing.
+    fn custom_identity(&mut self, runner: &Runner) -> Option<String> {
+        let toolchain = self.cache.clone()?;
+        let mut key = rig::cache::Key::new("jig custom");
+        key.part(toolchain.as_bytes());
+        if runner.program.is_none() && let Some(name) = runner.command.first() {
+            let program = self.which(name).ok();
+            let hash = program.as_deref().and_then(|program| rig::blake3::hash_file(program).ok());
+            key.hash(hash.as_ref());
+            if let Some(program) = program.filter(|_| hash.is_some()) {
+                self.depend(program);
+            }
+        }
+        Some(rig::cache::hex(&key.finish()))
     }
     /// Returns the tags of a `tag` attribute, which is a tag or a list of them, each of which is not empty and has no
     /// whitespace, reporting one which is not.

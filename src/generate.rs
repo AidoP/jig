@@ -507,7 +507,10 @@ fn write_graph(
         let command: Vec<_> = custom.command.iter().map(|argument| shell_quote(argument)).collect();
         let command = command.join(" ").replace('$', "$$");
         let outputs = at.paths(outputs);
-        let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&at.root), toolchain_env(toolchain));
+        // from the project root, as a path relative to the build directory, so that the action does not depend on where
+        // the project is, as for the key of the cache
+        let root = at.path(&at.root);
+        let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), toolchain_env(toolchain));
         graph.edge(&Edge {
             rule: "custom",
             outputs: &as_paths(&outputs),
@@ -517,6 +520,7 @@ fn write_graph(
             variables: &[("command-line", &command), ("name", &custom.name)],
             exec: Some(&exec),
             hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
+            cache: custom.cache.as_deref(),
             ..Default::default()
         })?;
         // so that the outputs can be built by name
