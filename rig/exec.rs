@@ -157,7 +157,7 @@ pub fn build(
     targets: &[&str],
     observer: &mut dyn Observer,
 ) -> Result<Report, Error> {
-    let mut stamps = Stamps::new(graph, &options.dir);
+    let mut stamps = Stamps::new(graph, &options.dir).with_env(&options.env);
     let plan = plan::plan(graph, state, &mut stamps, targets)?;
     let edges: Vec<EdgeId> = plan.edges.iter().map(|&(edge, _)| edge).collect();
     let index: HashMap<EdgeId, usize> = edges.iter().enumerate().map(|(index, &edge)| (edge, index)).collect();
@@ -432,7 +432,7 @@ impl Run<'_, '_> {
         if outcome.succeeded() {
             let discovered = match data.depfile() {
                 Some(path) => read_depfile(&self.options.dir.join(path)),
-                None => Ok(Vec::new()),
+                None => Ok(depfile::Discovered::default()),
             };
             match discovered {
                 Ok(discovered) => {
@@ -503,13 +503,13 @@ fn changed(
     producers.into_iter().any(|producer| changed(graph, producer, index, status, seen))
 }
 
-/// Returns the inputs a depfile lists, or none if it is missing, as a command need not write one.
-fn read_depfile(path: &Path) -> Result<Vec<String>, String> {
+/// Returns what a depfile lists, or nothing if it is missing, as a command need not write one.
+fn read_depfile(path: &Path) -> Result<depfile::Discovered, String> {
     match std::fs::read(path) {
         Ok(bytes) => {
             depfile::parse(&String::from_utf8_lossy(&bytes)).map_err(|error| format!("depfile {path:?}: {error}"))
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(depfile::Discovered::default()),
         Err(error) => Err(format!("depfile {path:?}: {error}")),
     }
 }
@@ -768,6 +768,33 @@ mod tests {
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         build.write("extra file.h", "changed\n");
         assert_eq!(build.ran(&[]), ["a.o"]);
+    }
+
+    #[test]
+    fn builds_again_when_a_variable_it_read_changes() {
+        // as rustc lists the variables `env!` reads, in the environment the command is given
+        let graph = graph()
+            .rule("cc", &[
+                ("command", "echo \"$$RIG_TEST_VARIABLE\" > $out && printf '$out:\\n# env-dep:RIG_TEST_VARIABLE\\n' > $out.d"),
+                ("depfile", "$out.d"),
+            ])
+            .edge("cc", &["a.o"], &[]);
+        let mut build = Build::new("variables", graph.finish(), &[]);
+        let mut set = |value: Option<&str>| {
+            build.options.env.retain(|(name, _)| name != "RIG_TEST_VARIABLE");
+            build.options.env.extend(value.map(|value| ("RIG_TEST_VARIABLE".to_string(), value.to_string())));
+            build.ran(&[])
+        };
+        assert_eq!(set(Some("one")), ["a.o"]);
+        assert_eq!(set(Some("one")), Vec::<String>::new());
+        assert_eq!(set(Some("two")), ["a.o"]);
+        assert_eq!(build.read("a.o"), "two\n");
+        // unset, where the variable rig is run with is not
+        if std::env::var_os("RIG_TEST_VARIABLE").is_none() {
+            let mut stamps = Stamps::new(&build.graph, &build.dir);
+            let plan = plan::plan(&build.graph, &build.state, &mut stamps, &[]).unwrap();
+            assert_eq!(plan.edges[0].1, Reason::EnvChanged("RIG_TEST_VARIABLE".into()));
+        }
     }
 
     #[test]

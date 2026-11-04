@@ -11,7 +11,9 @@
 //! started again.
 //!
 //! A record is the time the edge started and how long it ran, in milliseconds, the hash of its action, then its
-//! outputs, its declared inputs and the inputs it discovered, each as their number followed by each path and its stamp.
+//! outputs, its declared inputs and the inputs it discovered, each as their number followed by each path and its stamp,
+//! then the environment variables it read, as their number followed by each name, and `0` if it was not set, or `1`
+//! followed by the hash of its value, as a `u64`.
 //! A stamp is `0` if the file was missing, or `1` followed by its modification time, as an `i64`, and its size, as a
 //! `u64`. Numbers are little-endian, and paths are their length as a `u32` followed by their UTF-8 bytes.
 
@@ -23,7 +25,7 @@ use crate::Error;
 use crate::stamp::Stamp;
 
 const MAGIC: &[u8; 4] = b"RIGL";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// The fewest records the log has before it is rewritten without those which have been replaced.
 const COMPACT_MIN: usize = 1024;
@@ -43,6 +45,9 @@ pub struct Record {
     pub inputs: Vec<(String, Stamp)>,
     /// The inputs the edge reported in its depfile, once it had run.
     pub discovered: Vec<(String, Stamp)>,
+    /// The environment variables the edge reported reading in its depfile, with the hash of each value it saw, or
+    /// `None` if it was not set.
+    pub env: Vec<(String, Option<u64>)>,
 }
 impl Record {
     /// The key of the record, its first output, as the edge is found by.
@@ -158,7 +163,8 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
 }
 
 /// The 64-bit FNV-1a hash.
-pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
+#[must_use]
+pub fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
@@ -180,6 +186,18 @@ fn write_record(bytes: &mut Vec<u8>, record: &Record) {
                     contents.extend_from_slice(&size.to_le_bytes());
                 },
             }
+        }
+    }
+    contents.extend_from_slice(&(record.env.len() as u32).to_le_bytes());
+    for (name, hash) in &record.env {
+        contents.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        contents.extend_from_slice(name.as_bytes());
+        match hash {
+            None => contents.push(0),
+            Some(hash) => {
+                contents.push(1);
+                contents.extend_from_slice(&hash.to_le_bytes());
+            },
         }
     }
     bytes.extend_from_slice(&(contents.len() as u32).to_le_bytes());
@@ -235,8 +253,19 @@ fn read_record(contents: &[u8]) -> Option<Record> {
         }
     }
     let [outputs, inputs, discovered] = lists;
+    let mut env = Vec::new();
+    for _ in 0..r.u32()? {
+        let len = r.u32()? as usize;
+        let name = std::str::from_utf8(r.take(len)?).ok()?.to_string();
+        let hash = match r.take(1)?[0] {
+            0 => None,
+            1 => Some(u64::from_le_bytes(r.take(8)?.try_into().ok()?)),
+            _ => return None,
+        };
+        env.push((name, hash));
+    }
     let valid = r.pos == contents.len() && !outputs.is_empty();
-    valid.then_some(Record { start, duration, action, outputs, inputs, discovered })
+    valid.then_some(Record { start, duration, action, outputs, inputs, discovered, env })
 }
 
 struct Reader<'a> {
@@ -272,6 +301,7 @@ mod tests {
             outputs: vec![(output.into(), Stamp::File { mtime: -3, size: 7 })],
             inputs: vec![("in".into(), Stamp::File { mtime: 1_700_000_000_000_000_000, size: 0 })],
             discovered: vec![("header.h".into(), Stamp::Missing)],
+            env: vec![("SET".into(), Some(7)), ("UNSET".into(), None)],
         }
     }
 
@@ -329,7 +359,7 @@ mod tests {
     fn starts_again_with_another_version() {
         let dir = dir("version");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("log"), b"RIGL\x09\0\0\0garbage").unwrap();
+        std::fs::write(dir.join("log"), b"RIGL\x01\0\0\0garbage").unwrap();
         let mut state = State::open(&dir).unwrap();
         assert!(state.is_empty());
         state.record(record("a", 1)).unwrap();

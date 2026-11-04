@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use crate::Error;
+use crate::depfile::Discovered;
 use crate::graph::{Action, EdgeId, EdgeKind, EdgeRef, Graph, NodeId};
 use crate::stamp::{Stamp, Stamps};
 use crate::state::{Record, State, fnv1a};
@@ -36,6 +37,8 @@ pub enum Reason {
     InputChanged(String),
     /// An input which the edge discovered, as its depfile lists, has changed.
     DiscoveredChanged(String),
+    /// An environment variable which the edge read, as its depfile lists, has changed, or been set or unset.
+    EnvChanged(String),
     /// An alias without inputs, which is not a file, which is always out of date.
     Forced,
 }
@@ -51,6 +54,7 @@ impl std::fmt::Display for Reason {
             Self::InputRebuilt(path) => write!(f, "input {path:?} is built again"),
             Self::InputChanged(path) => write!(f, "input {path:?} has changed"),
             Self::DiscoveredChanged(path) => write!(f, "discovered input {path:?} has changed"),
+            Self::EnvChanged(name) => write!(f, "environment variable {name:?} has changed"),
             Self::Forced => write!(f, "it is an alias without inputs, which is always out of date"),
         }
     }
@@ -111,7 +115,7 @@ pub fn record(
     graph: &Graph,
     edge: EdgeId,
     inputs: Vec<(String, Stamp)>,
-    discovered: &[String],
+    discovered: &Discovered,
     stamps: &mut Stamps,
     start: SystemTime,
     duration: Duration,
@@ -122,7 +126,8 @@ pub fn record(
         stamps.forget(output);
         outputs.push((graph.path(output).to_string(), stamps.node(output)));
     }
-    let discovered = discovered.iter().map(|path| (path.clone(), stamps.path(path))).collect();
+    let env = discovered.env.iter().map(|name| (name.clone(), stamps.env(name))).collect();
+    let discovered = discovered.inputs.iter().map(|path| (path.clone(), stamps.path(path))).collect();
     let start = start.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
     Record {
         start: u64::try_from(start.as_millis()).unwrap_or(u64::MAX),
@@ -131,6 +136,7 @@ pub fn record(
         outputs,
         inputs,
         discovered,
+        env,
     }
 }
 
@@ -371,6 +377,11 @@ pub(crate) fn reason(
             return Some(Reason::DiscoveredChanged(path.clone()));
         }
     }
+    for (name, hash) in &record.env {
+        if stamps.env(name) != *hash {
+            return Some(Reason::EnvChanged(name.clone()));
+        }
+    }
     None
 }
 
@@ -418,7 +429,7 @@ mod tests {
                 }
                 let output = self.output(edge);
                 let found = discovered.iter().find(|(edge, _)| *edge == output).map_or(&[][..], |(_, paths)| *paths);
-                let found: Vec<String> = found.iter().map(ToString::to_string).collect();
+                let found = Discovered { inputs: found.iter().map(ToString::to_string).collect(), env: Vec::new() };
                 let record = record(&self.graph, edge, inputs, &found, &mut stamps, SystemTime::now(), Duration::ZERO);
                 self.state.record(record).unwrap();
                 ran.push(output);

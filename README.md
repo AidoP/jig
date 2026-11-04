@@ -383,8 +383,9 @@ Functions are called with their arguments in `()`, separated by `, `:
   declared has no value, as it may be declared later
 - `defined(name)`: whether a property has a value where the call is, as a `bool`, such as one which may be set in
   `Jig.local`, whose name is as for `select`
-- `env(name)`: the value of an environment variable, which must be set. The build is not reconfigured when it changes,
-  so it is impure, as described below
+- `env(name)`: the value of an environment variable, which must be set. The build is reconfigured when it changes, or
+  is set or unset, which `jig build`, `jig check` and `jig test` check before building. A hash of the value is
+  recorded, rather than the value
 - `len(value)`: the number of items in a list or entries in a dict, or of bytes in a `str`, which is UTF-8, as an
   `unsigned`
 - `contains(list, value)`: whether a list has an item equal to a value, or a dict has an entry for a key, as a `bool`
@@ -422,12 +423,11 @@ log error 'Rust 1.95 or later is needed'
   as warnings instead, except that an impure call is still an error, as evaluating it did not fail
 
 ```
-@with diagnostic/impure as 'allow'
 set prefix try(env('CROSS_COMPILE'), '')
 ```
 
 - `which(name)`: the path of the first executable file with the given name in the directories of the `PATH` environment
-  variable. The build is reconfigured when one of the directories searched before it changes
+  variable. The build is reconfigured when `PATH` changes, or one of the directories searched before it changes
 - `run(program, argument, ..., NAME: value, ...)`: run a program and return its output, without trailing newlines.
   As in `sh`, a program containing a `/` is a path, relative to the file containing the expression, while any other
   program is found in `PATH`. A program which is a reference is the path of the crate or custom command's output, which
@@ -442,14 +442,14 @@ set board select(board, default-board)
 use 'arch/riscv'
 ```
 
-A call to `env` or `run` is impure, as the build is not reconfigured when its value changes, which is the `impure`
-error, so that the build does not silently depend on what it does not track. It is allowed by setting
-`diagnostic/impure`, as with `@with` for a single statement, which is suggested before the statement, or before the
-meta-statement containing the call. A call in an `@else-if` has no suggestion, as `@with` cannot come before it.
+A call to `run` is impure, as the build is not reconfigured when its value changes, which is the `impure` error, so
+that the build does not silently depend on what it does not track. It is allowed by setting `diagnostic/impure`, as
+with `@with` for a single statement, which is suggested before the statement, or before the meta-statement containing
+the call. A call in an `@else-if` has no suggestion, as `@with` cannot come before it.
 
 ```
 @with diagnostic/impure as 'allow'
-set prefix env('CROSS_COMPILE')
+set version run('git', 'describe')
 ```
 
 Within a string, an expression in `{}` is replaced with its value, and `{{` and `}}` with a single brace.
@@ -458,7 +458,6 @@ The expression cannot start with `{`, which would be `{{`, so a name computed fr
 
 ```
 log note 'size is {size} with {size / 0x1000} pages'
-@with diagnostic/impure as 'allow'
 log note 'home is {env('HOME')}'
 ```
 
