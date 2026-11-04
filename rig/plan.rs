@@ -249,76 +249,95 @@ impl Planner<'_, '_, '_> {
         inputs.extend(self.discovered(edge));
         (edge, inputs, declared, 0)
     }
-    /// Returns the nodes an edge discovered when it last ran which an edge produces.
-    fn discovered(&self, edge: EdgeId) -> impl Iterator<Item = NodeId> {
-        let record = self.record(edge);
-        let paths = record.into_iter().flat_map(|record| &record.discovered);
-        paths.filter_map(|(path, _)| self.graph.node(path)).filter(|&node| self.graph.producer(node).is_some())
-    }
-    fn record(&self, edge: EdgeId) -> Option<&Record> {
-        self.state.get(&self.first_output(edge))
+    fn discovered(&self, edge: EdgeId) -> Vec<NodeId> {
+        discovered_nodes(self.graph, self.state, edge)
     }
     fn first_output(&self, edge: EdgeId) -> String {
-        let edge = self.graph.edge(edge);
-        let output = edge.outputs().iter().chain(edge.implicit_outputs()).next();
-        output.map(|&node| self.graph.path(node).to_string()).unwrap_or_default()
+        first_output(self.graph, edge)
     }
     /// Returns why an edge must run, once the edges which produce its inputs have been visited, or `None` if it is up
     /// to date.
     fn evaluate(&mut self, id: EdgeId) -> Option<Reason> {
-        let graph = self.graph;
-        let edge = graph.edge(id);
-        let discovered: Vec<NodeId> = self.discovered(id).collect();
-        let rebuilt = edge.inputs().iter().chain(edge.implicit()).chain(&discovered).find(|&&input| {
-            graph.producer(input).is_some_and(|producer| self.status[producer.0 as usize] == Status::Dirty)
-        });
-        if *edge.kind() == EdgeKind::Alias {
-            if let Some(&input) = rebuilt {
-                return Some(Reason::InputRebuilt(graph.path(input).into()));
-            }
-            let forced = edge.inputs().is_empty() && edge.implicit().is_empty();
-            let missing = edge.outputs().iter().any(|&output| !self.stamps.node(output).exists());
-            return (forced && missing).then_some(Reason::Forced);
-        }
-        let outputs: Vec<NodeId> = edge.outputs().iter().chain(edge.implicit_outputs()).copied().collect();
-        let Some(record) = outputs.first().and_then(|&first| self.state.get(graph.path(first))) else {
-            return Some(Reason::NoRecord);
-        };
-        let recorded = record.outputs.iter().map(|(path, _)| path.as_str());
-        if !recorded.eq(outputs.iter().map(|&node| graph.path(node))) {
-            return Some(Reason::OutputsChanged);
-        }
-        if !edge.generator() && record.action != action_hash(edge) {
-            return Some(Reason::CommandChanged);
-        }
-        for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
-            let now = self.stamps.node(output);
-            if !now.exists() {
-                return Some(Reason::OutputMissing(path.clone()));
-            }
-            if now != *stamp {
-                return Some(Reason::OutputModified(path.clone()));
-            }
-        }
-        let declared = declared_inputs(graph, edge);
-        if !record.inputs.iter().map(|(path, _)| path.as_str()).eq(declared.iter().map(|&node| graph.path(node))) {
-            return Some(Reason::InputsChanged);
-        }
+        let status = &self.status;
+        reason(self.graph, self.state, self.stamps, id, &|producer| status[producer.0 as usize] == Status::Dirty)
+    }
+}
+
+/// Returns the first output of an edge, which its record is kept by.
+pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> String {
+    let edge = graph.edge(edge);
+    let output = edge.outputs().iter().chain(edge.implicit_outputs()).next();
+    output.map(|&node| graph.path(node).to_string()).unwrap_or_default()
+}
+
+/// Returns the nodes an edge discovered when it last ran which an edge produces, which are built before it.
+pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Vec<NodeId> {
+    let record = state.get(&first_output(graph, edge));
+    let paths = record.into_iter().flat_map(|record| &record.discovered);
+    let nodes = paths.filter_map(|(path, _)| graph.node(path));
+    nodes.filter(|&node| graph.producer(node).is_some()).collect()
+}
+
+/// Returns why an edge must run, or `None` if it is up to date, where `rebuilt` is whether an edge which produces one
+/// of its inputs runs, and so changes the input.
+pub(crate) fn reason(
+    graph: &Graph,
+    state: &State,
+    stamps: &mut Stamps,
+    id: EdgeId,
+    rebuilt: &dyn Fn(EdgeId) -> bool,
+) -> Option<Reason> {
+    let edge = graph.edge(id);
+    let discovered = discovered_nodes(graph, state, id);
+    let rebuilt = edge.inputs().iter().chain(edge.implicit()).chain(&discovered).find(|&&input| {
+        graph.producer(input).is_some_and(rebuilt)
+    });
+    if *edge.kind() == EdgeKind::Alias {
         if let Some(&input) = rebuilt {
             return Some(Reason::InputRebuilt(graph.path(input).into()));
         }
-        for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
-            if self.stamps.node(node) != *stamp {
-                return Some(Reason::InputChanged(path.clone()));
-            }
-        }
-        for (path, stamp) in &record.discovered {
-            if self.stamps.path(path) != *stamp {
-                return Some(Reason::DiscoveredChanged(path.clone()));
-            }
-        }
-        None
+        let forced = edge.inputs().is_empty() && edge.implicit().is_empty();
+        let missing = edge.outputs().iter().any(|&output| !stamps.node(output).exists());
+        return (forced && missing).then_some(Reason::Forced);
     }
+    let outputs: Vec<NodeId> = edge.outputs().iter().chain(edge.implicit_outputs()).copied().collect();
+    let Some(record) = outputs.first().and_then(|&first| state.get(graph.path(first))) else {
+        return Some(Reason::NoRecord);
+    };
+    let recorded = record.outputs.iter().map(|(path, _)| path.as_str());
+    if !recorded.eq(outputs.iter().map(|&node| graph.path(node))) {
+        return Some(Reason::OutputsChanged);
+    }
+    if !edge.generator() && record.action != action_hash(edge) {
+        return Some(Reason::CommandChanged);
+    }
+    for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
+        let now = stamps.node(output);
+        if !now.exists() {
+            return Some(Reason::OutputMissing(path.clone()));
+        }
+        if now != *stamp {
+            return Some(Reason::OutputModified(path.clone()));
+        }
+    }
+    let declared = declared_inputs(graph, edge);
+    if !record.inputs.iter().map(|(path, _)| path.as_str()).eq(declared.iter().map(|&node| graph.path(node))) {
+        return Some(Reason::InputsChanged);
+    }
+    if let Some(&input) = rebuilt {
+        return Some(Reason::InputRebuilt(graph.path(input).into()));
+    }
+    for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
+        if stamps.node(node) != *stamp {
+            return Some(Reason::InputChanged(path.clone()));
+        }
+    }
+    for (path, stamp) in &record.discovered {
+        if stamps.path(path) != *stamp {
+            return Some(Reason::DiscoveredChanged(path.clone()));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

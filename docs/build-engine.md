@@ -446,7 +446,35 @@ implementation of that trait, so `generate.rs` doesn't change.
      time for now; batching them is step 4.
    - Like ninja, a file changed twice within one tick of the filesystem's clock, to the same size, isn't noticed. A
      fix, if one is needed, is to stamp again any input whose mtime is in the same tick as the edge's start.
-3. The scheduler and executor: the worker pool, pools, depfiles, restat, generator edges, and output capture.
+3. **Done:** the scheduler and executor, `rig::exec::build`.
+   - **Running.** Edges run in plan order as soon as the edges they depend on, through aliases and discovered inputs,
+     have finished. At most `jobs` run at once, and the default is the machine's parallelism.
+     - Each command runs with `sh -c` in the build directory, on a thread of its own, with stdin closed.
+     - Its stdout and stderr go to one pipe (`std::io::pipe`), and are given to the `Observer` together when it
+       finishes.
+   - **The console pool.** Its edges run one at a time with the terminal. The output of other edges that finish
+     meanwhile is held until the console edge finishes, as ninja does.
+   - **Recording.** An edge that succeeds is recorded at once, with its input stamps from when it started and the
+     inputs its depfile lists.
+     - The depfile is parsed by `rig::depfile`, in gcc's format, skipping rustc's `# env-dep:` comment lines. A missing
+       depfile counts as none, and an invalid one fails the edge.
+     - The depfile is kept rather than deleted.
+     - A failed edge isn't recorded, so it runs again.
+   - **Failures.** `keep_going` is ninja's `-k`: the build stops starting edges after that many failures, or never
+     with `0`. Edges that depend on a failure don't run, and the `Report` counts them.
+   - **Restat.** A restat edge's outputs are stamped before and after it runs. When none of an edge's planned
+     dependencies changed their outputs, the edge is checked again with `plan::reason`, and skipped if it's otherwise
+     up to date.
+   - **Generator edges** run like any other. The caller builds the graph's own file first and reloads the graph if
+     that ran, which step 5 does for jig.
+   - **Output.** `exec::Console` prints what ninja prints on a terminal that isn't smart: `[finished/total]
+     description` as each edge finishes, or as it starts for a console edge, then `FAILED: outputs` and the command
+     for a failure, then the edge's output. `quiet` leaves out the status lines.
+   - **Left for later.**
+     - Children share rig's process group, so Ctrl-C reaches them. Process groups, with forwarding of signals, are
+       step 4.
+     - A smart terminal's single updating status line is not done yet.
+     - Priority by critical path is phase 3; edges are started in plan order for now.
 4. `rig/sys.rs`: process groups, the `mkfifo` jobserver, and the batched stat behind `JIG_IO_URING=1`.
 5. `JIG_ENGINE=rig`, which `Configured::builder()` uses to return the `rig` builder. CI runs the suite with both
    engines.
