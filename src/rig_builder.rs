@@ -72,8 +72,8 @@ impl Rig<'_> {
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.
     ///
-    /// An error which stops the build before it runs anything, such as an unknown target, is shown as ninja shows one,
-    /// and the build has failed. Unless it is quiet, a build with nothing to do says so, as ninja does.
+    /// An error which stops the build before it runs anything, such as an unknown target, is shown on stderr, and the
+    /// build has failed.
     fn run(
         &self,
         targets: &[&str],
@@ -81,23 +81,17 @@ impl Rig<'_> {
         console: Console,
         output: Output,
     ) -> Result<bool, Error> {
-        use std::io::Write;
         let graph = self.graph()?;
         let mut state = self.state()?;
-        let mut out: Box<dyn Write> = match output {
+        let mut out: Box<dyn std::io::Write> = match output {
             Output::Stdout => Box::new(std::io::stdout()),
             Output::Stderr => Box::new(std::io::stderr()),
         };
         let mut observer = rig::exec::Console { out: &mut out, quiet: console.quiet, verbose: console.verbose };
         match rig::exec::build(&graph, &mut state, options, targets, &mut observer) {
-            Ok(report) => {
-                if console.announce && !console.quiet && report.ran == 0 && report.succeeded() {
-                    let _ = writeln!(out, "rig: no work to do.");
-                }
-                Ok(report.succeeded())
-            },
+            Ok(report) => Ok(report.succeeded()),
             Err(error @ (rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_))) => {
-                eprintln!("rig: error: {error}");
+                eprintln!("{error}");
                 Ok(false)
             },
             Err(error) => Err(Error::Rig(error)),
@@ -125,8 +119,6 @@ impl Rig<'_> {
 struct Console {
     quiet: bool,
     verbose: bool,
-    /// Whether a build with nothing to do says so, which regenerating the graph does not, as a build follows.
-    announce: bool,
 }
 
 impl Builder for Rig<'_> {
@@ -142,11 +134,11 @@ impl Builder for Rig<'_> {
         if args.dry_run {
             return self.dry_run(&targets, request.output);
         }
-        let console = Console { quiet: request.quiet || args.quiet, verbose: args.verbose, announce: true };
+        let console = Console { quiet: request.quiet || args.quiet, verbose: args.verbose };
         self.run(&targets, &options, console, request.output)
     }
     fn regenerate(&self, quiet: bool, output: Output) -> Result<(), Error> {
-        let console = Console { quiet, verbose: false, announce: false };
+        let console = Console { quiet, verbose: false };
         if self.run(&[ninja::FILE], &self.options(), console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
     fn up_to_date(&self, target: &str) -> Result<bool, Error> {
@@ -167,7 +159,7 @@ impl Rig<'_> {
         let plan = match rig::plan::plan(&graph, &state, &mut stamps, targets) {
             Ok(plan) => plan,
             Err(error) => {
-                eprintln!("rig: error: {error}");
+                eprintln!("{error}");
                 return Ok(false);
             },
         };
