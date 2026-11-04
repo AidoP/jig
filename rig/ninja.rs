@@ -135,6 +135,8 @@ pub struct Build<'a> {
     pub action: Option<Action>,
     /// Whether the edge's files are stamped by their contents, which ninja does not do.
     pub hashed: bool,
+    /// What identifies the edge in a cache, beside its action and inputs, if its results are cached.
+    pub cache: Option<String>,
 }
 
 impl Manifest {
@@ -229,6 +231,7 @@ impl Manifest {
             edge.restat = !scope.lookup("restat", 0).map_err(message)?.is_empty();
             edge.kind = EdgeKind::Command(build.action.clone().unwrap_or(Action::Shell(command)));
             edge.hashed = build.hashed;
+            edge.cache.clone_from(&build.cache);
         }
         self.graph.add_edge(edge)?;
         Ok(())

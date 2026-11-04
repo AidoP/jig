@@ -6,11 +6,12 @@ use crate::ninja::{Build, Manifest};
 
 /// Returns a graph to build, with its statements added in turn.
 pub(crate) fn graph() -> Graphs {
-    Graphs(Manifest::new(), false)
+    Graphs(Manifest::new(), false, None)
 }
 
-/// The statements of a graph, and whether the edges added are hashed.
-pub(crate) struct Graphs(Manifest, bool);
+/// The statements of a graph, whether the edges added are hashed, and what identifies them in a cache if they are
+/// cached.
+pub(crate) struct Graphs(Manifest, bool, Option<String>);
 
 impl Graphs {
     pub(crate) fn variable(mut self, name: &str, value: &str) -> Self {
@@ -20,6 +21,11 @@ impl Graphs {
     /// Stamp the files of the edges added from now on by their contents.
     pub(crate) fn hashed(mut self) -> Self {
         self.1 = true;
+        self
+    }
+    /// Cache the results of the edges added from now on, identified by `key` beside their actions and inputs.
+    pub(crate) fn cached(mut self, key: &str) -> Self {
+        self.2 = Some(key.into());
         self
     }
     pub(crate) fn rule(mut self, name: &str, bindings: &[(&str, &str)]) -> Self {
@@ -62,6 +68,7 @@ impl Graphs {
             bindings,
             action: None,
             hashed: self.1,
+            cache: self.2.clone(),
         };
         self.0.build(&build)
     }

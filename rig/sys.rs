@@ -1,4 +1,4 @@
-//! What rig needs of the system which `std` does not provide: signals, process groups and FIFOs.
+//! What rig needs of the system which `std` does not provide: signals, process groups, FIFOs and reflinks.
 //!
 //! The `unsafe` code of rig is here, behind a safe interface.
 
@@ -10,7 +10,13 @@ unsafe extern "C" {
     fn signal(signum: c_int, handler: usize) -> usize;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn mkfifo(path: *const std::ffi::c_char, mode: ModeT) -> c_int;
+    #[cfg(target_os = "linux")]
+    fn ioctl(fd: c_int, request: std::ffi::c_ulong, ...) -> c_int;
 }
+
+/// The request of `ioctl` which makes a file share the extents of another, `_IOW(0x94, 9, int)`.
+#[cfg(target_os = "linux")]
+const FICLONE: std::ffi::c_ulong = 0x4004_9409;
 
 #[cfg(target_os = "macos")]
 type ModeT = u16;
@@ -105,5 +111,29 @@ pub fn make_fifo(path: &Path) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Make a file share the contents of another, as a reflink, which the file system copies only once one of them is
+/// written, as Btrfs, XFS and others can.
+///
+/// # Errors
+///
+/// If the file system cannot, the files are on different file systems, or the platform has no reflinks.
+pub fn clone_file(from: &std::fs::File, to: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: both descriptors are open for as long as the call, as the files are borrowed, and `FICLONE` takes the
+        // descriptor of the source as an `int`
+        if unsafe { ioctl(to.as_raw_fd(), FICLONE, from.as_raw_fd()) } == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (from, to);
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }

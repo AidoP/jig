@@ -699,7 +699,7 @@ impl Project {
     }
     /// Read an environment variable, which the configuration then depends on, so that it is generated again when the
     /// variable changes, or is set or unset.
-    pub(super) fn read_env(&mut self, name: &str) -> Option<std::ffi::OsString> {
+    pub(crate) fn read_env(&mut self, name: &str) -> Option<std::ffi::OsString> {
         use std::os::unix::ffi::OsStrExt;
         let value = std::env::var_os(name);
         if !self.env.iter().any(|(read, _)| read == name) {
@@ -708,7 +708,7 @@ impl Project {
         value
     }
     /// Add a file which the configuration depends on, so that it is regenerated when the file changes.
-    pub(super) fn depend(&mut self, path: PathBuf) {
+    pub(crate) fn depend(&mut self, path: PathBuf) {
         if !self.dependencies.contains(&path) {
             self.dependencies.push(path);
         }

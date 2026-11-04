@@ -57,6 +57,8 @@ pub struct Edge<'a> {
     pub exec: Option<&'a rig::Exec>,
     /// Whether rig stamps the edge's files by their contents, which ninja cannot.
     pub hashed: bool,
+    /// What identifies the edge's toolchain, if rig keeps its results in the cache, which ninja cannot.
+    pub cache: Option<&'a str>,
 }
 
 /// What a build graph is written to.

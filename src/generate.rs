@@ -354,6 +354,9 @@ fn write_graph(
         "hash" => true,
         other => return Err(Error::ChangeDetection(other.into())),
     };
+    // rig caches the results of rustc and clippy, by the identity of the toolchain, when it caches, but not of rustdoc,
+    // which writes a directory
+    let cache = project.cache.as_deref();
     // the configure tool and custom commands run from the project root, as their arguments are relative to it
     let cd = format!("cd {} &&", ninja_quote(&at.root.display().to_string()));
 
@@ -531,6 +534,7 @@ fn write_graph(
             ],
             exec: Some(&exec),
             hashed,
+            cache,
             ..Default::default()
         })?;
         everything.push(output.clone());
@@ -556,6 +560,7 @@ fn write_graph(
                 ],
                 exec: Some(&exec),
                 hashed,
+                cache,
                 ..Default::default()
             })?;
         }
@@ -651,6 +656,7 @@ fn write_graph(
                 ],
                 exec: Some(&exec),
                 hashed,
+                cache,
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
@@ -675,6 +681,7 @@ fn write_graph(
             ],
             exec: Some(&exec),
             hashed,
+            cache,
             ..Default::default()
         })?;
         graph.alias(&Path::new("check").join(&unit.label), &[&output])?;
