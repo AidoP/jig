@@ -179,30 +179,11 @@ faster and can hash large files in parallel.
 Scanning is parallel. On a no-op build, most of the time goes to stat calls, so they're spread over the worker pool,
 as hashing is. This is where the engine beats ninja's single thread on large graphs.
 
-### io_uring
+### Batched stat, and why there is no io_uring
 
-On Linux, io_uring can do this work with far fewer system calls. It's optional: it is detected at run time, through
-`io_uring_setup` called with `extern "C" syscall`, and the thread pool is used instead when it's missing or disabled
-by seccomp (as in many containers). All of it is behind one interface, `rig::stamps_of(paths) -> stamps`, with a
-thread-pool implementation in `rig/stamp.rs` and an io_uring one in `rig/uring.rs`. It is used only with
-`RIG_IO_URING=1`; the measurements below are why.
-
-io_uring is worth having where many small operations dominate:
-
-- **Stat on a no-op build.** Batches of `IORING_OP_STATX` with `STATX_MTIME | STATX_SIZE` replace a system call per
-  file with one submission per few hundred files. It's expected to be the largest gain, especially on network
-  filesystems or with a cold cache, where the requests overlap instead of waiting in turn.
-- **Reading files to hash them (phase 3)** and copying blobs in and out of the cache (phase 4), with
-  `IORING_OP_READ` and fixed buffers.
-- **Waiting.** A single ring can wait for children (`IORING_OP_WAITID`, from Linux 6.7) and on their output pipes,
-  instead of a thread per running command.
-
-It isn't used for spawning processes, and it isn't relied on for correctness. Every operation has the same result
-both ways, which the tests check by running the suite with it on and off. The performance tests decide whether it's on
-by default: if a no-op build of the large graphs in `test/perf.rs` isn't measurably faster, it stays opt-in.
-
-**Measured (step 4).** Batched stat was measured on 60,000 paths, a third of them missing, on 4 cores with Linux 6.18,
-taking the best of 5 runs warm and a single run after dropping the page cache:
+The stamps a build needs are found together on a thread pool, by `rig::stamps_of`. io_uring's `IORING_OP_STATX` was
+implemented and measured as an alternative in step 4, on 60,000 paths, a third of them missing, on 4 cores with Linux
+6.18. Warm times are the best of 5 runs; cold times are a single run after dropping the page cache:
 
 | | warm | cold |
 |---|---|---|
@@ -210,10 +191,10 @@ taking the best of 5 runs warm and a single run after dropping the page cache:
 | thread pool (`rig::stamps_of`) | 19–24 ms | 79–108 ms |
 | io_uring `IORING_OP_STATX` | 97 ms | 214–237 ms |
 
-io_uring is slower than a single thread when the cache is warm, and only matches one when it is cold. The kernel can't
-complete `statx` inline, so it hands each request to io_uring's worker threads, which costs more than the system call
-it saves. The thread pool is therefore the default, and io_uring stays opt-in. Reading files to hash them (phase 3) is
-the next place to measure it, since reads, unlike `statx`, can complete asynchronously.
+io_uring was slower than a single thread with a warm cache, and only matched one with a cold cache. The kernel can't
+complete `statx` inline, so it hands each request to io_uring's worker threads. Since it gained nothing, and needed
+raw system calls, shared memory rings and its own `unsafe` code, it was removed. It could be reconsidered for reading
+files to hash them, which, unlike `statx`, can complete asynchronously, but only with a measurement that shows a gain.
 
 ### Environment variables
 
@@ -509,10 +490,10 @@ implementation of that trait, so `generate.rs` doesn't change.
        older make, isn't joined.
      - `Options::jobserver` turns it off.
    - **Batched stat.** Before planning, a build collects every file it can reach (targets, the lists of the edges
-     that produce them, and recorded discovered inputs) and stamps them together with `rig::stamps_of`. That uses
-     threads by default, or io_uring with `RIG_IO_URING=1`; see [io_uring](#io_uring) for the measurements.
-   - The `unsafe` code is in `rig/sys.rs` (`signal`, `kill`, `mkfifo`) and `rig/uring.rs` (`syscall`, `mmap`,
-     `munmap`, `close`). io_uring is compiled only for 64-bit little-endian Linux.
+     that produce them, and recorded discovered inputs) and stamps them together on a thread pool with
+     `rig::stamps_of`. io_uring was measured as an alternative and removed; see
+     [Batched stat](#batched-stat-and-why-there-is-no-io_uring).
+   - The `unsafe` code is in `rig/sys.rs`: `signal`, `kill` and `mkfifo`.
 5. `JIG_ENGINE=rig`, which `Configured::builder()` uses to return the `rig` builder. CI runs the suite with both
    engines.
 6. The standalone `rig` binary, which builds ninja files with the reader.
@@ -575,8 +556,6 @@ implementation of that trait, so `generate.rs` doesn't change.
 - **Pipelining.** Start dependents from `.rmeta`, using early outputs.
 - **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
   and what tests need.
-- **io_uring by default**, if a measurement shows it pays off, which batched stat did not. See
-  [io_uring](#io_uring); it is available behind `RIG_IO_URING=1`.
 - **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
 - **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
   so Windows can be added later.
@@ -584,13 +563,11 @@ implementation of that trait, so `generate.rs` doesn't change.
 ## Risks
 
 - **No dependencies.** Everything is written in-house: BLAKE3, a framed wire protocol, an HTTP/1.1 client, the
-  jobserver, the depfile parser, and the system calls (`mkfifo`, `ioctl`, io_uring). That's a deliberate cost for
-  having no dependencies. The `unsafe` code is confined to `rig/sys.rs`, with a safe interface and tests of its own. TLS is avoided by relying on ssh
-  or a proxy instead of implementing it.
+  jobserver, the depfile parser, and the system calls (`signal`, `kill`, `mkfifo`, `ioctl`). That's a deliberate
+  cost for having no dependencies. The `unsafe` code is confined to `rig/sys.rs`, with a safe interface and tests of
+  its own. TLS is avoided by relying on ssh or a proxy instead of implementing it.
 - **Matching ninja's behaviour.** jig's users can run ninja in the build directory directly. Keeping `build.ninja`,
   and the differential tests, limits what breaks.
-- **io_uring.** It has a history of security issues, and is often disabled. It's only an optimization, detected at run
-  time with a fallback, and the suite runs both ways.
 - **Cache correctness depends on complete inputs.** Only rustc and rustdoc, whose depfiles are complete, are cached by
   default. Toolchain identity and remapped paths are tested by comparing a cached result with a fresh run.
 - **The first build of an edge can't be distributed** until its inputs are known. That makes distribution most useful
@@ -600,8 +577,8 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 1. **Name.** The crate and its binary are called `rig`.
 2. **`unsafe` and `extern "C"`.** Both are allowed, in `rig/sys.rs`: `mkfifo` for the jobserver, `ioctl(FICLONE)` for
-   reflinks, `syscall` for io_uring, and `setpgid` and `kill` for process groups. io_uring is optional; see
-   [io_uring](#io_uring).
+   reflinks, and `signal` and `kill` for process groups. io_uring was tried and removed, as it gained nothing and
+   wasn't worth maintaining; see [Batched stat](#batched-stat-and-why-there-is-no-io_uring).
 3. **Change detection.** Timestamps, with the mtime and the size from the same `stat` call. Hash mode stays in the
    plan, as an option for phase 3 and the cache, but isn't the default.
 4. **ninja.** Generating `build.ninja` remains supported, permanently, as a second engine.
