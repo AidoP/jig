@@ -22,6 +22,7 @@ mod graph;
 pub mod jobserver;
 pub mod ninja;
 pub mod plan;
+pub mod remote;
 mod stamp;
 pub mod state;
 mod sys;

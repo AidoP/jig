@@ -19,6 +19,10 @@
 //! the results which were used longest ago first, then the blobs which no result refers to, and the manifests which
 //! were not used since.
 //!
+//! A cache can have a [`Remote`] behind it, another cache which it is in front of: what is not found in it is looked
+//! for there, and a blob which is not in it is fetched from there when it is needed, while what is added to it is
+//! pushed there if the remote takes pushes.
+//!
 //! A file is written to `tmp` and renamed into place, so that a build which reads the cache while another writes to
 //! it never sees a file half written, and builds need not lock it. A blob is checked against its hash when it is read,
 //! and a manifest or result against the hash which ends it, so that a cache which is corrupted is a miss, and the file
@@ -27,16 +31,19 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use std::sync::Arc;
+
 use crate::Error;
 use crate::blake3::{self, Hasher};
+use crate::remote::Remote;
 
 /// The hash of a blob, or a key.
 pub type Hash = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"RIGC";
 const VERSION: u32 = 1;
-const MANIFEST: u8 = 1;
-const RESULT: u8 = 2;
+pub(crate) const MANIFEST: u8 = 1;
+pub(crate) const RESULT: u8 = 2;
 
 /// The most sets of discovered inputs a manifest keeps, the latest first, so that one which is looked up is not read
 /// in full after many changes.
@@ -52,10 +59,11 @@ const COLLECTED: &str = "collected";
 /// The files written to `tmp`, so that each is named differently from others the process writes at once.
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 
-/// The cache in a directory.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The cache in a directory, and the remote cache behind it, if it has one.
+#[derive(Clone, Debug)]
 pub struct Cache {
     dir: PathBuf,
+    remote: Option<Arc<Remote>>,
 }
 
 /// The inputs an edge discovered when it ran, as its depfile listed them: files, and environment variables.
@@ -137,7 +145,17 @@ impl Cache {
             let path = dir.join(store);
             std::fs::create_dir_all(&path).map_err(|error| Error::Io(path, error))?;
         }
-        Ok(Self { dir: dir.into() })
+        Ok(Self { dir: dir.into(), remote: None })
+    }
+    /// Put the cache in front of a remote cache.
+    #[must_use]
+    pub fn with_remote(mut self, remote: Arc<Remote>) -> Self {
+        self.remote = Some(remote);
+        self
+    }
+    #[must_use]
+    pub fn remote(&self) -> Option<&Remote> {
+        self.remote.as_deref()
     }
     #[must_use]
     pub fn dir(&self) -> &Path {
@@ -212,6 +230,7 @@ impl Cache {
     ///
     /// If the cache does not have the blob, or it is corrupted, when it is removed.
     pub fn read_blob(&self, hash: &Hash) -> std::io::Result<Vec<u8>> {
+        self.fetch_blob(hash);
         let path = self.blob_path(hash);
         let bytes = std::fs::read(&path)?;
         if blake3::hash(&bytes) != *hash {
@@ -228,6 +247,7 @@ impl Cache {
     /// If the cache does not have the blob, it is corrupted, when it is removed, or the file cannot be written.
     pub fn restore(&self, hash: &Hash, path: &Path, executable: bool) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
+        self.fetch_blob(hash);
         let blob = self.blob_path(hash);
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".rig-tmp");
@@ -246,6 +266,21 @@ impl Cache {
         }
         restored
     }
+    /// Fetch a blob from the remote cache if this one does not have it, once it is checked against its hash, returning
+    /// whether this one has it then.
+    fn fetch_blob(&self, hash: &Hash) -> bool {
+        if self.has_blob(hash) {
+            return true;
+        }
+        let Some(bytes) = self.remote().and_then(|remote| remote.blob(hash)) else {
+            return false;
+        };
+        self.accept_blob(hash, &bytes)
+    }
+    /// Add a blob which was sent, if it has its hash, returning whether it was added.
+    pub(crate) fn accept_blob(&self, hash: &Hash, bytes: &[u8]) -> bool {
+        blake3::hash(bytes) == *hash && self.put_bytes(bytes).is_ok()
+    }
     /// Check every blob of a result against its hash, removing those which are corrupted.
     pub fn check(&self, entry: &Entry) {
         for blob in std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob)) {
@@ -256,8 +291,21 @@ impl Cache {
         }
     }
     /// Returns the sets of inputs an edge discovered when it ran with a first key, the latest first.
+    ///
+    /// Those of the remote cache follow those of this one, as it may have run with other inputs elsewhere.
     #[must_use]
     pub fn manifest(&self, key: &Hash) -> Vec<Discovery> {
+        let mut manifest = self.local_manifest(key);
+        let remote = self.remote().and_then(|remote| remote.manifest(key));
+        let remote = remote.and_then(|bytes| read_manifest(valid(MANIFEST, &bytes)?)).unwrap_or_default();
+        for discovery in remote {
+            if !manifest.contains(&discovery) {
+                manifest.push(discovery);
+            }
+        }
+        manifest
+    }
+    fn local_manifest(&self, key: &Hash) -> Vec<Discovery> {
         read(MANIFEST, &self.keyed("mf", key)).and_then(|bytes| read_manifest(&bytes)).unwrap_or_default()
     }
     /// Add a set of inputs which an edge discovered when it ran with a first key to its manifest, as the latest.
@@ -269,7 +317,7 @@ impl Cache {
     ///
     /// If the manifest cannot be written.
     pub fn add_to_manifest(&self, key: &Hash, discovery: Discovery) -> std::io::Result<()> {
-        let mut manifest = self.manifest(key);
+        let mut manifest = self.local_manifest(key);
         if manifest.first() == Some(&discovery) {
             return Ok(());
         }
@@ -284,12 +332,75 @@ impl Cache {
         }
         self.write(&self.keyed("mf", key), w)
     }
-    /// Returns the result of an edge by its second key, if the cache has it and every blob it needs.
+    /// Returns the result of an edge by its second key, if the cache has it and every blob it needs, or else the
+    /// remote cache has it, when it is added to this one, and its blobs are fetched when they are restored.
     #[must_use]
     pub fn result(&self, key: &Hash) -> Option<Entry> {
-        let entry = read_result(&read(RESULT, &self.keyed("ac", key))?)?;
-        let blobs = std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob));
-        blobs.into_iter().all(|blob| self.has_blob(blob)).then_some(entry)
+        let local = read(RESULT, &self.keyed("ac", key)).and_then(|bytes| read_result(&bytes));
+        let complete = |entry: &Entry| entry_blobs(entry).all(|blob| self.has_blob(blob));
+        if let Some(entry) = local.filter(complete) {
+            return Some(entry);
+        }
+        let bytes = self.remote()?.result(key)?;
+        let entry = read_result(valid(RESULT, &bytes)?)?;
+        self.accept_raw(&self.keyed("ac", key), &bytes).ok()?;
+        Some(entry)
+    }
+    /// Returns a result as it is stored, by its second key, if it is valid and the cache has every blob it needs, as a
+    /// remote cache sends it.
+    pub(crate) fn raw_result(&self, key: &Hash) -> Option<Vec<u8>> {
+        let path = self.keyed("ac", key);
+        let bytes = std::fs::read(&path).ok()?;
+        let entry = read_result(valid(RESULT, &bytes)?)?;
+        entry_blobs(&entry).all(|blob| self.has_blob(blob)).then(|| {
+            touch(&path);
+            bytes
+        })
+    }
+    /// Returns a manifest as it is stored, by its first key, if it is valid, as a remote cache sends it.
+    pub(crate) fn raw_manifest(&self, key: &Hash) -> Option<Vec<u8>> {
+        let path = self.keyed("mf", key);
+        let bytes = std::fs::read(&path).ok()?;
+        valid(MANIFEST, &bytes)?;
+        touch(&path);
+        Some(bytes)
+    }
+    /// Add a result which was sent as it is stored, by its second key, if it is valid, returning whether it was added.
+    pub(crate) fn accept_result(&self, key: &Hash, bytes: &[u8]) -> bool {
+        let valid = valid(RESULT, bytes).and_then(read_result).is_some();
+        valid && self.accept_raw(&self.keyed("ac", key), bytes).is_ok()
+    }
+    fn accept_raw(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        let tmp = self.tmp();
+        std::fs::write(&tmp, bytes)?;
+        Self::place(&tmp, path)
+    }
+    /// Push the result of an edge, by its keys, and the inputs it discovered, to the remote cache, if it takes pushes:
+    /// first the blobs it does not have, then the result, then the manifest, so that it never has a result without its
+    /// blobs. Returns whether it was pushed.
+    pub fn push(&self, first: &Hash, second: &Hash, discovery: &Discovery) -> bool {
+        let Some(remote) = self.remote().filter(|remote| remote.pushes()) else {
+            return false;
+        };
+        let Some(bytes) = std::fs::read(self.keyed("ac", second)).ok() else {
+            return false;
+        };
+        let Some(entry) = valid(RESULT, &bytes).and_then(read_result) else {
+            return false;
+        };
+        let blobs: Vec<Hash> = entry_blobs(&entry).copied().collect();
+        let Some(missing) = remote.missing(&blobs) else {
+            return false;
+        };
+        for blob in &missing {
+            let Ok(contents) = self.read_blob(blob) else {
+                return false;
+            };
+            if !remote.put_blob(blob, &contents) {
+                return false;
+            }
+        }
+        remote.put_result(second, &bytes) && remote.add_to_manifest(first, discovery)
     }
     /// Add the result of an edge by its second key, once its blobs have been added.
     ///
@@ -317,17 +428,27 @@ impl Cache {
     }
 }
 
+/// Returns the blobs a result refers to.
+fn entry_blobs(entry: &Entry) -> impl Iterator<Item = &Hash> {
+    std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob))
+}
+
+/// Returns the body of a manifest or result as it is stored, if it is one of this version which is not corrupted.
+pub(crate) fn valid(kind: u8, bytes: &[u8]) -> Option<&[u8]> {
+    let header = MAGIC.len() + 5;
+    let ok = bytes.len() >= header + 32 && bytes.starts_with(MAGIC) && bytes[4..8] == VERSION.to_le_bytes();
+    let (body, hash) = bytes.split_at(bytes.len().saturating_sub(32));
+    (ok && bytes[8] == kind && blake3::hash(body) == hash).then(|| &body[header..])
+}
+
 /// Returns the body of a manifest or result, which is removed if it is corrupted.
 fn read(kind: u8, path: &Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
-    let header = MAGIC.len() + 5;
-    let valid = bytes.len() >= header + 32 && bytes.starts_with(MAGIC) && bytes[4..8] == VERSION.to_le_bytes();
-    let (body, hash) = bytes.split_at(bytes.len().saturating_sub(32));
-    if !valid || bytes[8] != kind || blake3::hash(body) != hash {
+    let body = valid(kind, &bytes).map(<[u8]>::to_vec);
+    if body.is_none() {
         let _ = std::fs::remove_file(path);
-        return None;
     }
-    Some(body[header..].to_vec())
+    body
 }
 
 impl Cache {

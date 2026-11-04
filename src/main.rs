@@ -66,6 +66,9 @@ commands:
                          show what rig's cache holds, remove what was used longest ago until it is no larger than a
                          size, `JIG_CACHE_SIZE` or 10 GiB by default, as is done after a build once a day, or remove
                          everything in it
+    serve --stdio [--push]
+                         serve rig's cache on stdin and stdout as a remote cache, as `JIG_REMOTE_CACHE` runs it by ssh,
+                         taking pushes with `--push`
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -141,6 +144,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             run::run(name.as_deref(), &args)
         },
         "cache" => cache::command(args).map(|()| ExitCode::SUCCESS),
+        "serve" => cache::serve(args).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -383,6 +387,10 @@ enum Error {
     /// `jig cache` without a cache, as `JIG_CACHE` turns it off.
     CacheOff,
     UnknownCacheCommand(String),
+    /// A `JIG_REMOTE_CACHE` which is not a remote cache.
+    InvalidRemote(String),
+    /// `jig serve` could not serve the cache.
+    Serve(std::io::Error),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -454,6 +462,10 @@ impl core::fmt::Display for Error {
             Self::CacheOff => {
                 write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
             },
+            Self::InvalidRemote(remote) => {
+                write!(f, "`JIG_REMOTE_CACHE` is {remote:?}, rather than `ssh://[<user>@]<host>[:<port>][/<jig>]` or a command")
+            },
+            Self::Serve(error) => write!(f, "failed to serve the cache: {error}"),
             Self::UnknownCacheCommand(command) => {
                 write!(f, "unknown cache command {command:?}, rather than `stats`, `gc` or `clear`")
             },

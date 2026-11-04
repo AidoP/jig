@@ -71,7 +71,7 @@ impl Rig<'_> {
         }
         // rustup's proxies, such as `rustc`, find the toolchain with these, which is identified by its contents instead
         options.locating.extend(["RUSTUP_HOME", "CARGO_HOME"].map(String::from));
-        options.cache = crate::cache::open()?;
+        options.cache = crate::cache::open(true)?;
         Ok(options)
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.
@@ -95,6 +95,7 @@ impl Rig<'_> {
         let built = rig::exec::build(&graph, &mut state, options, targets, &mut observer);
         // once a day, the cache is collected after a build
         if let Some(cache) = &options.cache {
+            crate::cache::report_remote(cache);
             crate::cache::collect_if_due(cache)?;
         }
         match built {

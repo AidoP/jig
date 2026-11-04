@@ -3,6 +3,10 @@
 //!
 //! The cache is `$JIG_CACHE`, or `$XDG_CACHE_HOME/jig`, or `$HOME/.cache/jig`, unless `JIG_CACHE` is empty or `off`. It
 //! is collected after a build at most once a day, down to `$JIG_CACHE_SIZE`, which is 10 GiB by default.
+//!
+//! It is in front of a remote cache if `JIG_REMOTE_CACHE` gives one, as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which
+//! runs `jig serve --stdio` there with ssh, or as a command, split at spaces, which serves it on its stdin and stdout.
+//! Results are pushed to it with `JIG_REMOTE_CACHE_PUSH=1`, if it takes them.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -14,6 +18,10 @@ use crate::Error;
 pub const DIR: &str = "JIG_CACHE";
 /// The environment variable which gives the size the cache is collected down to.
 pub const SIZE: &str = "JIG_CACHE_SIZE";
+/// The environment variable which gives the remote cache.
+pub const REMOTE: &str = "JIG_REMOTE_CACHE";
+/// The environment variable which pushes results to the remote cache, if it is `1`.
+pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
 /// The size the cache is collected down to by default, 10 GiB.
 const DEFAULT_SIZE: u64 = 10 << 30;
 /// How often the cache is collected after a build.
@@ -37,12 +45,80 @@ pub fn dir(mut env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
     std::path::absolute(&dir).ok()
 }
 
-/// Opens the cache, if it is on.
-pub fn open() -> Result<Option<rig::cache::Cache>, Error> {
+/// Opens the cache, if it is on, in front of the remote cache, if one is given and `remote`.
+pub fn open(remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
     let Some(dir) = dir(|name| std::env::var_os(name)) else {
         return Ok(None);
     };
-    rig::cache::Cache::open(&dir).map(Some).map_err(Error::Rig)
+    let cache = rig::cache::Cache::open(&dir).map_err(Error::Rig)?;
+    let push = std::env::var_os(PUSH).is_some_and(|push| push == "1");
+    let command = std::env::var(REMOTE).ok().filter(|_| remote).map(|remote| remote_command(&remote, push));
+    match command {
+        Some(command) => {
+            let command = command.ok_or_else(|| Error::InvalidRemote(std::env::var(REMOTE).unwrap_or_default()))?;
+            Ok(Some(cache.with_remote(std::sync::Arc::new(rig::remote::Remote::command(command, push)))))
+        },
+        None => Ok(Some(cache)),
+    }
+}
+
+/// Returns the command which serves a remote cache, from `JIG_REMOTE_CACHE`, which pushes if `push`, or `None` if it is
+/// empty, or an `ssh://` address without a host.
+///
+/// An `ssh://` address runs `jig`, or the path after its host, with `serve --stdio`, and `--push` to push, by ssh in
+/// batch mode, so that it fails rather than asking for a password. A command is split at spaces, and is run as it is.
+pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
+    let Some(address) = remote.strip_prefix("ssh://") else {
+        let command: Vec<String> = remote.split_whitespace().map(String::from).collect();
+        return (!command.is_empty()).then_some(command);
+    };
+    let (host, jig) = match address.split_once('/') {
+        Some((host, jig)) => (host, format!("/{jig}")),
+        None => (address, "jig".to_string()),
+    };
+    let (host, port) = match host.rsplit_once(':') {
+        Some((host, port)) if port.parse::<u16>().is_ok() => (host, Some(port)),
+        _ => (host, None),
+    };
+    if host.is_empty() || host.ends_with('@') {
+        return None;
+    }
+    let mut command: Vec<String> = ["ssh", "-o", "BatchMode=yes"].map(String::from).to_vec();
+    if let Some(port) = port {
+        command.extend(["-p".into(), port.into()]);
+    }
+    command.extend([host.to_string(), "--".into(), jig, "serve".into(), "--stdio".into()]);
+    if push {
+        command.push("--push".into());
+    }
+    Some(command)
+}
+
+/// `jig serve --stdio [--push]`, which serves the cache on stdin and stdout, as a remote cache, taking pushes with
+/// `--push`, then collects it if it is due.
+pub fn serve(args: impl Iterator<Item = OsString>) -> Result<(), Error> {
+    let (mut stdio, mut push) = (false, false);
+    for arg in args {
+        match arg.to_str() {
+            Some("--stdio") => stdio = true,
+            Some("--push") => push = true,
+            _ => return Err(Error::ExtraArg(arg.to_string_lossy().into_owned())),
+        }
+    }
+    if !stdio {
+        return Err(Error::MissingArg("--stdio"));
+    }
+    let cache = open(false)?.ok_or(Error::CacheOff)?;
+    let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout().lock(), push);
+    collect_if_due(&cache)?;
+    served.map_err(Error::Serve)
+}
+
+/// Warn of a remote cache which failed during a build, which went on without it.
+pub fn report_remote(cache: &rig::cache::Cache) {
+    if let Some(error) = cache.remote().and_then(rig::remote::Remote::error) {
+        eprintln!("warning: the remote cache failed, so the build went on without it: {error}");
+    }
 }
 
 /// Returns the size the cache is collected down to, from `JIG_CACHE_SIZE`, or 10 GiB without it.
@@ -115,7 +191,7 @@ pub fn command(mut args: impl Iterator<Item = OsString>) -> Result<(), Error> {
     } else if let Some(extra) = args.next() {
         return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
     }
-    let cache = open()?.ok_or(Error::CacheOff)?;
+    let cache = open(false)?.ok_or(Error::CacheOff)?;
     let stats = |stats: rig::cache::Stats| {
         format!(
             "{} results, {} manifests and {} blobs, {}",
@@ -179,5 +255,19 @@ mod tests {
         assert_eq!(format_size(512), "512 B");
         assert_eq!(format_size(1536), "1.5 KiB");
         assert_eq!(format_size(10 << 30), "10.0 GiB");
+    }
+
+    #[test]
+    fn finds_the_remote_command() {
+        let command = |remote, push| remote_command(remote, push).map(|command| command.join(" "));
+        assert_eq!(command("ssh://cache", false).as_deref(), Some("ssh -o BatchMode=yes cache -- jig serve --stdio"));
+        assert_eq!(
+            command("ssh://ci@cache:2222/opt/bin/jig", true).as_deref(),
+            Some("ssh -o BatchMode=yes -p 2222 ci@cache -- /opt/bin/jig serve --stdio --push"),
+        );
+        assert_eq!(command("ssh://", false), None);
+        assert_eq!(command("ssh://ci@", false), None);
+        assert_eq!(command("env JIG_CACHE=/srv jig serve --stdio", false).as_deref(), Some("env JIG_CACHE=/srv jig serve --stdio"));
+        assert_eq!(command("  ", false), None);
     }
 }
