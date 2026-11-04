@@ -15,6 +15,11 @@
 //! command printed is shown, rather than running it. Otherwise its outputs, depfile and what it printed are added to the
 //! cache once it has run and succeeded. A cache which cannot be read or written is a miss, rather than a failure.
 //!
+//! A cached edge whose inputs are known from when it last ran may run on a worker, one of [`Options::workers`], once
+//! the build's own jobs are full, if the worker has the edge's toolchain: its inputs, declared and discovered, are
+//! sent to the worker, as [`crate::worker`] describes, which runs it, and its outputs are fetched, and restored as from
+//! the cache. If it cannot, or the action fails there, it runs here, on the thread which waited for the worker.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -27,6 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cache::{self, Cache, Hash};
+use crate::remote::Remote;
 use crate::graph::{Action, EdgeId, EdgeKind, Graph, NodeId, Pool};
 use crate::plan::{self, Reason};
 use crate::stamp::{Stamp, Stamps};
@@ -55,6 +61,8 @@ pub struct Options {
     /// and files it uses, rather than changing what it produces, so they are not its inputs: `PATH`, `HOME` and
     /// `TMPDIR` by default.
     pub locating: Vec<String>,
+    /// The workers which cached edges may run on, once the build's own jobs are full.
+    pub workers: Vec<Arc<Remote>>,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -71,6 +79,7 @@ impl Options {
             env: Vec::new(),
             cache: None,
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
+            workers: Vec::new(),
         }
     }
 }
@@ -127,6 +136,8 @@ pub struct Report {
     pub restat_skipped: usize,
     /// The edges which ran whose outputs were fetched from the cache, rather than by running their commands.
     pub cached: usize,
+    /// The edges which ran on workers.
+    pub remote: usize,
     /// Whether the build was interrupted, by a signal or [`Options::cancel`].
     pub interrupted: bool,
 }
@@ -157,6 +168,59 @@ struct Job {
     lookup: Option<Lookup>,
     /// The variables a hermetic edge inherits, or `None` if it inherits every one.
     inherit: Option<Vec<String>>,
+    /// The worker it runs on, if it is sent to one.
+    dispatch: Option<Dispatch>,
+}
+
+/// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
+/// of its inputs, whose contents are found by the thread which runs it, and of the outputs it must write.
+struct Dispatch {
+    worker: Arc<Remote>,
+    cache: Cache,
+    identity: String,
+    action: Action,
+    env: Vec<(String, String)>,
+    locating: Vec<String>,
+    inputs: Vec<String>,
+    /// The outputs it writes, explicit and implicit, and its depfile, if it has one.
+    outputs: Vec<String>,
+    /// A file stderr is written to, if it writes one, which it need not.
+    stderr: Option<String>,
+}
+impl Dispatch {
+    /// Run the edge on the worker, returning what it printed once its outputs are restored, or `None` if it did not
+    /// run there, or failed, or did not write every output.
+    fn run(&self, dir: &Path) -> Option<Vec<u8>> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut inputs = Vec::new();
+        for path in &self.inputs {
+            let full = dir.join(path);
+            // an input which is not a file is not sent, which an action which reads it fails without
+            let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
+                continue;
+            };
+            let blob = crate::blake3::hash_file(&full).ok()?;
+            let executable = metadata.permissions().mode() & 0o111 != 0;
+            inputs.push(crate::worker::Input { path: path.clone(), blob, executable });
+        }
+        let request = crate::worker::Request {
+            identity: self.identity.clone(),
+            action: self.action.clone(),
+            env: self.env.clone(),
+            locating: self.locating.clone(),
+            inputs,
+            outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
+        };
+        let executed = self.worker.execute(dir, &request).ok().filter(|executed| executed.succeeded)?;
+        let written = |path: &String| executed.entry.outputs.iter().any(|output| output.path == *path);
+        if !self.outputs.iter().all(written) {
+            return None;
+        }
+        let blobs = cache::entry_blobs(&executed.entry);
+        let missing: Vec<Hash> = blobs.filter(|blob| !self.cache.has_blob(blob)).copied().collect();
+        self.worker.fetch_blobs(&self.cache, &missing);
+        Restore { cache: &self.cache, entry: executed.entry }.apply(dir).ok()
+    }
 }
 
 /// Where the result of a cached edge is looked for: the cache, the edge's first key, and the variables every command
@@ -226,6 +290,8 @@ struct Finished {
     duration: std::time::Duration,
     /// Whether its outputs were restored from the cache.
     cached: bool,
+    /// Whether it ran on a worker.
+    remote: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -291,6 +357,11 @@ pub fn build(
         keys: HashMap::new(),
         env: Arc::new(options.env.clone()),
         relocation: std::path::absolute(&options.dir).map(|dir| dir.display().to_string()).unwrap_or_default(),
+        local: 0,
+        on_worker: vec![0; options.workers.len()],
+        sent: HashMap::new(),
+        spawned: vec![false; options.workers.len()],
+        local_only: HashSet::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -400,6 +471,15 @@ struct Run<'g, 's> {
     /// The build's directory, absolute, which is replaced in the actions of cached edges by a marker in their keys, so
     /// that a build in another directory shares their results, or empty if it is not known.
     relocation: String,
+    /// The number of running edges which run here, rather than on a worker.
+    local: usize,
+    /// The number of running edges sent to each worker, and the worker each was sent to.
+    on_worker: Vec<usize>,
+    sent: HashMap<usize, usize>,
+    /// Whether the threads for each worker's jobs have been started.
+    spawned: Vec<bool>,
+    /// The edges which cannot run on a worker.
+    local_only: HashSet<usize>,
 }
 
 impl Run<'_, '_> {
@@ -413,31 +493,46 @@ impl Run<'_, '_> {
         let (jobs, work) = std::sync::mpsc::channel::<Job>();
         let work = std::sync::Mutex::new(work);
         let (dir, env) = (self.options.dir.clone(), self.options.env.clone());
+        let (work, dir, env, makeflags) = (&work, &dir, &env, makeflags.as_deref());
+        // a thread which takes jobs, of which there is one for each of the build's jobs, and of each worker's, once it
+        // is first sent an edge
+        let job_thread = || {
+            let sender = sender.clone();
+            move || {
+                // the lock is held while waiting for a job, which the other threads wait for in turn
+                while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
+                    let Job { index, action, console, lookup, inherit, dispatch } = job;
+                    let start = SystemTime::now();
+                    let clock = Instant::now();
+                    // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
+                    let restored = lookup.and_then(|lookup| lookup.restore(dir));
+                    let cached = restored.is_some();
+                    let ran = if cached { None } else { dispatch.and_then(|dispatch| dispatch.run(dir)) };
+                    let remote = ran.is_some();
+                    let (outcome, output) = if let Some(printed) = restored.or(ran) {
+                        (Outcome::Succeeded, printed)
+                    } else {
+                        let spawned = |pid| {
+                            let _ = sender.send(Message::Spawned(index, pid));
+                        };
+                        let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
+                        run_command(&action, dir, console, &environment, &spawned)
+                    };
+                    let duration = clock.elapsed();
+                    let finished = Finished { index, outcome, output, start, duration, cached, remote };
+                    let _ = sender.send(Message::Finished(finished));
+                }
+            }
+        };
         std::thread::scope(|scope| {
             for _ in 0..self.options.jobs.max(1) {
-                let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
-                scope.spawn(move || {
-                    // the lock is held while waiting for a job, which the other threads wait for in turn
-                    while let Ok(Ok(Job { index, action, console, lookup, inherit })) = work.lock().map(|work| work.recv()) {
-                        let start = SystemTime::now();
-                        let clock = Instant::now();
-                        // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
-                        let restored = lookup.and_then(|lookup| lookup.restore(dir));
-                        let cached = restored.is_some();
-                        let (outcome, output) = if let Some(printed) = restored {
-                            (Outcome::Succeeded, printed)
-                        } else {
-                            let spawned = |pid| {
-                                let _ = sender.send(Message::Spawned(index, pid));
-                            };
-                            let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
-                            run_command(&action, dir, console, &environment, &spawned)
-                        };
-                        let duration = clock.elapsed();
-                        let finished = Finished { index, outcome, output, start, duration, cached };
-                        let _ = sender.send(Message::Finished(finished));
-                    }
-                });
+                scope.spawn(job_thread());
+            }
+            // the workers are connected to at once, if an edge may run on one
+            if (0..self.edges.len()).any(|index| self.remote_identity(index).is_some()) {
+                for worker in &self.options.workers {
+                    scope.spawn(|| worker.jobs());
+                }
             }
             loop {
                 let cancelled = self.options.cancel.load(Ordering::SeqCst).then_some(sys::SIGINT);
@@ -458,9 +553,18 @@ impl Run<'_, '_> {
                 }
                 // whether an edge is ready but waits for a token
                 let mut waiting_for_token = false;
-                while self.progress.running < self.options.jobs.max(1) && !self.stopping() {
-                    let Some(index) = self.next_ready() else {
-                        break;
+                while !self.stopping() {
+                    // an edge runs here while the build's jobs are not full, and otherwise on a worker, if one can
+                    let (index, worker) = if self.local < self.options.jobs.max(1) {
+                        let Some(index) = self.next_ready() else {
+                            break;
+                        };
+                        (index, None)
+                    } else {
+                        let Some((index, worker)) = self.next_for_worker() else {
+                            break;
+                        };
+                        (index, Some(worker))
                     };
                     if self.restat_clean(index) {
                         self.report.restat_skipped += 1;
@@ -469,8 +573,9 @@ impl Run<'_, '_> {
                         continue;
                     }
                     // an edge runs in the job the build holds without a token if it is free, and any other takes a
-                    // token
+                    // token, but for one which runs on a worker
                     match &self.jobserver {
+                        _ if worker.is_some() => (),
                         Some(jobserver) if self.implicit.is_some() => {
                             let Some(token) = jobserver.try_acquire() else {
                                 self.make_ready(index);
@@ -491,8 +596,22 @@ impl Run<'_, '_> {
                         inherit.extend(edge.pass_env().iter().cloned());
                         inherit
                     });
+                    let dispatch = worker.and_then(|worker| self.dispatch(index, worker));
+                    match worker {
+                        Some(worker) => {
+                            if !self.spawned[worker] {
+                                self.spawned[worker] = true;
+                                for _ in 0..self.options.workers[worker].jobs() {
+                                    scope.spawn(job_thread());
+                                }
+                            }
+                            self.on_worker[worker] += 1;
+                            self.sent.insert(index, worker);
+                        },
+                        None => self.local += 1,
+                    }
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console, lookup, inherit });
+                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -518,6 +637,10 @@ impl Run<'_, '_> {
                         }
                         if self.implicit == Some(finished.index) {
                             self.implicit = None;
+                        }
+                        match self.sent.remove(&finished.index) {
+                            Some(worker) => self.on_worker[worker] -= 1,
+                            None => self.local -= 1,
                         }
                         self.finish(finished, observer);
                     },
@@ -546,6 +669,87 @@ impl Run<'_, '_> {
         })?;
         self.ready.remove(&entry);
         Some(entry.1)
+    }
+    /// Returns the edge of the highest priority which is ready to run and may run on a worker, with a worker which
+    /// has a free job and may have its toolchain, if there is one.
+    fn next_for_worker(&mut self) -> Option<(usize, usize)> {
+        // a worker is connected to on a thread of its own, so that the build does not wait for it
+        let free = |run: &Self, worker: usize| run.on_worker[worker] < run.options.workers[worker].connected_jobs();
+        if !(0..self.options.workers.len()).any(|worker| free(self, worker)) {
+            return None;
+        }
+        let ready: Vec<(std::cmp::Reverse<u64>, usize)> = self.ready.iter().copied().collect();
+        for entry in ready {
+            let index = entry.1;
+            if self.local_only.contains(&index) {
+                continue;
+            }
+            let Some(identity) = self.remote_identity(index) else {
+                self.local_only.insert(index);
+                continue;
+            };
+            let worker = (0..self.options.workers.len()).find(|&worker| {
+                free(self, worker) && self.options.workers[worker].may_have(identity)
+            });
+            if let Some(worker) = worker {
+                self.ready.remove(&entry);
+                return Some((index, worker));
+            }
+        }
+        None
+    }
+    /// Returns the identity of the toolchain of an edge which may run on a worker: a cached edge which is not in the
+    /// console pool, which inherits only the variables which locate its tools, and which has run before, so that the
+    /// inputs it discovered are known, whose paths all lead from the build's directory, as its outputs' do.
+    fn remote_identity(&self, index: usize) -> Option<&str> {
+        let edge = self.graph.edge(self.edges[index]);
+        let identity = edge.cache()?;
+        if edge.pool() == Pool::Console || !edge.hermetic() || self.options.cache.is_none() {
+            return None;
+        }
+        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
+        let recorded = previous.inputs.iter().chain(&previous.discovered).map(|(path, _)| path.as_str());
+        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let mut paths = recorded.chain(outputs).chain(edge.depfile());
+        paths.all(|path| crate::worker::ups(path).is_some()).then_some(identity)
+    }
+    /// Returns how a started edge runs on a worker: with the inputs it declares now, and those it discovered when it
+    /// last ran, or `None` if one does not lead from the build's directory, when it runs here.
+    fn dispatch(&mut self, index: usize, worker: usize) -> Option<Dispatch> {
+        let edge = self.graph.edge(self.edges[index]);
+        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
+        let declared = self.inputs.get(&index)?.iter().map(|(path, _)| path);
+        let discovered = previous.discovered.iter().map(|(path, _)| path);
+        let mut inputs: Vec<String> = declared.chain(discovered).cloned().collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let outputs: Vec<String> = outputs.chain(edge.depfile()).map(String::from).collect();
+        let stderr = match self.action(index) {
+            Action::Exec(exec) => exec.stderr.clone(),
+            Action::Shell(_) => None,
+        };
+        if !inputs.iter().chain(&outputs).chain(&stderr).all(|path| crate::worker::ups(path).is_some()) {
+            self.local_only.insert(index);
+            return None;
+        }
+        let mut env = self.options.env.clone();
+        for name in edge.pass_env() {
+            if let Some(value) = std::env::var_os(name) {
+                env.push((name.clone(), value.to_string_lossy().into_owned()));
+            }
+        }
+        Some(Dispatch {
+            worker: Arc::clone(&self.options.workers[worker]),
+            cache: self.options.cache.as_ref()?.without_remote(),
+            identity: edge.cache()?.to_string(),
+            action: plan::relocated(self.action(index), &self.relocation),
+            env,
+            locating: self.options.locating.clone(),
+            inputs,
+            outputs,
+            stderr,
+        })
     }
     fn make_ready(&mut self, index: usize) {
         self.ready.insert((std::cmp::Reverse(self.priority[index]), index));
@@ -617,7 +821,7 @@ impl Run<'_, '_> {
         observer.started(self.graph, edge, &self.reasons[index], self.progress);
     }
     fn finish(&mut self, finished: Finished, observer: &mut dyn Observer) {
-        let Finished { index, mut outcome, output, start, mut duration, cached } = finished;
+        let Finished { index, mut outcome, output, start, mut duration, cached, remote } = finished;
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.progress.running -= 1;
@@ -625,6 +829,9 @@ impl Run<'_, '_> {
         self.report.ran += 1;
         let inputs = self.inputs.remove(&index).unwrap_or_default();
         let key = self.keys.remove(&index);
+        if remote {
+            self.report.remote += 1;
+        }
         if cached {
             self.report.cached += 1;
             // the time it took when it ran is kept, as what it would take if it is not in the cache next time
@@ -790,12 +997,12 @@ fn read_depfile(path: &Path) -> Result<depfile::Discovered, String> {
 }
 
 /// What a command is run with, beside the environment rig is run with.
-struct Environment<'a> {
+pub(crate) struct Environment<'a> {
     /// The value of `MAKEFLAGS` which gives it the jobserver, if rig created one.
-    makeflags: Option<&'a str>,
-    env: &'a [(String, String)],
+    pub(crate) makeflags: Option<&'a str>,
+    pub(crate) env: &'a [(String, String)],
     /// The variables rig is run with which a hermetic command inherits, or `None` if it inherits every one.
-    inherit: Option<&'a [String]>,
+    pub(crate) inherit: Option<&'a [String]>,
 }
 
 /// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
@@ -807,7 +1014,7 @@ struct Environment<'a> {
 /// A console command has the terminal, and no output is captured, and is in rig's process group, so that it is sent
 /// what the terminal sends, such as `SIGINT`. Any other has no stdin, and leads a process group of its own, which the
 /// build signals when it is interrupted.
-fn run_command(
+pub(crate) fn run_command(
     action: &Action,
     dir: &Path,
     console: bool,
@@ -1269,6 +1476,81 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.0.dir());
         }
+    }
+
+    /// A graph of two cached edges which each discover `extra.h`, and print, and of one which reads `hidden`, which it
+    /// does not declare or discover.
+    fn compiled() -> Graph {
+        let cc = "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d && echo compiled $out";
+        graph()
+            .cached("toolchain")
+            .rule("cc", &[("command", cc), ("depfile", "$out.d")])
+            .rule("hidden", &[
+                ("command", "cat $in hidden > $out && echo \"$out: $in\" > $out.d"),
+                ("depfile", "$out.d"),
+            ])
+            .edge("cc", &["a.o"], &["a.c"])
+            .edge("cc", &["b.o"], &["b.c"])
+            .edge("hidden", &["c.o"], &["c.c"])
+            .finish()
+    }
+
+    /// A worker whose store is a cache in a directory of its own, which has toolchains by these identities.
+    fn worker(cache: &TempCache, identities: &[&str]) -> Arc<Remote> {
+        let toolchain = |identity: &&str| crate::worker::Toolchain { identity: (*identity).into(), env: Vec::new() };
+        let toolchains: Vec<_> = identities.iter().map(toolchain).collect();
+        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 2, move || toolchains.clone());
+        Arc::new(crate::remote::served_worker(cache.0.clone(), executor))
+    }
+
+    #[test]
+    fn runs_edges_on_workers_once_its_jobs_are_full() {
+        let files = [("a.c", "a\n"), ("b.c", "b\n"), ("c.c", "c\n"), ("extra.h", "h\n"), ("hidden", "hidden\n")];
+        let mut build = Build::new("workers", compiled(), &files);
+        // the first build runs every edge here, as the inputs they discover are not known yet
+        let first = TempCache::new("workers-first");
+        build.options.cache = Some(first.0.clone());
+        build.options.jobs = 1;
+        let store = TempCache::new("workers-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        let (report, finished) = build.build(&[]);
+        assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
+        // once they are, with an empty cache, the one job runs one edge, and the worker the others, but for the one
+        // which reads what it was not sent, which fails there and runs here again, unless it was the one which ran here
+        for output in ["a.o", "b.o", "c.o", "a.o.d", "b.o.d"] {
+            std::fs::remove_file(build.dir.join(output)).unwrap();
+        }
+        let second = TempCache::new("workers-second");
+        build.options.cache = Some(second.0.clone());
+        // which is connected to first, as the build does not wait for it
+        assert_eq!(build.options.workers[0].jobs(), 2);
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.cached), (3, 0), "{finished:?}");
+        assert!(matches!(report.remote, 1 | 2), "{report:?}");
+        assert_eq!(build.read("a.o"), "a\nh\n");
+        assert_eq!(build.read("b.o"), "b\nh\n");
+        assert_eq!(build.read("c.o"), "c\nhidden\n");
+        assert_eq!(build.read("a.o.d"), "a.o: a.c extra.h\n");
+        let mut printed: Vec<String> = finished.iter().map(|(_, printed)| printed.clone()).collect();
+        printed.sort();
+        assert_eq!(printed, ["", "compiled a.o\n", "compiled b.o\n"]);
+        // what ran on the worker is recorded, and added to the cache, as what ran here is
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
+        assert_eq!(second.0.stats().results, 3);
+        // a worker without the toolchain runs nothing, and is not asked again
+        for output in ["a.o", "b.o", "c.o"] {
+            std::fs::remove_file(build.dir.join(output)).unwrap();
+        }
+        let third = TempCache::new("workers-third");
+        build.options.cache = Some(third.0.clone());
+        let other = TempCache::new("workers-other");
+        build.options.workers = vec![worker(&other, &["another toolchain"])];
+        assert_eq!(build.options.workers[0].jobs(), 2);
+        let (report, finished) = build.build(&[]);
+        assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
+        assert!(!build.options.workers[0].may_have("toolchain"));
+        assert_eq!(build.read("b.o"), "b\nh\n");
     }
 
     #[test]

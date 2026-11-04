@@ -172,6 +172,28 @@ JIG_REMOTE_CACHE=ssh://cache.example ./build/bootstrap/jig build
 JIG_REMOTE_CACHE=ssh://ci@cache.example JIG_REMOTE_CACHE_PUSH=1 ./build/bootstrap/jig build
 ```
 
+### Workers
+
+Once a build's own jobs are full, the cached commands it would run, such as rustc's, can run on other machines,
+workers, given by the `workers` property, usually in the user's configuration, or the `JIG_WORKERS` environment
+variable, with the workers separated by `;`, which overrides it. A worker is `ssh://[<user>@]<host>[:<port>][/<jig>]`,
+which runs `jig worker --stdio` there by ssh, `tcp://<host>:<port>`, which `jig worker --listen <address> --token-file
+<path>` serves, proved to by the token of `cache/token-file`, or a command which serves one on its stdin and stdout.
+A worker runs as many commands at once as `--jobs`, or as the machine runs threads.
+
+A command runs on a worker once it has run here, so that the files its dep-info lists are known. Those and the files
+it declares are sent to the worker, once each, as the worker keeps them in its cache, where the command runs in a
+directory of its own with only them, beside the toolchain, which the worker must have: one with the same `rustc -vV`
+and the same components, which rustup installs. As the paths rustc is given and writes are relative, what it writes
+there is what it would write here, which is fetched into the cache, and pushed to the remote cache as what is built
+here is. A command which fails there, or reads a file it was not sent, runs here again, as do those of a toolchain the
+worker does not have. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+
+```
+# ~/.config/jig/config
+set workers ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
+```
+
 ### The user's configuration
 
 What belongs to the user or the machine rather than a project, such as rig's cache, is set in the user's
@@ -831,12 +853,14 @@ target bluemetal-riscv64
   to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE`, `JIG_CACHE_SIZE`,
   `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH`
 - `cache/token-file`: the file of the token which proves rig to a remote cache which needs one, as one reached over
-  TCP does, empty by default
+  TCP does, and to workers reached over TCP, empty by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no
   value until it is set
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
+- `workers`: the workers which cached commands run on once a build's own jobs are full, as described for them, empty
+  by default, which `JIG_WORKERS` overrides
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces

@@ -116,18 +116,28 @@ pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
 /// builds elsewhere, so it should write nothing which depends on it.
 #[must_use]
 pub fn relocated_action_bytes(edge: EdgeRef, dir: &str) -> Vec<u8> {
-    const MARKER: &str = "\0build-dir";
-    let relocate = |string: &str| if dir.is_empty() { string.to_string() } else { string.replace(dir, MARKER) };
     match edge.kind() {
         EdgeKind::Alias => Vec::new(),
-        EdgeKind::Command(Action::Shell(command)) => bytes_of(&Action::Shell(relocate(command))),
-        EdgeKind::Command(Action::Exec(exec)) => bytes_of(&Action::Exec(crate::graph::Exec {
+        EdgeKind::Command(action) => bytes_of(&relocated(action, dir)),
+    }
+}
+
+/// What stands for the build's directory in an action which is relocated.
+pub(crate) const BUILD_DIR: &str = "\0build-dir";
+
+/// Returns an action with the build's directory, absolute, replaced wherever it is by [`BUILD_DIR`], or as it is if
+/// the directory is empty, as it is when it is not known.
+pub(crate) fn relocated(action: &Action, dir: &str) -> Action {
+    let relocate = |string: &str| if dir.is_empty() { string.to_string() } else { string.replace(dir, BUILD_DIR) };
+    match action {
+        Action::Shell(command) => Action::Shell(relocate(command)),
+        Action::Exec(exec) => Action::Exec(crate::graph::Exec {
             program: relocate(&exec.program),
             args: exec.args.iter().map(|arg| relocate(arg)).collect(),
             env: exec.env.iter().map(|(name, value)| (name.clone(), relocate(value))).collect(),
             dir: exec.dir.as_deref().map(relocate),
             stderr: exec.stderr.as_deref().map(relocate),
-        })),
+        }),
     }
 }
 

@@ -72,6 +72,10 @@ commands:
                          serve rig's cache on stdin and stdout as a remote cache, as `cache/remote` runs it by ssh, or
                          over TCP at an address, such as `0.0.0.0:7070`, to clients with the token in the file,
                          taking pushes with `--push`
+    worker --stdio [--jobs <n>] | worker --listen <address> --token-file <path> [--jobs <n>]
+                         run the cached commands of builds which send them, as the `workers` property runs it by ssh,
+                         on stdin and stdout, or over TCP at an address, for clients with the token in the file, with
+                         rig's cache as its store, and the toolchains rustup has, running as many at once as `--jobs`
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -150,6 +154,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         },
         "cache" => cache::command(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "serve" => cache::serve(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
+        "worker" => cache::worker(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -210,7 +215,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     // which override the configuration are read by it
     let settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
     if settings.dir.is_some() {
-        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot, toolchain));
+        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot));
         project.identify_cached_customs();
     }
     project.cache_settings = settings;
@@ -340,6 +345,15 @@ fn declare_builtins(
                  `JIG_REMOTE_CACHE_PUSH=1` overrides",
             ),
             project::Data::Bool(false),
+        ),
+        (
+            project::Property::new("workers".into(), project::Type::List).info(
+                "the workers rig sends cached commands to once its own jobs are full, each as \
+                 `'ssh://[<user>@]<host>[:<port>][/<jig>]'`, `'tcp://<host>:<port>'`, with the token of \
+                 `cache/token-file`, or a command which serves one on its stdin and stdout, which `JIG_WORKERS`, \
+                 separated by `;`, overrides",
+            ),
+            project::Data::List(Vec::new()),
         ),
         (
             project::Property::new("test-tags".into(), project::Type::List)
@@ -501,6 +515,8 @@ enum Error {
     UnknownCacheCommand(String),
     /// A `JIG_REMOTE_CACHE` which is not a remote cache.
     InvalidRemote(String),
+    InvalidWorker(String),
+    InvalidJobs(String),
     /// A `--color` which is not when to show colour.
     InvalidColour(String),
     /// `jig serve` could not serve the cache.
@@ -584,6 +600,14 @@ impl core::fmt::Display for Error {
                      `https://` is not spoken, which a proxy which speaks TLS can be put in front of",
                 )
             },
+            Self::InvalidWorker(worker) => {
+                write!(
+                    f,
+                    "the worker {worker:?} is not `ssh://[<user>@]<host>[:<port>][/<jig>]`, `tcp://<host>:<port>` or a \
+                     command",
+                )
+            },
+            Self::InvalidJobs(jobs) => write!(f, "`--jobs` is {jobs:?}, rather than a number of jobs"),
             Self::Serve(error) => write!(f, "failed to serve the cache: {error}"),
             Self::InvalidColour(when) => write!(f, "`--color` is {when:?}, rather than `auto`, `always` or `never`"),
             Self::UnknownCacheCommand(command) => {
@@ -598,27 +622,15 @@ fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> 
     rustc_output(&format!("--print={request}"), toolchain)
 }
 
-/// Returns what identifies a toolchain, by which rig caches what it compiles: a hash of rustc's version, with its
-/// commit and host, from `rustc -vV`, of the toolchain's name, and of the files which rustup writes to the sysroot when
-/// it installs or updates the toolchain, or without them, of rustc in the sysroot.
-///
-/// The configuration depends on those files, so that the toolchain is identified again when it is updated in place.
-fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str, toolchain: Option<&str>) -> String {
-    let mut key = rig::cache::Key::new("jig toolchain");
-    key.part(verbose_version.as_bytes()).part(toolchain.unwrap_or_default().as_bytes());
-    let sysroot = Path::new(sysroot);
-    let rustup = ["lib/rustlib/multirust-channel-manifest.toml", "lib/rustlib/components"].map(|path| sysroot.join(path));
-    let files = if rustup.iter().any(|path| path.is_file()) { rustup.to_vec() } else { vec![sysroot.join("bin/rustc")] };
+/// Returns what identifies a toolchain, as [`toolchain::identity`] finds it, which the configuration depends on the
+/// files of, so that the toolchain is identified again when it is updated in place.
+fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str) -> String {
+    let (identity, files) = toolchain::identity(verbose_version, Path::new(sysroot));
+    // a file which is missing is not depended on, as ninja would configure the project again each time
     for path in files {
-        key.part(path.as_os_str().as_encoded_bytes());
-        let hash = rig::blake3::hash_file(&path).ok();
-        key.hash(hash.as_ref());
-        // a file which is missing is not depended on, as ninja would configure the project again each time
-        if hash.is_some() {
-            project.depend(path);
-        }
+        project.depend(path);
     }
-    rig::cache::hex(&key.finish())
+    identity
 }
 
 /// Returns the version of rustc, from the `release` line of the output of `rustc -vV`.

@@ -19,6 +19,11 @@
 //!   reached over TCP does, or which is sent as a bearer token over HTTP, read when it is connected to, so that the
 //!   token is not recorded with the project.
 //!
+//! - `workers`, or `JIG_WORKERS`, with the workers separated by `;`: the workers rig sends cached edges to once its
+//!   own jobs are full, each as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` there with
+//!   ssh, as `tcp://<host>:<port>`, which `jig worker --listen` serves, with the token of `cache/token-file`, or as a
+//!   command, split at spaces, which serves one on its stdin and stdout.
+//!
 //! The settings are resolved when the project is configured, as the variables are read by the configuration, and
 //! recorded in its database, which a build reads them from.
 
@@ -36,6 +41,8 @@ pub const SIZE: &str = "JIG_CACHE_SIZE";
 pub const REMOTE: &str = "JIG_REMOTE_CACHE";
 /// The environment variable which pushes results to the remote cache, if it is `1`.
 pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
+/// The environment variable which gives the workers, separated by `;`.
+pub const WORKERS: &str = "JIG_WORKERS";
 /// The size the cache is collected down to by default.
 pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
@@ -62,6 +69,7 @@ pub struct Properties {
     pub remote: String,
     pub push: bool,
     pub token_file: String,
+    pub workers: Vec<String>,
 }
 
 /// How rig caches, from the cache's properties and the variables which override them.
@@ -74,8 +82,11 @@ pub struct Settings {
     /// The remote cache, as `cache/remote` gives it, if there is one.
     pub remote: Option<String>,
     pub push: bool,
-    /// The file of the token for the remote cache, absolute, if there is one.
+    /// The file of the token for the remote cache, absolute, if there is one, which proves the client to its workers
+    /// too.
     pub token_file: Option<PathBuf>,
+    /// The workers, as `workers` gives them.
+    pub workers: Vec<String>,
 }
 
 impl Settings {
@@ -102,7 +113,16 @@ impl Settings {
         }
         let token_file = &properties.token_file;
         let token_file = (!token_file.is_empty()).then(|| std::path::absolute(token_file).unwrap_or_else(|_| token_file.into()));
-        Ok(Self { dir, size, remote, push, token_file })
+        let workers = match env(WORKERS) {
+            Some(workers) => workers.to_string_lossy().split(';').map(String::from).collect(),
+            None => properties.workers.clone(),
+        };
+        let workers = workers.iter().map(|worker| worker.trim()).filter(|worker| !worker.is_empty());
+        let workers: Vec<String> = workers.map(String::from).collect();
+        if let Some(worker) = workers.iter().find(|worker| worker_transport(worker).is_none()) {
+            return Err(Error::InvalidWorker(worker.clone()));
+        }
+        Ok(Self { dir, size, remote, push, token_file, workers })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -124,6 +144,26 @@ impl Settings {
             remote = remote.with_token(read_token(path)?);
         }
         Ok(Some(cache.with_remote(std::sync::Arc::new(remote))))
+    }
+    /// Returns the workers, which are connected to when a build first sends one an edge, proved by the token of
+    /// `cache/token-file`, if there is one, over TCP.
+    pub fn workers(&self) -> Result<Vec<std::sync::Arc<rig::remote::Remote>>, Error> {
+        let token = match &self.token_file {
+            Some(path) if self.workers.iter().any(|worker| worker.starts_with("tcp://")) => Some(read_token(path)?),
+            _ => None,
+        };
+        let workers = self.workers.iter().filter_map(|worker| match worker_transport(worker)? {
+            Transport::Command(command) => Some(rig::remote::Remote::command(command, false)),
+            Transport::Tcp(address) => {
+                let remote = rig::remote::Remote::tcp(address, false);
+                Some(match &token {
+                    Some(token) => remote.with_token(token.clone()),
+                    None => remote,
+                })
+            },
+            Transport::Http(_) => None,
+        });
+        Ok(workers.map(std::sync::Arc::new).collect())
     }
     /// Collect the cache after a build, if it was last collected a day ago or longer.
     pub fn collect_if_due(&self, cache: &rig::cache::Cache) {
@@ -159,6 +199,16 @@ pub fn remote_transport(remote: &str, push: bool) -> Option<Transport> {
     (!host.is_empty() && port.parse::<u16>().is_ok()).then(|| Transport::Tcp(address.to_string()))
 }
 
+/// Returns how a worker is reached, from `workers`: `tcp://<host>:<port>` over TCP, or otherwise by a command, as
+/// [`worker_command`] finds it, or `None` if it is neither, as a server of files over HTTP, which runs nothing, is not.
+pub fn worker_transport(worker: &str) -> Option<Transport> {
+    match remote_transport(worker, false)? {
+        Transport::Command(_) => worker_command(worker).map(Transport::Command),
+        Transport::Http(_) => None,
+        tcp @ Transport::Tcp(_) => Some(tcp),
+    }
+}
+
 /// Returns a token, from its file, without the whitespace around it, such as the line break which ends it.
 fn read_token(path: &std::path::Path) -> Result<Vec<u8>, Error> {
     let token = std::fs::read(path).map_err(|error| Error::Read(path.into(), error))?;
@@ -171,6 +221,17 @@ fn read_token(path: &std::path::Path) -> Result<Vec<u8>, Error> {
 /// An `ssh://` address runs `jig`, or the path after its host, with `serve --stdio`, and `--push` to push, by ssh in
 /// batch mode, so that it fails rather than asking for a password. A command is split at spaces, and is run as it is.
 pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
+    let args: &[&str] = if push { &["serve", "--stdio", "--push"] } else { &["serve", "--stdio"] };
+    command_of(remote, args)
+}
+
+/// Returns the command which serves a worker, as [`remote_command`] finds it, which runs `jig worker --stdio` over ssh.
+pub fn worker_command(worker: &str) -> Option<Vec<String>> {
+    command_of(worker, &["worker", "--stdio"])
+}
+
+/// Returns the command an `ssh://` address runs `jig` with arguments by, or a command split at spaces.
+fn command_of(remote: &str, args: &[&str]) -> Option<Vec<String>> {
     let Some(address) = remote.strip_prefix("ssh://") else {
         let command: Vec<String> = remote.split_whitespace().map(String::from).collect();
         return (!command.is_empty()).then_some(command);
@@ -190,10 +251,8 @@ pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
     if let Some(port) = port {
         command.extend(["-p".into(), port.into()]);
     }
-    command.extend([host.to_string(), "--".into(), jig, "serve".into(), "--stdio".into()]);
-    if push {
-        command.push("--push".into());
-    }
+    command.extend([host.to_string(), "--".into(), jig]);
+    command.extend(args.iter().map(|&arg| String::from(arg)));
     Some(command)
 }
 
@@ -228,6 +287,52 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
             eprintln!("serving {} on {bound}", cache.dir().display());
             let after = || settings.collect_if_due(&cache);
             rig::remote::listen(&cache, &listener, push, &token, &after).map_err(Error::Serve)
+        },
+        (true, Some(_)) => Err(Error::ExtraArg("--listen".into())),
+        (false, None) => Err(Error::MissingArg("--stdio or --listen <address>")),
+    }
+}
+
+/// `jig worker --stdio [--jobs <n>]`, which runs the actions of cached edges a build sends it on stdin and stdout, as a
+/// worker, with the toolchains rustup has, and the cache as its store, then collects the cache if it is due, or `jig
+/// worker --listen <address> --token-file <path> [--jobs <n>]`, which runs them for every client which connects over
+/// TCP with the token. It runs as many at once as `--jobs`, or as the machine runs threads at once by default.
+pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
+    let (mut stdio, mut listen, mut token_file, mut jobs) = (false, None, None, None);
+    let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = args.next() {
+        let mut value = |name: &'static str| args.next().ok_or(Error::MissingArg(name));
+        match arg.as_str() {
+            "--stdio" => stdio = true,
+            "--listen" => listen = Some(value("--listen <address>")?),
+            "--token-file" => token_file = Some(PathBuf::from(value("--token-file <path>")?)),
+            "--jobs" => {
+                let count = value("--jobs <n>")?;
+                jobs = Some(count.parse::<usize>().ok().filter(|&jobs| jobs > 0).ok_or(Error::InvalidJobs(count))?);
+            },
+            _ => return Err(Error::ExtraArg(arg)),
+        }
+    }
+    let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
+    let jobs = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
+    let executor = rig::worker::Executor::new(cache.dir().join("work"), jobs, crate::toolchain::installed);
+    match (stdio, listen) {
+        (true, None) => {
+            let server = rig::remote::Server { cache: &cache, push: false, token: None, executor: Some(&executor) };
+            let worked = server.serve(std::io::stdin().lock(), std::io::stdout());
+            settings.collect_if_due(&cache);
+            worked.map_err(Error::Serve)
+        },
+        (false, Some(address)) => {
+            // over TCP, which authenticates no one, a client must have the token, as it runs what it is sent
+            let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
+            let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
+            let bound = listener.local_addr().map_err(Error::Serve)?;
+            eprintln!("running actions with {} toolchains on {bound}", executor.toolchains().len());
+            let token = Some(token.as_slice());
+            let server = rig::remote::Server { cache: &cache, push: false, token, executor: Some(&executor) };
+            let after = || settings.collect_if_due(&cache);
+            server.listen(&listener, &after).map_err(Error::Serve)
         },
         (true, Some(_)) => Err(Error::ExtraArg("--listen".into())),
         (false, None) => Err(Error::MissingArg("--stdio or --listen <address>")),
@@ -346,27 +451,56 @@ mod tests {
             remote: "ssh://cache".into(),
             push: true,
             token_file: "/t".into(),
+            workers: vec!["ssh://worker".into(), " ".into()],
         };
         let settings = resolved(Settings::resolve(&properties, env(&[])));
-        let expected = Settings { dir: Some("/p".into()), size: 1 << 30, remote: Some("ssh://cache".into()), push: true, token_file: Some("/t".into()) };
+        let expected = Settings {
+            dir: Some("/p".into()),
+            size: 1 << 30,
+            remote: Some("ssh://cache".into()),
+            push: true,
+            token_file: Some("/t".into()),
+            workers: vec!["ssh://worker".into()],
+        };
         assert_eq!(settings, expected);
         let overridden = env(&[
             ("JIG_CACHE", "/c"),
             ("JIG_CACHE_SIZE", "2M"),
             ("JIG_REMOTE_CACHE", "ssh://other"),
             ("JIG_REMOTE_CACHE_PUSH", "0"),
+            ("JIG_WORKERS", "tcp://a:1; env jig worker --stdio ;"),
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
-        let expected = Settings { dir: Some("/c".into()), size: 2 << 20, remote: Some("ssh://other".into()), push: false, token_file: Some("/t".into()) };
+        let expected = Settings {
+            dir: Some("/c".into()),
+            size: 2 << 20,
+            remote: Some("ssh://other".into()),
+            push: false,
+            token_file: Some("/t".into()),
+            workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
+        };
         assert_eq!(settings, expected);
         // and turns it off, or has no remote cache
         let off = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE", "off"), ("JIG_REMOTE_CACHE", " ")])));
         assert_eq!((off.dir, off.remote), (None, None));
-        let empty = Properties { dir: String::new(), size: "10G".into(), remote: String::new(), push: false, token_file: String::new() };
+        let empty = Properties {
+            dir: String::new(),
+            size: "10G".into(),
+            remote: String::new(),
+            push: false,
+            token_file: String::new(),
+            workers: Vec::new(),
+        };
         assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
         // what is not a size or a remote cache is an error
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_SIZE", "lots")])), Err(Error::InvalidSize(_))));
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_REMOTE_CACHE", "ssh://")])), Err(Error::InvalidRemote(_))));
+        let workers: [&'static [(&str, &str)]; 3] =
+            [&[("JIG_WORKERS", "http://cache")], &[("JIG_WORKERS", "ssh://")], &[("JIG_WORKERS", "tcp://worker")]];
+        for workers in workers {
+            let resolved = Settings::resolve(&properties, env(workers));
+            assert!(matches!(resolved, Err(Error::InvalidWorker(_))), "{workers:?}");
+        }
     }
 
     #[test]
@@ -406,5 +540,11 @@ mod tests {
         assert_eq!(remote_transport("http://cache:8080/rig", false), Some(Transport::Http(url)));
         assert_eq!(remote_transport("https://cache/rig", false), None);
         assert_eq!(remote_transport("http://", false), None);
+        // a worker over ssh runs `jig worker`
+        let worker = |worker| worker_transport(worker);
+        let ssh = "ssh -o BatchMode=yes -p 2222 build -- jig worker --stdio".split(' ').map(String::from).collect();
+        assert_eq!(worker("ssh://build:2222"), Some(Transport::Command(ssh)));
+        assert_eq!(worker("tcp://build:7000"), Some(Transport::Tcp("build:7000".into())));
+        assert_eq!(worker("http://build"), None);
     }
 }

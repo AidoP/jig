@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 20;
+const VERSION: u32 = 21;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -63,6 +63,8 @@ pub struct Database<'a> {
     pub push: bool,
     /// The file of the token for the remote cache, or empty without one.
     pub token_file: &'a str,
+    /// The workers cached edges are sent to.
+    pub workers: Vec<&'a str>,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -156,6 +158,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.remote_cache)?;
     write_u32(w, u32::from(database.push))?;
     write_str(w, database.token_file)?;
+    write_strs(w, &database.workers)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -217,6 +220,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         remote_cache: r.str()?,
         push: r.bool()?,
         token_file: r.str()?,
+        workers: r.strs()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -338,6 +342,7 @@ mod tests {
             remote_cache: "ssh://cache",
             push: true,
             token_file: "/home/user/.config/jig/token",
+            workers: vec!["ssh://build", "tcp://worker:7000"],
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },

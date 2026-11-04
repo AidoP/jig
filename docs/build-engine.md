@@ -287,8 +287,10 @@ and inputs is fetched instead of run.
      sets of discovered inputs that have been seen for `k1`.
   2. For each set, `k2 = H(k1, hashes of those inputs as they are now)` leads to a result: output blobs, captured
      output, and the depfile rewritten with paths relative to the root.
-- **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host), the sysroot's manifest and the
-  `RUSTUP_TOOLCHAIN` in the action. It's computed once per configuration and given to each cached edge in the graph.
+- **Toolchain identity.** This is a hash of `rustc -vV` (version, commit hash and host) and the files rustup writes to
+  the sysroot, its channel's manifest and list of components, by their paths within the sysroot, so that a toolchain
+  has the same identity wherever it is installed, as a worker finds it. A `RUSTUP_TOOLCHAIN` given by `+<toolchain>` is
+  in the action. It's computed once per configuration and given to each cached edge in the graph.
 - **Relocation.** A hit in another checkout needs outputs that don't contain the checkout's path.
   - Every path jig gives rustc is relative to the build directory, and rustc's paths are remapped to be relative to
     the project root. The sysroot's sources are already remapped by rustup's builds of the standard library.
@@ -1123,9 +1125,88 @@ implementation of that trait, so `generate.rs` doesn't change.
 
 ### Phase 6: distributed execution
 
-- Add `jig worker`, capability reports, uploading only missing blobs, and running actions in sandboxes.
-- Add platform constraints on edges, the proc-macro and link rules, and the fallback to a local run.
-- Run tests remotely on workers whose host is the test's target.
+#### Steps
+
+1. **Done:** `jig worker`, which runs the actions of cached edges a build sends it once its own jobs are full
+   (protocol version 5).
+   - **`rig::worker`.** A worker serves the remote cache's protocol, and `EXECUTE`, with a `Request`:
+     - the identity of the action's toolchain;
+     - the action, with the build's directory replaced by a marker, as in its cache key;
+     - the variables it is given: the build's, and the values of those it passes on;
+     - the names of those it inherits from the worker, `PATH`, `HOME` and the others which locate its tools;
+     - the blob of each input, declared and discovered, by its path relative to the build's directory;
+     - and the paths of its outputs and depfile.
+   - **Inputs.** The client asks which blobs the worker is missing, and sends only those, from their files. A worker
+     takes blobs, which are checked against their hashes, though not results or manifests, which only a cache which
+     takes pushes does.
+   - **The sandbox.** `Executor::execute` runs the action in a new directory under `<cache>/work`. The build's
+     directory is as deep in it as the paths leave it with `..`, in directories named `.rig-<n>`, which the paths don't
+     name. The inputs are hard links to the worker's blobs, or copies where it can't link, or for one which is
+     executable. The marker is replaced by the directory, and the action runs as a cached edge does here. The outputs
+     it writes are added to the worker's cache, with what it printed, and the directory is removed.
+     - A path which is absolute, or has `..` after a name, is refused, so nothing is written outside the directory.
+     - The reply is whether the action succeeded, and its result, as a cache stores one. The client fetches the blobs
+       it doesn't have, and restores the outputs as it restores a hit.
+     - A toolchain the worker doesn't have is `NOT_FOUND`, and the client doesn't send it that toolchain's edges again
+       in the build.
+     - Actions run on threads of their own, `--jobs`, so that requests for blobs aren't held up behind them.
+   - **The toolchains.** `jig worker` has each toolchain `rustup toolchain list` lists, run with `RUSTUP_TOOLCHAIN`,
+     and the `rustc` in `PATH`, by their identities. They are found when the first action is sent, so that a build
+     which connects is answered at once.
+     - The identity is now of the sysroot's files by their paths within it, and not of the name the toolchain was
+       chosen by, as one toolchain has several names, and a name given with `+<toolchain>` is in the action anyway.
+   - **Which edges.** `exec::build` sends an edge to a worker when:
+     - its jobs are full, and a worker has a job free;
+     - it is cached, hermetic and not in the console pool;
+     - it has run before, so that what it discovered is known;
+     - and every path it has leads from the build's directory.
+     The worker's jobs are counted apart from the build's, and don't take the jobserver's tokens.
+   - **Fallback.** An edge which the worker refuses, which fails there, or which doesn't write every output, runs
+     here, on the thread which waited for the worker. An action which reads a file it wasn't sent fails there, as
+     the file isn't there, so a new module, which its last depfile doesn't list, runs here, and is found then.
+   - **Connecting.** Workers are connected to on threads of their own once a build has an edge which could run on
+     one, and are only sent edges once they are connected, so the build never waits for ssh.
+   - **jig.**
+     - `jig worker --stdio [--jobs <n>]`, or `jig worker --listen <address> --token-file <path> [--jobs <n>]`, which
+       needs a token, as the worker runs what it is sent.
+     - The property `workers`, or `JIG_WORKERS`, with the workers separated by `;`. Each is
+       `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` there, `tcp://<host>:<port>`, with the
+       token of `cache/token-file`, or a command. They are resolved when configuring, as the cache's settings are, and
+       recorded in `.jig` (version 21).
+     - What runs on a worker is added to the local cache, and pushed to the remote cache, as what runs here is.
+   - **Tests.**
+     - rig, worker:
+       - Requests encoded and decoded.
+       - How paths leave the build's directory, and those which don't lead from it.
+       - An action run with its inputs, a directory down, with the marker replaced and its toolchain's variables. Its
+         output is kept, an output it doesn't write is left out, and the directory is removed.
+       - A failing action sent back with what it printed.
+       - Another toolchain, a path outside, and a missing blob refused.
+     - rig, remote: a cache which isn't a worker runs nothing. A worker over pipes reports its jobs, is sent the input,
+       runs the action, and its outputs are fetched. Another toolchain is refused, and not asked for again.
+     - rig, exec: with one job, the edges which don't fit run on a worker, once they have run here. One which reads a
+       file it doesn't declare or discover fails there and runs here. What ran there is recorded and cached. A worker
+       without the toolchain runs nothing.
+     - jig: `JIG_WORKERS` overrides `workers`, and what isn't a worker, such as `http://`, is an error.
+     - Integration: with `-j 1`, `jig worker --stdio` run by `env` with its own cache, in place of ssh.
+       - Five independent crates' outputs are removed after a first build.
+       - The second build sends the worker their inputs. The libraries it writes are the same, byte for byte, as those
+         written here, and the diagnostics are shown.
+       - A worker which can't be run builds nothing, and the build goes on.
+   - **Not done yet:**
+     - An interrupted build doesn't stop what runs on a worker.
+     - An edge which runs here after its worker failed it runs beyond the build's jobs.
+     - A worker must have the identical toolchain, of the same host, so it's of the client's platform; step 3 relaxes
+       that.
+2. Capability reports: on connecting, a worker reports its host triple, its toolchains with their installed targets,
+   and its tags, and can install a toolchain with rustup if it is allowed to. `jig workers` shows them.
+3. Platform constraints on edges: `any`, `host == <triple>` or tags, matched against what workers report.
+   - Proc-macro crates and edges linked with a system linker need the platform they were built on. Edges which link
+     with `rust-lld` can run on any platform.
+   - An edge which failed remotely because a file was missing is marked local-only until its inputs change.
+4. Scheduling by the estimated time to transfer an edge's inputs and outputs against its wait here, from the durations
+   in the log. Interrupts are passed on to workers.
+5. Tests run on workers whose host is the test's target.
 
 ### Phase 7: later
 

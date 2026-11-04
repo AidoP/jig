@@ -76,6 +76,10 @@ impl Rig<'_> {
         // variable changes, so that a cached command runs the toolchain it is identified by, rather than rustup's default
         options.locating.extend(["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"].map(String::from));
         options.cache = self.cache.open(true)?;
+        // workers run cached edges, whose outputs are fetched into the cache
+        if options.cache.is_some() {
+            options.workers = self.cache.workers()?;
+        }
         Ok(options)
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.

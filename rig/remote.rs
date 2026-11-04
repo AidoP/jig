@@ -1,6 +1,7 @@
 //! A remote cache: a [`Cache`] on another machine, or in another process, spoken to over a stream of bytes, such as
 //! the stdin and stdout of `ssh host jig serve --stdio`, which [`serve`] answers, or a store of files served over
-//! HTTP, by [`crate::http`].
+//! HTTP, by [`crate::http`]. A server of the stream's protocol can also be a worker, which runs actions, as
+//! [`crate::worker`] describes.
 //!
 //! Over HTTP, a blob is at `<url>/cas/<the first two digits of its hash>/<the rest>`, a result at `<url>/ac/<key>` and a
 //! manifest at `<url>/mf/<key>`, in hexadecimal, as they are in a cache's directory, so that a server of the files of
@@ -17,7 +18,8 @@
 //! little-endian `u32`s and strings are their length followed by their UTF-8 bytes.
 //!
 //! - The client sends `HELLO`, with the magic bytes and the version, and the server replies `HELLO`, with the version,
-//!   whether it takes pushes, `1` or `0`, and whether it needs a token, `1` followed by a random nonce of 32 bytes,
+//!   whether it takes pushes, `1` or `0`, the number of actions it runs at once as a worker, or `0` if it is not one,
+//!   and whether it needs a token, `1` followed by a random nonce of 32 bytes,
 //!   or `0`, or `ERROR` with why it does not speak the version.
 //! - A server which needs a token, as one which is reached over TCP does, answers nothing until the client sends
 //!   `AUTH`, with the BLAKE3 hash of the token and the nonce, which it replies to with `OK`, or `ERROR`, ending the
@@ -33,7 +35,12 @@
 //! - `PUT_BLOB`, with a hash and the blob, `PUT_RESULT`, with a key and the result as it is stored, and
 //!   `ADD_TO_MANIFEST`, with a key and the inputs and environment variables an edge discovered, as two lists of
 //!   strings, are replied to with `OK`, or `ERROR` with why, as when the server does not take pushes, or what was sent
-//!   is not valid.
+//!   is not valid. A worker takes blobs, as the inputs of the actions it runs, though not results or manifests, unless
+//!   it takes pushes.
+//! - `EXECUTE`, with a [`crate::worker::Request`], is replied to by a worker with `FOUND`, whether the action
+//!   succeeded, `1` or `0`, and its result as a cache stores one, whose blobs the worker has, `NOT_FOUND` if it does
+//!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
+//!   that requests for blobs are answered while they run.
 //!
 //! A blob larger than a part, a MiB, is sent in parts, whether it is a reply to `GET_BLOB` or the request `PUT_BLOB`:
 //! a frame of the kind `MORE` with the id of the request for each part but the last, then the frame of the reply or
@@ -59,9 +66,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use crate::cache::{Cache, Discovery, Hash};
+use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -72,6 +80,7 @@ const PUT_BLOB: u8 = 6;
 const PUT_RESULT: u8 = 7;
 const ADD_TO_MANIFEST: u8 = 8;
 const AUTH: u8 = 9;
+const EXECUTE: u8 = 10;
 const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
@@ -134,12 +143,12 @@ fn read_frame(r: &mut dyn Read) -> std::io::Result<Option<Frame>> {
     Ok(Some((kind[0], id, payload)))
 }
 
-fn push_str(bytes: &mut Vec<u8>, string: &str) {
+pub(crate) fn push_str(bytes: &mut Vec<u8>, string: &str) {
     bytes.extend_from_slice(&(string.len() as u32).to_le_bytes());
     bytes.extend_from_slice(string.as_bytes());
 }
 
-fn push_strs(bytes: &mut Vec<u8>, strings: &[String]) {
+pub(crate) fn push_strs(bytes: &mut Vec<u8>, strings: &[String]) {
     bytes.extend_from_slice(&(strings.len() as u32).to_le_bytes());
     for string in strings {
         push_str(bytes, string);
@@ -147,27 +156,27 @@ fn push_strs(bytes: &mut Vec<u8>, strings: &[String]) {
 }
 
 /// Reads the parts of a payload.
-struct Payload<'a>(&'a [u8]);
+pub(crate) struct Payload<'a>(pub(crate) &'a [u8]);
 impl<'a> Payload<'a> {
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let (taken, rest) = self.0.split_at_checked(len)?;
         self.0 = rest;
         Some(taken)
     }
-    fn hash(&mut self) -> Option<Hash> {
+    pub(crate) fn hash(&mut self) -> Option<Hash> {
         self.take(32)?.try_into().ok()
     }
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
-    fn str(&mut self) -> Option<String> {
+    pub(crate) fn str(&mut self) -> Option<String> {
         let len = self.u32()? as usize;
         Some(std::str::from_utf8(self.take(len)?).ok()?.to_string())
     }
-    fn strs(&mut self) -> Option<Vec<String>> {
+    pub(crate) fn strs(&mut self) -> Option<Vec<String>> {
         (0..self.u32()?).map(|_| self.str()).collect()
     }
-    fn hashes(&mut self) -> Option<Vec<Hash>> {
+    pub(crate) fn hashes(&mut self) -> Option<Vec<Hash>> {
         (0..self.u32()?).map(|_| self.hash()).collect()
     }
 }
@@ -190,6 +199,8 @@ struct Connection {
     failed: Arc<Mutex<Option<String>>>,
     /// Whether the server takes pushes.
     pushes: bool,
+    /// The number of actions the server runs at once, as a worker, or `0` if it is not one.
+    jobs: usize,
     process: Mutex<Option<Process>>,
     /// The socket of a connection over TCP, which is shut down to end it, as the thread which reads it holds it too.
     socket: Option<std::net::TcpStream>,
@@ -256,7 +267,8 @@ impl Connection {
             }
         });
         let process = Mutex::new(process);
-        Self { writer: Mutex::new(writer), waiting, next: AtomicU32::new(1), failed, pushes: false, process, socket: None }
+        let writer = Mutex::new(writer);
+        Self { writer, waiting, next: AtomicU32::new(1), failed, pushes: false, jobs: 0, process, socket: None }
     }
     fn fail(&self, why: String) {
         if let Ok(mut failed) = self.failed.lock() {
@@ -409,6 +421,8 @@ pub struct Remote {
     pusher: Mutex<Option<(Sender<Push>, std::thread::JoinHandle<()>)>>,
     /// The client of a server over HTTP, with why it failed, once it has, if the remote cache is one.
     http: Option<Arc<Http>>,
+    /// The identities of the toolchains which the server, as a worker, does not have.
+    refused: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A server of files over HTTP, and why it failed, once it has, after which it is not used.
@@ -424,8 +438,8 @@ impl std::fmt::Debug for Remote {
 
 impl Remote {
     fn with_state(transport: Transport, push: bool, state: State) -> Self {
-        let (manifests, pusher) = (Mutex::default(), Mutex::default());
-        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher, http: None }
+        let (manifests, pusher, refused) = (Mutex::default(), Mutex::default(), Mutex::default());
+        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher, http: None, refused }
     }
     /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
     /// results are pushed to with `push`, if it takes them.
@@ -539,10 +553,11 @@ impl Remote {
         hello.extend_from_slice(&VERSION.to_le_bytes());
         let receiver = connection.send(HELLO, &hello);
         match receiver.and_then(|receiver| receiver.recv().ok()) {
-            Some((HELLO, payload)) if payload.len() >= 6 && payload[..4] == VERSION.to_le_bytes() => {
+            Some((HELLO, payload)) if payload.len() >= 10 && payload[..4] == VERSION.to_le_bytes() => {
                 connection.pushes = payload[4] == 1;
-                if payload[5] == 1 {
-                    let nonce = payload.get(6..38).ok_or("the server sent no nonce")?;
+                connection.jobs = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]) as usize;
+                if payload[9] == 1 {
+                    let nonce = payload.get(10..42).ok_or("the server sent no nonce")?;
                     let token = self.token.as_deref().ok_or("the server needs a token")?;
                     // the reply is taken as it is, as the server ends the connection once it refuses the token
                     let receiver = connection.send(AUTH, &proof(token, nonce));
@@ -714,6 +729,77 @@ impl Remote {
         });
         let push = Push { local, first: *first, second: *second, discovery: discovery.clone() };
         sender.send(push).is_ok()
+    }
+    /// Returns the number of actions the server runs at once, as a worker, connecting to it to find out, or `0` if it
+    /// is not one, or has failed.
+    #[must_use]
+    pub fn jobs(&self) -> usize {
+        if self.http.is_some() {
+            return 0;
+        }
+        self.connection().map_or(0, |connection| connection.jobs)
+    }
+    /// Returns the number of actions the server runs at once, as a worker, if it has been connected to, without waiting
+    /// for a connection which is being made, or `0`.
+    #[must_use]
+    pub fn connected_jobs(&self) -> usize {
+        match self.state.try_lock().as_deref() {
+            Ok(State::Connected(connection)) if !connection.has_failed() => connection.jobs,
+            _ => 0,
+        }
+    }
+    /// Whether the server, as a worker, may have a toolchain: whether it has not refused an action of it.
+    #[must_use]
+    pub fn may_have(&self, identity: &str) -> bool {
+        self.refused.lock().is_ok_and(|refused| !refused.contains(identity))
+    }
+    /// Run an action on the server, as a worker, first sending the blobs of its inputs which it does not have, from
+    /// their files, relative to the build's directory. The blobs of the outputs and what it printed are left on the
+    /// worker, to be fetched.
+    ///
+    /// # Errors
+    ///
+    /// If the worker does not have the toolchain, which it is not asked again, or could not run the action, as when an
+    /// input changed as it was sent, or the connection failed, after which the worker is not used again.
+    pub fn execute(&self, dir: &std::path::Path, request: &Request) -> Result<Executed, Refused> {
+        let failed = || Refused::Error(self.error().unwrap_or_else(|| "the worker cannot be reached".into()));
+        let connection = self.connection().ok_or_else(failed)?;
+        let missing = self.missing(&request.blobs()).ok_or_else(failed)?;
+        let mut sent = Vec::new();
+        for blob in &missing {
+            let Some(input) = request.inputs.iter().find(|input| input.blob == *blob) else {
+                continue;
+            };
+            let path = dir.join(&input.path);
+            let (file, size) = std::fs::File::open(&path)
+                .and_then(|file| Ok((file.metadata()?.len(), file)))
+                .map(|(size, file)| (file, size))
+                .map_err(|error| Refused::Error(format!("failed to read {path:?}: {error}")))?;
+            sent.push(connection.send_parts(PUT_BLOB, blob, BufReader::new(file), size));
+        }
+        // a blob which is refused, as its file changed after it was hashed, fails only this action
+        for receiver in sent {
+            match receiver.and_then(|receiver| receiver.recv().ok()) {
+                Some((OK, _)) => (),
+                Some((ERROR, message)) => return Err(Refused::Error(String::from_utf8_lossy(&message).into_owned())),
+                _ => return Err(failed()),
+            }
+        }
+        let reply = connection.send(EXECUTE, &request.encode()).and_then(|receiver| receiver.recv().ok());
+        match reply {
+            Some((FOUND, payload)) => Executed::decode(&payload).ok_or_else(|| {
+                connection.fail("an invalid reply from the worker".into());
+                failed()
+            }),
+            Some((NOT_FOUND, _)) => {
+                if let Ok(mut refused) = self.refused.lock() {
+                    refused.insert(request.identity.clone());
+                }
+                Err(Refused::Toolchain)
+            },
+            Some((ERROR, message)) => Err(Refused::Error(String::from_utf8_lossy(&message).into_owned())),
+            _ => Err(failed()),
+        }
     }
     /// Wait until what has been queued has been pushed, or failed to be.
     pub fn wait_for_pushes(&self) {
@@ -916,6 +1002,16 @@ fn connect_tcp(address: &str) -> std::io::Result<std::net::TcpStream> {
     Err(error)
 }
 
+/// What a server serves: a cache, which takes pushes if `push`, to clients which prove they have the token, if there
+/// is one, and runs actions as a worker, with the executor, if there is one.
+#[derive(Clone, Copy)]
+pub struct Server<'a> {
+    pub cache: &'a Cache,
+    pub push: bool,
+    pub token: Option<&'a [u8]>,
+    pub executor: Option<&'a crate::worker::Executor>,
+}
+
 /// Serve a cache to every client which connects to a listener over TCP, each on a thread of its own, as `jig serve
 /// --listen` does, taking pushes if `push`, from clients which prove they have the token. `after` is run once each
 /// client is done, as to collect the cache. It serves until the listener fails.
@@ -930,19 +1026,40 @@ pub fn listen(
     token: &[u8],
     after: &(dyn Fn() + Sync),
 ) -> std::io::Result<()> {
-    std::thread::scope(|scope| {
-        loop {
-            let (stream, _) = listener.accept()?;
-            scope.spawn(move || {
-                let _ = stream.set_nodelay(true);
-                if let Ok(reader) = stream.try_clone() {
-                    // a client which fails, or is refused, ends only its connection
-                    let _ = serve_with_token(cache, reader, stream, push, Some(token));
-                }
-                after();
-            });
-        }
-    })
+    Server { cache, push, token: Some(token), executor: None }.listen(listener, after)
+}
+
+impl Server<'_> {
+    /// Serve a client over streams until it ends them, answering requests on several threads, and running actions on
+    /// as many as the executor runs at once.
+    ///
+    /// # Errors
+    ///
+    /// If the streams cannot be read or written, the client does not speak the protocol, or does not have the token.
+    pub fn serve(&self, reader: impl Read, writer: impl Write + Send) -> std::io::Result<()> {
+        serve_as(*self, reader, writer)
+    }
+    /// Serve every client which connects to a listener over TCP, each on a thread of its own, running `after` once each
+    /// is done, until the listener fails.
+    ///
+    /// # Errors
+    ///
+    /// If the listener cannot accept a connection.
+    pub fn listen(&self, listener: &std::net::TcpListener, after: &(dyn Fn() + Sync)) -> std::io::Result<()> {
+        std::thread::scope(|scope| {
+            loop {
+                let (stream, _) = listener.accept()?;
+                scope.spawn(move || {
+                    let _ = stream.set_nodelay(true);
+                    if let Ok(reader) = stream.try_clone() {
+                        // a client which fails, or is refused, ends only its connection
+                        let _ = self.serve(reader, stream);
+                    }
+                    after();
+                });
+            }
+        })
+    }
 }
 
 /// Serve a cache over streams, as `jig serve --stdio` does on its stdin and stdout, until the client ends the stream,
@@ -967,6 +1084,14 @@ pub fn serve_with_token(
     push: bool,
     token: Option<&[u8]>,
 ) -> std::io::Result<()> {
+    Server { cache, push, token, executor: None }.serve(reader, writer)
+}
+
+fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std::io::Result<()> {
+    let Server { cache, push, token, executor } = server;
+    // a worker takes the blobs of the inputs of its actions, which are checked against their hashes, though not
+    // results, which only a cache which takes pushes does
+    let blobs = push || executor.is_some();
     let (mut reader, mut writer) = (BufReader::new(reader), BufWriter::new(writer));
     let Ok(Some((HELLO, id, hello))) = read_frame(&mut reader) else {
         return Err(invalid("the client does not speak rig's protocol"));
@@ -980,6 +1105,7 @@ pub fn serve_with_token(
     }
     let mut reply = VERSION.to_le_bytes().to_vec();
     reply.push(u8::from(push));
+    reply.extend_from_slice(&(executor.map_or(0, |executor| executor.jobs.max(1)) as u32).to_le_bytes());
     let nonce = token.map(|_| nonce()).transpose()?;
     match &nonce {
         Some(nonce) => {
@@ -1006,6 +1132,9 @@ pub fn serve_with_token(
     let writer = Mutex::new(writer);
     let (requests, work) = std::sync::mpsc::channel::<Frame>();
     let work = Mutex::new(work);
+    // actions run on threads of their own, so that they do not hold up the requests for blobs
+    let (actions, running) = std::sync::mpsc::channel::<(u32, Vec<u8>)>();
+    let running = Mutex::new(running);
     let written: Mutex<std::io::Result<()>> = Mutex::new(Ok(()));
     let reply = |kind: u8, id: u32, payload: &[u8]| {
         let result = writer.lock().map_or(Ok(()), |mut writer| write_frame(&mut *writer, kind, id, payload));
@@ -1024,7 +1153,25 @@ pub fn serve_with_token(
                         send_blob(cache, &key, &|kind, payload| reply(kind, id, payload));
                         continue;
                     }
-                    let (kind, payload) = answer(cache, push, kind, &payload);
+                    let (kind, payload) = answer(cache, push, blobs, kind, &payload);
+                    reply(kind, id, &payload);
+                }
+            });
+        }
+        for _ in 0..executor.map_or(0, |executor| executor.jobs.max(1)) {
+            scope.spawn(|| {
+                while let Ok(Ok((id, payload))) = running.lock().map(|running| running.recv()) {
+                    let Some(executor) = executor else {
+                        break;
+                    };
+                    let (kind, payload) = match crate::worker::Request::decode(&payload) {
+                        Some(request) => match executor.execute(cache, &request) {
+                            Ok(executed) => (FOUND, executed.encode()),
+                            Err(crate::worker::Refused::Toolchain) => (NOT_FOUND, Vec::new()),
+                            Err(crate::worker::Refused::Error(message)) => (ERROR, message.into_bytes()),
+                        },
+                        None => (ERROR, b"an invalid action".to_vec()),
+                    };
                     reply(kind, id, &payload);
                 }
             });
@@ -1035,12 +1182,12 @@ pub fn serve_with_token(
         let read = loop {
             match read_frame(&mut reader) {
                 Ok(Some((MORE, id, part))) => {
-                    let upload = uploads.entry(id).or_insert_with(|| cache.blob_writer().ok().filter(|_| push));
+                    let upload = uploads.entry(id).or_insert_with(|| cache.blob_writer().ok().filter(|_| blobs));
                     if let Some(upload) = upload {
                         upload.write(&part);
                     }
                 },
-                Ok(Some((PUT_BLOB, id, payload))) if push => {
+                Ok(Some((PUT_BLOB, id, payload))) if blobs => {
                     let (hash, last) = payload.split_at(payload.len().min(32));
                     let upload = uploads.remove(&id).unwrap_or_else(|| cache.blob_writer().ok());
                     let added = <Hash>::try_from(hash).ok().zip(upload).is_some_and(|(hash, mut upload)| {
@@ -1053,6 +1200,11 @@ pub fn serve_with_token(
                         reply(ERROR, id, b"a blob which does not have its hash");
                     }
                 },
+                Ok(Some((EXECUTE, id, payload))) if executor.is_some() => {
+                    if actions.send((id, payload)).is_err() {
+                        break Ok(());
+                    }
+                },
                 Ok(Some((kind, id, payload))) => {
                     uploads.remove(&id);
                     if requests.send((kind, id, payload)).is_err() {
@@ -1063,8 +1215,9 @@ pub fn serve_with_token(
                 Err(error) => break Err(error),
             }
         };
-        // the threads stop once there are no more requests
+        // the threads stop once there are no more requests, and the actions which run have finished
         drop(requests);
+        drop(actions);
         read
     })?;
     written.into_inner().unwrap_or(Ok(()))
@@ -1108,12 +1261,15 @@ fn same(lhs: &[u8], rhs: &[u8]) -> bool {
 }
 
 /// Returns the reply to a request.
-fn answer(cache: &Cache, push: bool, kind: u8, payload: &[u8]) -> (u8, Vec<u8>) {
+fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (u8, Vec<u8>) {
     let error = |message: &str| (ERROR, message.as_bytes().to_vec());
     let found = |found: Option<Vec<u8>>| found.map_or((NOT_FOUND, Vec::new()), |found| (FOUND, found));
     let mut p = Payload(payload);
-    if matches!(kind, PUT_BLOB | PUT_RESULT | ADD_TO_MANIFEST) && !push {
+    if (matches!(kind, PUT_RESULT | ADD_TO_MANIFEST) && !push) || (kind == PUT_BLOB && !blobs) {
         return error("the server does not take pushes");
+    }
+    if kind == EXECUTE {
+        return error("the server is not a worker");
     }
     if matches!(kind, MISSING | GET_RESULTS) {
         let Some(keys) = p.hashes() else {
@@ -1152,6 +1308,17 @@ pub(crate) fn served(cache: Cache, push: bool, pushes: bool) -> Remote {
     let (server, replies) = std::io::pipe().unwrap();
     std::thread::spawn(move || serve(&cache, requests, replies, pushes));
     Remote::streams(server, client, push)
+}
+
+/// Returns a worker which runs actions with an executor, with `cache` as its store, served over pipes.
+#[cfg(test)]
+pub(crate) fn served_worker(cache: Cache, executor: crate::worker::Executor) -> Remote {
+    let (requests, client) = std::io::pipe().unwrap();
+    let (server, replies) = std::io::pipe().unwrap();
+    std::thread::spawn(move || {
+        Server { cache: &cache, push: false, token: None, executor: Some(&executor) }.serve(requests, replies)
+    });
+    Remote::streams(server, client, false)
 }
 
 /// Returns a remote cache which `cache` is served as, over pipes, to a client which has the token, if there is one,
@@ -1249,8 +1416,8 @@ mod tests {
         std::thread::spawn(move || {
             let mut requests = requests;
             while let Ok(Some((kind, id, _))) = read_frame(&mut requests) {
-                let reply: &[u8] = if kind == HELLO { &[4, 0, 0, 0, 0, 0] } else { b"corrupted" };
-                let _ = write_frame(&mut replies, if kind == HELLO { HELLO } else { FOUND }, id, reply);
+                let reply = if kind == HELLO { hello_reply() } else { b"corrupted".to_vec() };
+                let _ = write_frame(&mut replies, if kind == HELLO { HELLO } else { FOUND }, id, &reply);
             }
         });
         let client_cache = cache("corrupted").with_remote(Arc::new(Remote::streams(server, client, false)));
@@ -1264,6 +1431,59 @@ mod tests {
     }
 
     #[test]
+    fn runs_actions_only_as_a_worker() {
+        use crate::worker::{Executor, Input, Refused, Request, Toolchain};
+        let dir = std::env::temp_dir().join(format!("rig-remote-{}-worker", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/in"), "input\n").unwrap();
+        let blob = crate::blake3::hash(b"input\n");
+        let request = Request {
+            identity: "toolchain".into(),
+            action: crate::Action::Shell("cp in out && echo copied".into()),
+            env: Vec::new(),
+            locating: vec!["PATH".into()],
+            inputs: vec![Input { path: "in".into(), blob, executable: false }],
+            outputs: vec!["out".into()],
+        };
+        // a cache which is not a worker runs nothing, and does not take blobs
+        let plain = cache("not-a-worker");
+        let _ = std::fs::remove_dir_all(plain.dir());
+        let server = served(plain, false, false);
+        assert_eq!(server.jobs(), 0);
+        assert!(matches!(server.execute(&dir.join("build"), &request), Err(Refused::Error(_))));
+        // a worker is sent the input, runs the action, and keeps its output for the client to fetch
+        let store = cache("worker-store");
+        let toolchains = vec![Toolchain { identity: "toolchain".into(), env: Vec::new() }];
+        let executor = Executor::new(store.dir().join("work"), 3, move || toolchains.clone());
+        let worker = served_worker(store.clone(), executor);
+        assert_eq!(worker.jobs(), 3);
+        let executed = worker.execute(&dir.join("build"), &request).unwrap();
+        assert!(executed.succeeded);
+        assert!(store.has_blob(&blob));
+        let local = cache("worker-client");
+        let blobs: Vec<Hash> = crate::cache::entry_blobs(&executed.entry).copied().collect();
+        assert_eq!(worker.fetch_blobs(&local, &blobs).len(), 2);
+        assert_eq!(local.read_blob(&executed.entry.outputs[0].blob).unwrap(), b"input\n");
+        assert_eq!(local.read_blob(&executed.entry.printed).unwrap(), b"copied\n");
+        // another toolchain is refused, and not asked for again, while the worker goes on
+        let other = Request { identity: "other".into(), ..request.clone() };
+        assert_eq!(worker.execute(&dir.join("build"), &other), Err(Refused::Toolchain));
+        assert!(!worker.may_have("other") && worker.may_have("toolchain"));
+        assert!(worker.execute(&dir.join("build"), &request).is_ok());
+        assert!(worker.error().is_none());
+        for cache in [store, local] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reply to `HELLO` of a server which does not take pushes, is not a worker, and needs no token.
+    fn hello_reply() -> Vec<u8> {
+        [VERSION.to_le_bytes().as_slice(), &[0], &0u32.to_le_bytes(), &[0]].concat()
+    }
+
+    #[test]
     fn gives_each_reply_to_its_request() {
         // a server which answers two requests for blobs the other way round
         let (a, b) = (crate::blake3::hash(b"a"), crate::blake3::hash(b"b"));
@@ -1272,7 +1492,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut requests = requests;
             let Ok(Some((HELLO, id, _))) = read_frame(&mut requests) else { return };
-            let _ = write_frame(&mut replies, HELLO, id, &[4, 0, 0, 0, 0, 0]);
+            let _ = write_frame(&mut replies, HELLO, id, &hello_reply());
             let mut pending = Vec::new();
             while let Ok(Some((_, id, payload))) = read_frame(&mut requests) {
                 pending.push((id, if payload == a { b"a" } else { b"b" }));
