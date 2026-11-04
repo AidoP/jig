@@ -227,7 +227,7 @@ fn build_ninja(dir: &Path, targets: &[&str]) -> (Ran, String) {
 
 fn build_rig(dir: &Path, targets: &[&str]) -> Ran {
     let graph = rig::Graph::load(&dir.join(rig_graph::FILE)).unwrap_or_else(|error| panic!("{error}"));
-    let mut state = rig::state::State::open(&dir.join(".rig")).unwrap_or_else(|error| panic!("{error}"));
+    let mut state = open_state(&dir.join(".rig"));
     let mut options = rig::exec::Options::new(dir);
     options.jobs = 4;
     options.keep_going = 0;
@@ -235,6 +235,22 @@ fn build_rig(dir: &Path, targets: &[&str]) -> Ran {
     let report = rig::exec::build(&graph, &mut state, &options, targets, &mut console);
     let report = report.unwrap_or_else(|error| panic!("{error}"));
     Ran { succeeded: report.succeeded(), edges: take_log(dir) }
+}
+
+/// Opens the state of a build, which the test's other threads can hold for a moment after this one closed it: a
+/// process which one of them is starting has a copy of every descriptor until it runs its program, the lock's
+/// among them.
+fn open_state(dir: &Path) -> rig::state::State {
+    let mut tries = 0;
+    loop {
+        match rig::state::State::open(dir) {
+            Err(rig::Error::Locked(_)) if tries < 100 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            },
+            state => return state.unwrap_or_else(|error| panic!("{error}")),
+        }
+    }
 }
 
 /// An edit to the files of a build, made to both directories.
