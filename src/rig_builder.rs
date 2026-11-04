@@ -74,6 +74,8 @@ impl Rig<'_> {
         if let Some(toolchain) = self.toolchain {
             options.env.push(("RUSTUP_TOOLCHAIN".into(), toolchain.into()));
         }
+        // rustup's proxies, such as `rustc`, find the toolchain with these, which is identified by its contents instead
+        options.locating.extend(["RUSTUP_HOME", "CARGO_HOME"].map(String::from));
         if let Some(dir) = std::env::var_os(CACHE).filter(|dir| !dir.is_empty()) {
             let dir = std::path::absolute(&dir).map_err(|error| Error::Rig(rig::Error::Io(dir.into(), error)))?;
             options.cache = Some(rig::cache::Cache::open(&dir).map_err(Error::Rig)?);

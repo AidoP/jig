@@ -9,7 +9,8 @@
 //! each name and value, then its working directory and the file of its stderr, each as `0`, or `1` followed by the
 //! path, then its description, its depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console,
 //! its flags, `1` if it is a generator, `2` if it is restat and `4` if it is hashed, then what identifies it in the
-//! cache as `0` if it is not cached, or `1` followed by the string, then its lists of nodes: outputs, implicit outputs,
+//! cache as `0` if it is not cached, or `1` followed by the string, then the environment variables it passes on, as a
+//! list of strings, then its lists of nodes: outputs, implicit outputs,
 //! inputs, implicit inputs and order-only inputs.
 
 use std::path::Path;
@@ -20,7 +21,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -70,6 +71,10 @@ impl Graph {
                     w.u32(1);
                     w.str(cache);
                 },
+            }
+            w.len(edge.pass_env().len());
+            for name in edge.pass_env() {
+                w.str(name);
             }
             for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
                 w.nodes(list);
@@ -135,6 +140,7 @@ impl Graph {
                 1 => Some(r.str()?.into()),
                 _ => return Err(Error::Format("invalid cache")),
             };
+            let pass_env = (0..r.u32()?).map(|_| r.str().map(String::from)).collect::<Result<Vec<_>, _>>()?;
             let edge = Edge {
                 kind,
                 description,
@@ -149,6 +155,7 @@ impl Graph {
                 restat: flags & RESTAT != 0,
                 hashed: flags & HASHED != 0,
                 cache,
+                pass_env,
             };
             graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
@@ -301,6 +308,7 @@ mod tests {
                 restat: true,
                 hashed: true,
                 cache: Some("toolchain".into()),
+                pass_env: vec!["CC".into(), "CFLAGS".into()],
                 ..Edge::default()
             })
             .unwrap();

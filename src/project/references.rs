@@ -253,6 +253,7 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
         "depends" => AttributeValue::Set(paths(&c.depends)),
         "cfg" => AttributeValue::Set(strings(&c.cfg)),
         "link-script" => AttributeValue::optional(c.link_script.as_deref().map(path)),
+        "pass-env" => AttributeValue::Set(strings(&c.pass_env)),
         "env" => {
             let entries = c.env.iter().map(|(name, value)| (name.clone(), Data::Str(value.clone()))).collect();
             AttributeValue::Set(Data::Dict(entries))

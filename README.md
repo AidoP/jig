@@ -532,6 +532,11 @@ A `crate` statement may be followed by indented attributes:
   their names to their values, such as `env [UART_BASE: uart-base]`, whose names are letters, digits and `_`. It can be
   repeated, and is also given to rust-analyzer. The crate is built again when its `cfg` or `env` change, as they are
   part of its command
+- `pass-env <names>`: the environment variables rustc inherits for the crate, which `env!` reads, as a name or a list
+  of them, such as `pass-env 'GIT_HASH'`. With rig, the crate is built again when one of their values changes, as
+  it is when a variable `env!` reads changes, and a crate which is cached, when `JIG_CACHE` is set, inherits only
+  these and those which locate tools: `PATH`, `HOME`, `TMPDIR`, `RUSTUP_HOME` and `CARGO_HOME`. So a cached crate
+  whose `env!` reads any other variable from the environment fails to compile, rather than being cached without it
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated
@@ -643,6 +648,11 @@ A `custom` statement is followed by indented attributes:
   directory it is in, or files which are not inputs. A program found in `PATH` is identified by its contents, and the
   project is configured again when it changes, while one which is a path is an input. A command which is cached is
   stamped by the contents of its files, whatever its `change-detection`. A test cannot be cached
+- `pass-env <names>`: the environment variables the command reads from those it inherits, as a name or a list of
+  them, such as `pass-env ['CC', 'CFLAGS']`. With rig, the command runs again when one of their values changes, and
+  a command which is cached inherits only these and those which locate tools, as a cached crate does, so that every
+  variable which can change its outputs is part of the key it is cached by. ninja passes on every variable, and tracks
+  none of them
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output

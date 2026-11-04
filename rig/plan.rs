@@ -74,18 +74,28 @@ impl Plan {
 }
 
 /// Returns the hash of an edge's action, which it runs again when it changes, with what identifies it in the cache if
-/// it is cached, as that identifies what else the action depends on, such as its toolchain.
+/// it is cached, as that identifies what else the action depends on, such as its toolchain, and the variables it
+/// passes on, as which it inherits are part of what it does.
 #[must_use]
 pub fn action_hash(edge: EdgeRef) -> u64 {
-    let hash = match edge.kind() {
+    let mut hash = match edge.kind() {
         EdgeKind::Alias => 0,
         EdgeKind::Command(Action::Shell(command)) => fnv1a(command.as_bytes()),
         EdgeKind::Command(Action::Exec(_)) => fnv1a(&action_bytes(edge)),
     };
-    match edge.cache() {
-        Some(identity) => fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", identity.as_bytes()].concat()),
-        None => hash,
+    if let Some(identity) = edge.cache() {
+        hash = fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", identity.as_bytes()].concat());
     }
+    if !edge.pass_env().is_empty() {
+        let mut bytes = hash.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"\0pass-env");
+        for name in edge.pass_env() {
+            bytes.extend_from_slice(&name.len().to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
+        hash = fnv1a(&bytes);
+    }
+    hash
 }
 
 /// Returns an edge's action as bytes, which differ whenever it does: a shell command as it is, or each part of a
@@ -205,7 +215,14 @@ pub fn record(
         stamps.forget(output);
         outputs.push((graph.path(output).to_string(), stamps.node_as(output, edge.hashed(), None)));
     }
-    let env = discovered.env.iter().map(|name| (name.clone(), stamps.env(name))).collect();
+    // the variables it passes on, then those it discovered, each once
+    let mut names: Vec<&String> = edge.pass_env().iter().collect();
+    for name in &discovered.env {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let env = names.into_iter().map(|name| (name.clone(), stamps.env(name))).collect();
     let discovered = discovered.inputs.iter().map(|path| (path.clone(), stamps.path_as(path, edge.hashed(), None)));
     let discovered = discovered.collect();
     let start = start.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();

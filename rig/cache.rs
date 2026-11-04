@@ -329,13 +329,15 @@ impl Key {
 }
 
 /// Returns the first key of an edge: of what identifies it in the cache, its action, as
-/// [`crate::plan::action_bytes`] gives it, the variables every command is given, its outputs and depfile, and the
-/// contents of the inputs it declares, by path, or that they are missing.
+/// [`crate::plan::action_bytes`] gives it, the variables every command is given, the hashes of the values of the
+/// variables it passes on, or that each is unset, its outputs and depfile, and the contents of the inputs it declares,
+/// by path, or that they are missing.
 #[must_use]
 pub fn first_key(
     identity: &str,
     action: &[u8],
     env: &[(String, String)],
+    passed: &[(&str, Option<&Hash>)],
     outputs: &[&str],
     depfile: Option<&str>,
     inputs: &[(&str, Option<&Hash>)],
@@ -345,6 +347,10 @@ pub fn first_key(
     key.part(&(env.len() as u64).to_le_bytes());
     for (name, value) in env {
         key.part(name.as_bytes()).part(value.as_bytes());
+    }
+    key.part(&(passed.len() as u64).to_le_bytes());
+    for (name, hash) in passed {
+        key.part(name.as_bytes()).hash(*hash);
     }
     key.part(&(outputs.len() as u64).to_le_bytes());
     for output in outputs {
@@ -526,7 +532,7 @@ mod tests {
         let hash = blake3::hash(b"a");
         let env = [("A".to_string(), "1".to_string())];
         let key = |identity, action: &[u8], env: &[(String, String)], inputs: &[(&str, Option<&Hash>)]| {
-            first_key(identity, action, env, &["out"], Some("out.d"), inputs)
+            first_key(identity, action, env, &[], &["out"], Some("out.d"), inputs)
         };
         let base = key("id", b"cc", &env, &[("a", Some(&hash))]);
         assert_eq!(base, key("id", b"cc", &env, &[("a", Some(&hash))]));
@@ -535,7 +541,8 @@ mod tests {
         assert_ne!(base, key("id", b"cc", &[], &[("a", Some(&hash))]));
         assert_ne!(base, key("id", b"cc", &env, &[("a", None)]));
         assert_ne!(base, key("id", b"cc", &env, &[("b", Some(&hash))]));
-        assert_ne!(base, first_key("id", b"cc", &env, &["out"], None, &[("a", Some(&hash))]));
+        assert_ne!(base, first_key("id", b"cc", &env, &[], &["out"], None, &[("a", Some(&hash))]));
+        assert_ne!(base, first_key("id", b"cc", &env, &[("A", None)], &["out"], Some("out.d"), &[("a", Some(&hash))]));
         // parts which run together differ
         assert_ne!(key("idc", b"c", &env, &[]), key("id", b"cc", &env, &[]));
         let second = second_key(&base, &[("a.h", Some(&hash))], &[]);

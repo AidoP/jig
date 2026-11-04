@@ -137,6 +137,8 @@ pub struct Build<'a> {
     pub hashed: bool,
     /// What identifies the edge in a cache, beside its action and inputs, if its results are cached.
     pub cache: Option<String>,
+    /// The environment variables the edge's action reads from those it inherits, whose values are its inputs.
+    pub pass_env: Vec<String>,
 }
 
 impl Manifest {
@@ -232,6 +234,7 @@ impl Manifest {
             edge.kind = EdgeKind::Command(build.action.clone().unwrap_or(Action::Shell(command)));
             edge.hashed = build.hashed;
             edge.cache.clone_from(&build.cache);
+            edge.pass_env.clone_from(&build.pass_env);
         }
         self.graph.add_edge(edge)?;
         Ok(())

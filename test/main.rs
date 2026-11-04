@@ -1524,6 +1524,57 @@ custom plain
 }
 
 #[test]
+fn pass_env() {
+    // the variables a command or crate passes on are its inputs, and the only ones, with those which locate tools,
+    // which a cached command or crate inherits
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-pass-env-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let cache_dir = cache.display().to_string();
+    let jig = |cached: &str| format!("\
+custom seen
+    output 'seen.txt'
+    command 'sh' '-c' 'printf \"%s %s\" \"${{{{JIG_TEST_PASSED-unset}}}}\" \"${{{{JIG_TEST_HIDDEN-unset}}}}\" > \"$1\"' 'sh' output
+    pass-env 'JIG_TEST_PASSED'
+{cached}
+crate app 'app.rs'
+    crate-type 'bin'
+    pass-env ['JIG_TEST_PASSED']
+log note app.pass-env
+");
+    let files = |cached: &str| [("Jig", jig(cached)), ("app.rs", "fn main() { print!(\"{}\", env!(\"JIG_TEST_PASSED\")); }\n".into())];
+    let run = |project: &Project, cached: bool, passed: &str| {
+        let mut command = Command::new(configure_path());
+        command.arg("build").env("JIG_TEST_PASSED", passed).env("JIG_TEST_HIDDEN", "hidden").current_dir(&project.dir);
+        if cached {
+            command.env("JIG_CACHE", &cache_dir);
+        }
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{stdout}");
+        let seen = std::fs::read_to_string(project.dir.join("build/seen.txt")).unwrap();
+        let app = Command::new(project.dir.join(format!("build/{}/app", project.host()))).output().unwrap();
+        (stdout.contains("CUSTOM seen"), seen, String::from_utf8(app.stdout).unwrap())
+    };
+    let [(_, jig), (_, app)] = files("");
+    let project = Project::new("pass-env", &[("Jig", &jig), ("app.rs", &app)]);
+    project.configure().ok().stderr("note: JIG_TEST_PASSED\n");
+    assert_eq!(run(&project, false, "one"), (true, "one hidden".into(), "one".into()));
+    if rig_engine() {
+        // with rig, a value which changes runs the command again, and compiles the crate again
+        assert!(!run(&project, false, "one").0);
+        assert_eq!(run(&project, false, "two"), (true, "two hidden".into(), "two".into()));
+        // and a cached command inherits only what it passes on
+        let [(_, jig), (_, app)] = files("    cache");
+        let project = Project::new("pass-env-cached", &[("Jig", &jig), ("app.rs", &app)]);
+        project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+        assert_eq!(run(&project, true, "three"), (true, "three unset".into(), "three".into()));
+    }
+    let project = Project::new("pass-env-invalid", &[("Jig", "custom c\n    output 'c'\n    command 'true'\n    pass-env 'A=B'\n")]);
+    project.configure().failed().stderr("A=B");
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn rig_rebuilds_when_a_crate_variable_changes() {
     // rig rebuilds a crate when a variable `env!` read changes, as rustc lists them in its dep-info
     let project = Project::new("rig-env", &[

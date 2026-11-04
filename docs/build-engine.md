@@ -823,7 +823,40 @@ implementation of that trait, so `generate.rs` doesn't change.
        - A second checkout, whose program is a copy in another directory, fetches it.
        - Changing the program configures the project again and runs it.
        - `cache` on a test is an error.
-4. Add the `pass-env` attribute and hermetic environments for cacheable actions.
+4. **Done:** the `pass-env` attribute and hermetic environments for cached actions.
+   - **`rig::Edge::pass_env`.** These are the variables an action reads from those it inherits, stored in the graph
+     (format version 5).
+     - They are inputs: recorded with the variables discovered from the depfile, so a value that changes is
+       `EnvChanged`.
+     - Their names are part of the action hash, so passing on another variable is `CommandChanged`.
+     - The hashes of their values are part of the first cache key.
+   - **Hermetic.** A cached edge (`EdgeRef::hermetic`) runs with its environment cleared, then given:
+     - the variables in `Options::locating`, which only locate tools and files, and so aren't inputs. They are `PATH`,
+       `HOME` and `TMPDIR` by default, and jig adds `RUSTUP_HOME` and `CARGO_HOME` for rustup's proxies;
+     - those it passes on;
+     - `Options::env`, its own variables, and the jobserver's `MAKEFLAGS`.
+
+     An edge that isn't cached inherits everything, as before.
+   - **Discovered variables aren't passed on.** A variable rustc lists as read by `env!` isn't known before the crate
+     first compiles, so a cached crate must declare it, with `env` or `pass-env`. Otherwise it fails to compile rather
+     than being cached without it.
+   - **`PATH`** isn't an input. The programs found in it are identified instead: rustc and clippy by the toolchain,
+     and a cached custom command's program by its contents (step 3).
+   - **jig.** `pass-env`, a name or a list of them, is an attribute of `custom` and of `crate`. A crate's applies to its
+     rustc, check, clippy and rustdoc edges, and it can be read as `<crate>.pass-env`. ninja passes on every variable
+     and tracks none.
+   - **Tests are left for phase 6.** They aren't edges and aren't cached, so `pass-env` on a `test` waits for running
+     tests on workers, where it will make them hermetic.
+   - **Checked.** jig builds itself and runs rig's tests hermetically, with `JIG_CACHE` set.
+   - **Tests.**
+     - rig, hermeticity: a cached edge sees only the locating and passed variables, and those the build gives. One
+       that isn't cached sees every variable.
+     - rig, change detection: a passed value that changes runs the edge again and misses in the cache, and changing it
+       back is a hit. Passing on another variable changes the command.
+     - An integration test with a custom command and a crate's `env!`:
+       - The command runs again and the crate compiles again when a passed value changes.
+       - Cached, the command doesn't see a variable it doesn't pass on.
+       - An invalid name is an error.
 5. Add `jig cache stats|gc|clear`, then use `~/.cache/jig` by default.
 
 ### Phase 5: the remote cache

@@ -59,6 +59,9 @@ pub struct Edge<'a> {
     pub hashed: bool,
     /// What identifies the edge's toolchain, if rig keeps its results in the cache, which ninja cannot.
     pub cache: Option<&'a str>,
+    /// The environment variables the edge's command reads from those it inherits, which rig tracks, and passes on when
+    /// it runs it in a hermetic environment, while ninja passes on every one.
+    pub pass_env: &'a [String],
 }
 
 /// What a build graph is written to.
