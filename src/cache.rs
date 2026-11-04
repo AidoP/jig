@@ -158,7 +158,7 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
         return Err(Error::MissingArg("--stdio"));
     }
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
-    let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout().lock(), push);
+    let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout(), push);
     settings.collect_if_due(&cache);
     served.map_err(Error::Serve)
 }

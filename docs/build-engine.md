@@ -948,10 +948,8 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Integration, with `jig serve --stdio --push` run by `env` with its own cache in place of ssh:
        - One checkout pushes, and another, with an empty local cache and no `rustc`, fetches every edge.
        - A remote that fails is warned of, and the build succeeds.
-   - **Not done yet.**
-     - Requests take turns on one connection, and blobs are sent whole in a frame. Several connections, or
-       streaming large blobs, should be measured first.
-     - The manifest is asked for on every lookup of a cached edge, a round trip each.
+   - **Not done yet,** at first: requests took turns on one connection, and the manifest was asked for on every lookup
+     of a cached edge, a round trip each. Step 3 does both.
 2. **Done:** the user's configuration, for settings such as the remote cache.
    - **The file.** It is `$XDG_CONFIG_HOME/jig/config`, or `~/.config/jig/config`, or what `JIG_CONFIG` gives, and
      `JIG_CONFIG=off` turns it off.
@@ -982,8 +980,41 @@ implementation of that trait, so `generate.rs` doesn't change.
        - Changing it configures again.
        - An error in it is reported at its path.
        - Creating it while it is missing configures again.
-3. A TCP transport for `jig serve`, with a shared token for private networks.
-4. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
+3. **Done:** concurrent requests on one connection, and fewer of them.
+   - **Request ids (protocol version 2).** Each frame has the id of its request, which its reply has.
+     - The client sends from any thread. A thread of the connection's own reads the replies, and gives each to the
+       request which waits for it, so one ssh session carries every thread's requests at once.
+     - The server reads requests in turn and answers them on four threads, in any order.
+     - A connection which fails gives every waiting request no reply, which fails it, and turns the remote off.
+   - **Lookups run on the jobs' threads.** The build's thread only finds an edge's first key. The job's thread looks
+     the result up and restores it, so edges which wait on the remote wait together, rather than each blocking the
+     build in turn.
+     - It stamps the discovered inputs itself, by their contents, as the build's thread did. A local hit's inputs are
+       read again when it is recorded.
+   - **The remote is asked only once the local cache misses.** `Cache::find` tries each of the local manifest's sets
+     of inputs against local results first, so a hit in the local cache sends nothing.
+     - On a miss, the remote's manifest is asked for, once per first key for the life of the `Remote`. What it found,
+       or that it found none, is kept, as a build only adds to a manifest what it pushes, which it has itself.
+     - Then every set's second key, the local manifest's and the remote's, goes in one `GET_RESULTS`. The server
+       replies with the first it has with all its blobs.
+     - The set found is added to the local manifest, so the next lookup is local.
+   - **Blobs are fetched together.** A result's missing blobs are asked for at once before it is restored.
+   - **Pushes happen in the background.** `Cache::push` queues the result on a thread of the remote's, which sends the
+     missing blobs at once, then the result and the manifest. `exec::build` waits for the queue before it returns, so
+     a build ends once what it pushes is pushed. Dropping a `Remote` waits too.
+   - **Measured.** A remote reached through a proxy which delays each chunk by 5 ms each way, about a 10 ms round
+     trip. Fetching 40 independent crates into an empty local cache takes 0.55 s, against 2.0 s with requests in
+     turn.
+   - **Tests.**
+     - Replies given to their requests when the server answers out of order.
+     - 64 blobs fetched by eight threads at once.
+     - A manifest found, and one not found, each asked for once.
+     - A result found by the remote's set of inputs, which the local manifest lacks, in one request, and kept.
+     - The tests which push wait for the queue.
+   - **Not done yet.** Blobs are still sent whole in a frame, and held in memory. Streaming large blobs should be
+     measured first.
+4. A TCP transport for `jig serve`, with a shared token for private networks.
+5. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
 
 ### Phase 6: distributed execution
 
