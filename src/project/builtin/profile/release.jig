@@ -1,5 +1,6 @@
 # optimised aggressively, without debug assertions, overflow checks or debug information: the crates are optimised
-# together when linked, with fat LTO, each in a single codegen unit, and the symbols are stripped from what is linked
+# together when linked, with fat LTO, each in a single codegen unit, the symbols are stripped from what is linked, and
+# binaries abort on a panic, rather than unwinding, while their tests still unwind
 set codegen/opt-level 3
 set codegen/debug-assertions false
 set codegen/overflow-checks false
@@ -7,3 +8,4 @@ set codegen/debuginfo 0
 set codegen/lto 'fat'
 set codegen/codegen-units 1
 set codegen/strip 'symbols'
+set codegen/panic 'abort'

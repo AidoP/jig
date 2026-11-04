@@ -1,5 +1,5 @@
 # unoptimised, with debug assertions, overflow checks and full debug information, and quick to compile: without LTO,
-# in many codegen units, and keeping the symbols
+# in many codegen units, keeping the symbols, and unwinding on a panic
 set codegen/opt-level 0
 set codegen/debug-assertions true
 set codegen/overflow-checks true
@@ -7,3 +7,4 @@ set codegen/debuginfo 2
 set codegen/lto 'off'
 set codegen/codegen-units 256
 set codegen/strip 'none'
+set codegen/panic 'unwind'
