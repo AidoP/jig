@@ -3,6 +3,7 @@ use std::{io::IsTerminal, path::{Path, PathBuf}};
 #[cfg(test)]
 mod bench;
 mod builder;
+mod cache;
 mod check;
 mod configured;
 mod database;
@@ -61,6 +62,10 @@ commands:
                          lint the crates which are edited with clippy, or only those named, as the `clippy/<lint>`
                          properties set where they are declared give the levels of the lints, where `-D` or
                          `--deny-warnings` fails if there is a warning
+    cache stats|gc [--max-size <size>]|clear
+                         show what rig's cache holds, remove what was used longest ago until it is no larger than a
+                         size, `JIG_CACHE_SIZE` or 10 GiB by default, as is done after a build once a day, or remove
+                         everything in it
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -135,6 +140,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             let args: Vec<_> = args.collect();
             run::run(name.as_deref(), &args)
         },
+        "cache" => cache::command(args).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -174,8 +180,8 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
-    // rig caches when there is a cache, which configures the project again when it is set or unset
-    if project.read_env(rig_builder::CACHE).is_some_and(|dir| !dir.is_empty()) {
+    // rig caches when there is a cache, which configures the project again when it is turned on or off
+    if cache::dir(|name| project.read_env(name)).is_some() {
         project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot, toolchain));
     }
     let file = match project::File::read(input.clone()) {
@@ -372,6 +378,11 @@ enum Error {
     UnknownEngine(String),
     /// A value of `change-detection` which is not a way to detect changes.
     ChangeDetection(String),
+    /// A size, of the cache, which is not one.
+    InvalidSize(String),
+    /// `jig cache` without a cache, as `JIG_CACHE` turns it off.
+    CacheOff,
+    UnknownCacheCommand(String),
 }
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -439,6 +450,13 @@ impl core::fmt::Display for Error {
                 write!(f, "`change-detection` is {value:?}, rather than `'timestamp'` or `'hash'`")
             },
             Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
+            Self::InvalidSize(size) => write!(f, "{size:?} is not a size, such as `512M` or `10G`"),
+            Self::CacheOff => {
+                write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
+            },
+            Self::UnknownCacheCommand(command) => {
+                write!(f, "unknown cache command {command:?}, rather than `stats`, `gc` or `clear`")
+            },
         }
     }
 }

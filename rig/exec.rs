@@ -666,6 +666,7 @@ impl Run<'_, '_> {
             let env = discovery.env.iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref()));
             let second = cache::second_key(&key, &inputs, &env.collect::<Vec<_>>());
             if let Some(entry) = cache.result(&second) {
+                cache.used(&key, &second);
                 return Some(Restore { cache: cache.clone(), entry });
             }
         }
