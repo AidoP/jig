@@ -319,7 +319,8 @@ impl Project {
             data => vec![data.coerce_string()],
         }
     }
-    /// Returns the values of the cache's properties, `cache/dir`, `cache/size`, `cache/remote` and `cache/push`.
+    /// Returns the values of the cache's properties, `cache/dir`, `cache/size`, `cache/remote`, `cache/push`,
+    /// `cache/token-file` and `workers`.
     pub fn cache_properties(&self) -> crate::cache::Properties {
         let value = |name: &str| self.values_idx.get(name).map(|&value| &self.values[value].data);
         let string = |name: &str| value(name).map(Data::coerce_string).unwrap_or_default();
@@ -329,6 +330,11 @@ impl Project {
             remote: string("cache/remote"),
             push: matches!(value("cache/push"), Some(Data::Bool(true))),
             token_file: string("cache/token-file"),
+            workers: match value("workers") {
+                Some(Data::List(workers)) => workers.iter().map(Data::coerce_string).collect(),
+                Some(worker) => vec![worker.coerce_string()],
+                None => Vec::new(),
+            },
         }
     }
     pub fn install_prefix(&self) -> String {

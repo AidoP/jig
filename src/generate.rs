@@ -936,6 +936,7 @@ fn write_database(
         remote_cache: settings.remote.as_deref().unwrap_or_default(),
         push: settings.push,
         token_file: &token_file,
+        workers: settings.workers.iter().map(String::as_str).collect(),
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {

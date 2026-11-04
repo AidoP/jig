@@ -1818,6 +1818,76 @@ fn remote_cache() {
 }
 
 #[test]
+fn workers() {
+    if !rig_engine() {
+        return;
+    }
+    // once a build's one job is full, its cached edges run on the worker which `jig worker --stdio` serves, here with
+    // its own cache as its store rather than by ssh, once they have run here, so that what they discover is known, and
+    // what they write is what they write here
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-workers", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = dir.join("store").display().to_string();
+    let worker = format!("/usr/bin/env JIG_CACHE={store} {} worker --stdio --jobs 4", configure_path().display());
+    let project = Project::new("workers", &[
+        (
+            "Jig",
+            "crate a 'a.rs'\ncrate b 'b.rs'\ncrate c 'c.rs'\ncrate d 'd.rs'\ncrate e 'e.rs'\ncrate app 'app.rs'\n    \
+             crate-type 'bin'\n    use a\n    use b\n    use c\n    use d\n    use e\n",
+        ),
+        ("a.rs", "mod inner;\npub fn value() -> u32 { inner::VALUE }\n"),
+        ("inner.rs", "pub const VALUE: u32 = 38;\n"),
+        ("b.rs", "pub fn value() -> u32 { let unused = 1; 1 }\n"),
+        ("c.rs", "pub fn value() -> u32 { 1 }\n"),
+        ("d.rs", "pub fn value() -> u32 { 1 }\n"),
+        ("e.rs", "pub fn value() -> u32 { 1 }\n"),
+        ("app.rs", "fn main() { print!(\"{}\", a::value() + b::value() + c::value() + d::value() + e::value()); }\n"),
+    ]);
+    let build = |local: &str| {
+        let mut command = jig_command();
+        command.args(["build", "-j", "1"]).env("JIG_CACHE", local).env("JIG_WORKERS", &worker);
+        command.current_dir(&project.dir);
+        let output = command.output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let stats = |cache: &str| {
+        let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", cache).output().unwrap();
+        String::from_utf8(stats.stdout).unwrap()
+    };
+    let host = project.host();
+    let outputs = project.dir.join("build").join(&host);
+    let libraries = ["liba.rlib", "libb.rlib", "libc.rlib", "libd.rlib", "libe.rlib"];
+    let read = |name: &str| std::fs::read(outputs.join(name)).unwrap();
+    // the first build runs every edge here, as it has not run them before
+    let first = dir.join("first").display().to_string();
+    build(&first);
+    assert_contains(&stats(&store), "and 0 blobs");
+    let local: Vec<Vec<u8>> = libraries.iter().map(|name| read(name)).collect();
+    // once they are known, and their outputs are gone, those which do not fit in the one job run on the worker, which
+    // is sent their sources, and writes what they write here, with what they print
+    std::fs::remove_dir_all(&outputs).unwrap();
+    let second = dir.join("second").display().to_string();
+    assert_contains(&build(&second), "unused variable");
+    assert!(!stats(&store).contains("and 0 blobs"), "{}", stats(&store));
+    for (name, local) in libraries.iter().zip(&local) {
+        assert!(read(name) == *local, "{name} differs from what was built here");
+    }
+    let output = Command::new(outputs.join("app")).output().unwrap();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
+    // and are added to the build's cache, as what runs here is
+    assert!(!stats(&second).contains("\n0 results"), "{}", stats(&second));
+    // a worker which cannot be run builds nothing, and the build goes on without it
+    std::fs::remove_dir_all(&outputs).unwrap();
+    let mut command = jig_command();
+    command.args(["build", "-j", "1"]).env("JIG_CACHE", dir.join("third")).current_dir(&project.dir);
+    let output = command.env("JIG_WORKERS", "/usr/bin/env JIG_CACHE=off jig-no-such-worker").output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cached_commands_run_the_chosen_toolchain() {
     // a cached command runs in a hermetic environment, which passes on `RUSTUP_TOOLCHAIN`, so that rustc runs the
     // toolchain it chooses, and is identified by, as rustdoc, which is not cached, does, rather than rustup's default,

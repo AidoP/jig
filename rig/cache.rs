@@ -495,15 +495,7 @@ impl Cache {
     ///
     /// If the result cannot be written.
     pub fn put_result(&self, key: &Hash, entry: &Entry) -> std::io::Result<()> {
-        let mut w = Writer::new(RESULT);
-        w.0.extend_from_slice(&entry.printed);
-        w.len(entry.outputs.len());
-        for output in &entry.outputs {
-            w.str(&output.path);
-            w.0.extend_from_slice(&output.blob);
-            w.0.push(u8::from(output.executable));
-        }
-        self.write(&self.keyed("ac", key), w)
+        self.write_bytes(&self.keyed("ac", key), &encode_result(entry))
     }
     /// Wait until what is to be pushed to the remote cache has been, if there is one.
     pub fn wait_for_pushes(&self) {
@@ -516,13 +508,23 @@ impl Cache {
     pub fn without_remote(&self) -> Self {
         Self { dir: self.dir.clone(), remote: None }
     }
-    fn write(&self, path: &Path, w: Writer) -> std::io::Result<()> {
-        let mut bytes = w.0;
-        let hash = blake3::hash(&bytes);
-        bytes.extend_from_slice(&hash);
+    fn write_bytes(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let tmp = self.tmp();
-        std::fs::write(&tmp, &bytes)?;
+        std::fs::write(&tmp, bytes)?;
         Self::place(&tmp, path)
+    }
+    /// Write a blob to a file, which a command reads as an input, by a hard link where it can, and otherwise as
+    /// [`Self::restore`] does. A link shares the blob's file, so it is only for a file which is removed once it is
+    /// read, and which is not executable, as the blob's mode is not changed.
+    ///
+    /// # Errors
+    ///
+    /// If the cache does not have the blob, or the file cannot be written.
+    pub fn link(&self, hash: &Hash, path: &Path, executable: bool) -> std::io::Result<()> {
+        if !executable && std::fs::hard_link(self.blob_path(hash), path).is_ok() {
+            return Ok(());
+        }
+        self.restore(hash, path, executable)
     }
 }
 
@@ -537,10 +539,33 @@ fn manifest_with(mut manifest: Vec<Discovery>, discovery: Discovery) -> Vec<u8> 
         w.strs(&discovery.inputs);
         w.strs(&discovery.env);
     }
+    sealed(w)
+}
+
+/// Returns what is written, ended by the hash of it, as each manifest and result is stored.
+fn sealed(w: Writer) -> Vec<u8> {
     let mut bytes = w.0;
     let hash = blake3::hash(&bytes);
     bytes.extend_from_slice(&hash);
     bytes
+}
+
+/// Returns a result as it is stored.
+pub(crate) fn encode_result(entry: &Entry) -> Vec<u8> {
+    let mut w = Writer::new(RESULT);
+    w.0.extend_from_slice(&entry.printed);
+    w.len(entry.outputs.len());
+    for output in &entry.outputs {
+        w.str(&output.path);
+        w.0.extend_from_slice(&output.blob);
+        w.0.push(u8::from(output.executable));
+    }
+    sealed(w)
+}
+
+/// Returns a result from how it is stored, if it is valid.
+pub(crate) fn decode_result(bytes: &[u8]) -> Option<Entry> {
+    read_result(valid(RESULT, bytes)?)
 }
 
 /// Returns a manifest as it is stored, as it was, if it is valid, with another set of discovered inputs as the latest.
