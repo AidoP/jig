@@ -1,12 +1,20 @@
 //! rig's cache, where the results of rustc, clippy and the custom commands with `cache` are kept, and `jig cache`,
 //! which shows, collects and clears it.
 //!
-//! The cache is `$JIG_CACHE`, or `$XDG_CACHE_HOME/jig`, or `$HOME/.cache/jig`, unless `JIG_CACHE` is empty or `off`. It
-//! is collected after a build at most once a day, down to `$JIG_CACHE_SIZE`, which is 10 GiB by default.
+//! The cache is set by the builtin properties `cache/dir`, `cache/size`, `cache/remote` and `cache/push`, which the
+//! user's configuration, as [`crate::config`] finds it, usually sets, each of which an environment variable overrides:
 //!
-//! It is in front of a remote cache if `JIG_REMOTE_CACHE` gives one, as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which
-//! runs `jig serve --stdio` there with ssh, or as a command, split at spaces, which serves it on its stdin and stdout.
-//! Results are pushed to it with `JIG_REMOTE_CACHE_PUSH=1`, if it takes them.
+//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache, `$XDG_CACHE_HOME/jig` or `$HOME/.cache/jig` by default,
+//!   or `off`, or empty, without a cache.
+//! - `cache/size`, or `JIG_CACHE_SIZE`: the size it is collected down to, after a build at most once a day, `10G` by
+//!   default.
+//! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache it is in front of, if any, as
+//!   `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there with ssh, or as a command, split at
+//!   spaces, which serves it on its stdin and stdout.
+//! - `cache/push`, or `JIG_REMOTE_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
+//!
+//! The settings are resolved when the project is configured, as the variables are read by the configuration, and
+//! recorded in its database, which a build reads them from.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -22,43 +30,84 @@ pub const SIZE: &str = "JIG_CACHE_SIZE";
 pub const REMOTE: &str = "JIG_REMOTE_CACHE";
 /// The environment variable which pushes results to the remote cache, if it is `1`.
 pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
-/// The size the cache is collected down to by default, 10 GiB.
-const DEFAULT_SIZE: u64 = 10 << 30;
+/// The size the cache is collected down to by default.
+pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
 const EVERY: Duration = Duration::from_hours(24);
 
-/// Returns the directory of the cache, absolute, from environment variables as `env` gives them, or `None` if it is
-/// off, as `JIG_CACHE` is empty or `off`, or there is nowhere for it, without `XDG_CACHE_HOME` and `HOME`.
-///
-/// A variable is only read if the one before it is not set, so that the configuration, which reads them to find
-/// whether rig caches, depends only on those which decide it.
-pub fn dir(mut env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+/// Returns the directory of the cache by default, `$XDG_CACHE_HOME/jig` or `$HOME/.cache/jig`, or empty, which is
+/// off, without either, from environment variables as `env` gives them.
+pub fn default_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> String {
     let set = |value: Option<OsString>| value.filter(|value| !value.is_empty());
-    let dir = match env(DIR) {
-        Some(dir) if dir.is_empty() || dir == "off" => return None,
-        Some(dir) => PathBuf::from(dir),
-        None => match set(env("XDG_CACHE_HOME")) {
-            Some(cache) => PathBuf::from(cache).join("jig"),
-            None => PathBuf::from(set(env("HOME"))?).join(".cache/jig"),
+    let dir = match set(env("XDG_CACHE_HOME")) {
+        Some(cache) => PathBuf::from(cache).join("jig"),
+        None => match set(env("HOME")) {
+            Some(home) => PathBuf::from(home).join(".cache/jig"),
+            None => return String::new(),
         },
     };
-    std::path::absolute(&dir).ok()
+    dir.display().to_string()
 }
 
-/// Opens the cache, if it is on, in front of the remote cache, if one is given and `remote`.
-pub fn open(remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
-    let Some(dir) = dir(|name| std::env::var_os(name)) else {
-        return Ok(None);
-    };
-    let cache = rig::cache::Cache::open(&dir).map_err(Error::Rig)?;
-    let push = std::env::var_os(PUSH).is_some_and(|push| push == "1");
-    let command = std::env::var(REMOTE).ok().filter(|_| remote).map(|remote| remote_command(&remote, push));
-    match command {
-        Some(command) => {
-            let command = command.ok_or_else(|| Error::InvalidRemote(std::env::var(REMOTE).unwrap_or_default()))?;
-            Ok(Some(cache.with_remote(std::sync::Arc::new(rig::remote::Remote::command(command, push)))))
-        },
-        None => Ok(Some(cache)),
+/// The values of the cache's properties, as the configuration left them.
+pub struct Properties {
+    pub dir: String,
+    pub size: String,
+    pub remote: String,
+    pub push: bool,
+}
+
+/// How rig caches, from the cache's properties and the variables which override them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// The directory of the cache, absolute, or `None` if it is off.
+    pub dir: Option<PathBuf>,
+    /// The size it is collected down to, in bytes.
+    pub size: u64,
+    /// The remote cache, as `cache/remote` gives it, if there is one.
+    pub remote: Option<String>,
+    pub push: bool,
+}
+
+impl Settings {
+    /// Resolve the settings from the cache's properties, each of which its variable, as `env` gives it, overrides.
+    pub fn resolve(properties: &Properties, mut env: impl FnMut(&str) -> Option<OsString>) -> Result<Self, Error> {
+        let mut string = |name: &str, property: &str| match env(name) {
+            Some(value) => value.to_string_lossy().into_owned(),
+            None => property.to_string(),
+        };
+        let dir = string(DIR, &properties.dir);
+        let size = string(SIZE, &properties.size);
+        let remote = string(REMOTE, &properties.remote);
+        let push = match env(PUSH) {
+            Some(push) => push == "1",
+            None => properties.push,
+        };
+        let dir = (!dir.is_empty() && dir != "off").then(|| std::path::absolute(&dir).unwrap_or_else(|_| dir.into()));
+        let size = parse_size(&size).ok_or(Error::InvalidSize(size))?;
+        let remote = (!remote.trim().is_empty()).then_some(remote);
+        if let Some(remote) = &remote
+            && remote_command(remote, push).is_none()
+        {
+            return Err(Error::InvalidRemote(remote.clone()));
+        }
+        Ok(Self { dir, size, remote, push })
+    }
+    /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
+    pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
+        let Some(dir) = &self.dir else {
+            return Ok(None);
+        };
+        let cache = rig::cache::Cache::open(dir).map_err(Error::Rig)?;
+        let command = self.remote.as_deref().filter(|_| remote).and_then(|remote| remote_command(remote, self.push));
+        Ok(Some(match command {
+            Some(command) => cache.with_remote(std::sync::Arc::new(rig::remote::Remote::command(command, self.push))),
+            None => cache,
+        }))
+    }
+    /// Collect the cache after a build, if it was last collected a day ago or longer.
+    pub fn collect_if_due(&self, cache: &rig::cache::Cache) {
+        let _ = cache.gc_if_due(self.size, EVERY);
     }
 }
 
@@ -96,7 +145,7 @@ pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
 
 /// `jig serve --stdio [--push]`, which serves the cache on stdin and stdout, as a remote cache, taking pushes with
 /// `--push`, then collects it if it is due.
-pub fn serve(args: impl Iterator<Item = OsString>) -> Result<(), Error> {
+pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     let (mut stdio, mut push) = (false, false);
     for arg in args {
         match arg.to_str() {
@@ -108,9 +157,9 @@ pub fn serve(args: impl Iterator<Item = OsString>) -> Result<(), Error> {
     if !stdio {
         return Err(Error::MissingArg("--stdio"));
     }
-    let cache = open(false)?.ok_or(Error::CacheOff)?;
+    let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout().lock(), push);
-    collect_if_due(&cache)?;
+    settings.collect_if_due(&cache);
     served.map_err(Error::Serve)
 }
 
@@ -119,20 +168,6 @@ pub fn report_remote(cache: &rig::cache::Cache) {
     if let Some(error) = cache.remote().and_then(rig::remote::Remote::error) {
         eprintln!("warning: the remote cache failed, so the build went on without it: {error}");
     }
-}
-
-/// Returns the size the cache is collected down to, from `JIG_CACHE_SIZE`, or 10 GiB without it.
-fn max_size() -> Result<u64, Error> {
-    match std::env::var(SIZE) {
-        Ok(size) => parse_size(&size).ok_or(Error::InvalidSize(size)),
-        Err(_) => Ok(DEFAULT_SIZE),
-    }
-}
-
-/// Collect the cache after a build, if it was last collected a day ago or longer.
-pub fn collect_if_due(cache: &rig::cache::Cache) -> Result<(), Error> {
-    let _ = cache.gc_if_due(max_size()?, EVERY);
-    Ok(())
 }
 
 /// Returns a size in bytes, such as `512`, `100K`, `1.5G` or `10GiB`, with a binary multiple, or `None` if it is not
@@ -174,7 +209,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// `jig cache stats`, `jig cache gc [--max-size <size>]` or `jig cache clear`.
-pub fn command(mut args: impl Iterator<Item = OsString>) -> Result<(), Error> {
+pub fn command(mut args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     let command = args.next().ok_or(Error::MissingArg("cache command"))?;
     let command = command.to_string_lossy().into_owned();
     let mut max = None;
@@ -191,7 +226,7 @@ pub fn command(mut args: impl Iterator<Item = OsString>) -> Result<(), Error> {
     } else if let Some(extra) = args.next() {
         return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
     }
-    let cache = open(false)?.ok_or(Error::CacheOff)?;
+    let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let stats = |stats: rig::cache::Stats| {
         format!(
             "{} results, {} manifests and {} blobs, {}",
@@ -207,7 +242,7 @@ pub fn command(mut args: impl Iterator<Item = OsString>) -> Result<(), Error> {
             println!("{}", stats(cache.stats()));
         },
         "gc" => {
-            let collected = cache.gc(max.map_or_else(max_size, Ok)?);
+            let collected = cache.gc(max.unwrap_or(settings.size));
             println!("removed {}", stats(collected.removed));
             println!("kept {}", stats(collected.kept));
         },
@@ -221,24 +256,40 @@ pub fn command(mut args: impl Iterator<Item = OsString>) -> Result<(), Error> {
 mod tests {
     use super::*;
 
+    fn resolved(settings: Result<Settings, Error>) -> Settings {
+        settings.unwrap_or_else(|error| panic!("{error}"))
+    }
+
     #[test]
-    fn finds_the_directory() {
+    fn finds_the_settings() {
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| OsString::from(value))
         };
-        assert_eq!(dir(env(&[("JIG_CACHE", "/c"), ("HOME", "/h")])), Some(PathBuf::from("/c")));
-        assert_eq!(dir(env(&[("JIG_CACHE", "off"), ("HOME", "/h")])), None);
-        assert_eq!(dir(env(&[("JIG_CACHE", ""), ("HOME", "/h")])), None);
-        assert_eq!(dir(env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")])), Some(PathBuf::from("/x/jig")));
-        assert_eq!(dir(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")])), Some(PathBuf::from("/h/.cache/jig")));
-        assert_eq!(dir(env(&[])), None);
-        // a variable after one which is set is not read
-        let mut read = Vec::new();
-        dir(|name| {
-            read.push(name.to_string());
-            (name == "JIG_CACHE").then(|| "/c".into())
-        });
-        assert_eq!(read, ["JIG_CACHE"]);
+        assert_eq!(default_dir(env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")])), "/x/jig");
+        assert_eq!(default_dir(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")])), "/h/.cache/jig");
+        assert_eq!(default_dir(env(&[])), "");
+        // each variable overrides its property
+        let properties = Properties { dir: "/p".into(), size: "1G".into(), remote: "ssh://cache".into(), push: true };
+        let settings = resolved(Settings::resolve(&properties, env(&[])));
+        let expected = Settings { dir: Some("/p".into()), size: 1 << 30, remote: Some("ssh://cache".into()), push: true };
+        assert_eq!(settings, expected);
+        let overridden = env(&[
+            ("JIG_CACHE", "/c"),
+            ("JIG_CACHE_SIZE", "2M"),
+            ("JIG_REMOTE_CACHE", "ssh://other"),
+            ("JIG_REMOTE_CACHE_PUSH", "0"),
+        ]);
+        let settings = resolved(Settings::resolve(&properties, overridden));
+        let expected = Settings { dir: Some("/c".into()), size: 2 << 20, remote: Some("ssh://other".into()), push: false };
+        assert_eq!(settings, expected);
+        // and turns it off, or has no remote cache
+        let off = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE", "off"), ("JIG_REMOTE_CACHE", " ")])));
+        assert_eq!((off.dir, off.remote), (None, None));
+        let empty = Properties { dir: String::new(), size: "10G".into(), remote: String::new(), push: false };
+        assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
+        // what is not a size or a remote cache is an error
+        assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_SIZE", "lots")])), Err(Error::InvalidSize(_))));
+        assert!(matches!(Settings::resolve(&properties, env(&[("JIG_REMOTE_CACHE", "ssh://")])), Err(Error::InvalidRemote(_))));
     }
 
     #[test]

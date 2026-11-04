@@ -26,6 +26,8 @@ pub struct Configured {
     pub toolchain: Option<String>,
     /// What builds the project, from `JIG_ENGINE`.
     pub engine: Engine,
+    /// How rig caches, as the project was configured.
+    pub cache: crate::cache::Settings,
 }
 
 /// What builds a project's graph.
@@ -79,7 +81,7 @@ impl Configured {
             }
         }
         let toolchain = toolchain(&database);
-        Ok(Self { root, build_dir, toolchain, engine: Engine::from_env()? })
+        Ok(Self { root, build_dir, toolchain, engine: Engine::from_env()?, cache: cache_settings(&database) })
     }
     /// Report `other-jig` if the running `jig` is not the one which configured the project, which regenerates
     /// `build.ninja`.
@@ -111,6 +113,7 @@ impl Configured {
         let database = parse(&self.root, &bytes)?;
         self.build_dir = self.root.join(database.build_dir);
         self.toolchain = toolchain(&database);
+        self.cache = cache_settings(&database);
         Ok(())
     }
     /// Returns what builds the project's graph, in the build directory.
@@ -118,7 +121,7 @@ impl Configured {
         let (build_dir, toolchain) = (&self.build_dir, self.toolchain.as_deref());
         match self.engine {
             Engine::Ninja => Box::new(ninja::Ninja { build_dir, toolchain }),
-            Engine::Rig => Box::new(rig_builder::Rig { build_dir, toolchain }),
+            Engine::Rig => Box::new(rig_builder::Rig { build_dir, toolchain, cache: &self.cache }),
         }
     }
     /// Build what is requested, failing if it was not built.
@@ -155,6 +158,16 @@ fn env_changed(database: &database::Database) -> bool {
 }
 
 /// Returns the toolchain a project is configured with, from its database, if it is configured with one.
+/// Returns how rig caches, as the database records it.
+fn cache_settings(database: &database::Database) -> crate::cache::Settings {
+    crate::cache::Settings {
+        dir: (!database.cache_dir.is_empty()).then(|| database.cache_dir.into()),
+        size: database.cache_size.parse().unwrap_or(0),
+        remote: (!database.remote_cache.is_empty()).then(|| database.remote_cache.into()),
+        push: database.push,
+    }
+}
+
 fn toolchain(database: &database::Database) -> Option<String> {
     (!database.toolchain.is_empty()).then(|| database.toolchain.into())
 }

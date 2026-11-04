@@ -113,9 +113,10 @@ if they are given a different toolchain. Without rustup, a toolchain cannot be s
 ```
 
 With rig, the results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from
-it rather than run again. The cache is `$XDG_CACHE_HOME/jig`, or `~/.cache/jig`, or the directory the `JIG_CACHE`
-environment variable gives, relative to the working directory, while a `JIG_CACHE` which is empty or `off` turns it
-off, as the project is configured. A crate which is built again with what it was built with before, such as once a change to it is undone, or another
+it rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or `~/.cache/jig`, by
+default, and `'off'` turns it off, usually set in the user's configuration. The `JIG_CACHE` environment variable
+overrides it, relative to the working directory, while a `JIG_CACHE` which is empty or `off` turns it off. They are
+read as the project is configured. A crate which is built again with what it was built with before, such as once a change to it is undone, or another
 branch is checked out and back, or once the build directory is removed, is restored from the cache, with what rustc
 printed. The cache is found by the contents of each crate's sources, the crates it uses and the variables it read, and
 by the identity of the toolchain, from `rustc -vV` and the files rustup writes when it installs or updates it, so
@@ -127,8 +128,9 @@ no effect with ninja.
 
 `jig cache stats` shows where the cache is and what it holds, `jig cache gc [--max-size <size>]` removes what was used
 longest ago until it is no larger than a size, such as `512M` or `10G`, and `jig cache clear` removes everything in it.
-After a build, once a day, the cache is collected as by `jig cache gc`, down to the `JIG_CACHE_SIZE` environment
-variable, or 10 GiB without it.
+After a build, once a day, the cache is collected as by `jig cache gc`, down to the `cache/size` property, `'10G'` by
+default, which the `JIG_CACHE_SIZE` environment variable overrides. `jig cache` takes the settings of the user's
+configuration, rather than a project's.
 
 ```
 ./build/bootstrap/jig cache stats
@@ -136,20 +138,39 @@ JIG_CACHE_SIZE=2G ./build/bootstrap/jig cache gc
 JIG_CACHE=off ./build/bootstrap/jig build
 ```
 
-The cache can be in front of a remote cache on another machine, given by the `JIG_REMOTE_CACHE` environment variable
-as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there by ssh, in batch mode, so that it
+The cache can be in front of a remote cache on another machine, given by the `cache/remote` property, or the
+`JIG_REMOTE_CACHE` environment variable which overrides it, as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there by ssh, in batch mode, so that it
 fails rather than asking for a password, with the `jig` given after the host, or the one in `PATH` there. What is not
-in the local cache is looked for in the remote one, and fetched from it into the local one. With
-`JIG_REMOTE_CACHE_PUSH=1`, what is built is pushed to the remote cache too, if it takes pushes, as `jig serve --stdio
+in the local cache is looked for in the remote one, and fetched from it into the local one. With `cache/push` set to
+`true`, or `JIG_REMOTE_CACHE_PUSH=1`, what is built is pushed to the remote cache too, if it takes pushes, as `jig serve --stdio
 --push` does, so that a machine which is trusted, such as CI, fills it, and others only read from it. ssh
 authenticates and encrypts the connection, so a key in `authorized_keys` can be limited to reading the cache with
 `command="jig serve --stdio"`, or allowed to push with `--push`. A remote cache which fails, as it cannot be reached,
 is warned of, and the build goes on with the local cache. `JIG_REMOTE_CACHE` can also be a command, split at spaces,
-which serves the cache on its stdin and stdout, such as `ssh -i key cache jig serve --stdio`.
+which serves the cache on its stdin and stdout, such as `ssh -i key cache jig serve --stdio`. As the remote cache is
+part of how a project is configured, changing it configures the project again.
 
 ```
 JIG_REMOTE_CACHE=ssh://cache.example ./build/bootstrap/jig build
 JIG_REMOTE_CACHE=ssh://ci@cache.example JIG_REMOTE_CACHE_PUSH=1 ./build/bootstrap/jig build
+```
+
+### The user's configuration
+
+What belongs to the user or the machine rather than a project, such as rig's cache, is set in the user's
+configuration, `$XDG_CONFIG_HOME/jig/config`, or `~/.config/jig/config`, or the file the `JIG_CONFIG` environment
+variable gives, while a `JIG_CONFIG` which is empty or `off` turns it off. It is a file of the same statements as
+`Jig`, which is processed before a project's own, as if the project began with a `use` of it, so that a project can
+read what it sets, and set it again. Paths in it are relative to it, as in any file. A project depends on it, so it is
+configured again when it changes, or once it is created. `jig cache` and `jig serve`, which have no project, process
+it alone, where the builtin properties of the toolchain are empty if rustc cannot be run.
+
+```
+# ~/.config/jig/config
+set cache/remote 'ssh://cache.example'
+set cache/size '20G'
+@if env('CI') == 'true'
+set cache/push true
 ```
 
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
@@ -787,6 +808,11 @@ target bluemetal-riscv64
   A file is only read again when its time or size has changed, or when it is a source which was modified within a tick
   of the file system's clock of being hashed, as it may have changed again without its time showing it. ninja always
   uses timestamps
+- `cache/dir`, `cache/size`, `cache/remote` and `cache/push`: rig's cache, as described for it, usually set in the user's
+  configuration: its directory, `$XDG_CACHE_HOME/jig` or `~/.cache/jig` by default, or `'off'`; the size it is
+  collected down to, `'10G'` by default; the remote cache it is in front of, empty by default; and whether it pushes
+  to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE`, `JIG_CACHE_SIZE`,
+  `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH`
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no

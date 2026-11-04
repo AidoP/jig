@@ -49,6 +49,8 @@ pub struct Project {
     pub toolchain: Option<String>,
     /// What identifies the toolchain, by which rig caches the results of rustc and clippy, if it caches them.
     pub cache: Option<String>,
+    /// How rig caches, as the configuration and the variables which override it set it, once it is evaluated.
+    pub cache_settings: crate::cache::Settings,
     pub files: Vec<File>,
     /// Files read by expressions, which the configuration depends on as well as `files`.
     pub dependencies: Vec<PathBuf>,
@@ -140,6 +142,7 @@ impl Project {
             runners: Vec::new(),
             toolchain: None,
             cache: None,
+            cache_settings: crate::cache::Settings::default(),
             can_run: HashMap::new(),
         }
     }
@@ -314,6 +317,17 @@ impl Project {
         match &self.values[value].data {
             Data::List(tags) => tags.iter().map(Data::coerce_string).collect(),
             data => vec![data.coerce_string()],
+        }
+    }
+    /// Returns the values of the cache's properties, `cache/dir`, `cache/size`, `cache/remote` and `cache/push`.
+    pub fn cache_properties(&self) -> crate::cache::Properties {
+        let value = |name: &str| self.values_idx.get(name).map(|&value| &self.values[value].data);
+        let string = |name: &str| value(name).map(Data::coerce_string).unwrap_or_default();
+        crate::cache::Properties {
+            dir: string("cache/dir"),
+            size: string("cache/size"),
+            remote: string("cache/remote"),
+            push: matches!(value("cache/push"), Some(Data::Bool(true))),
         }
     }
     pub fn install_prefix(&self) -> String {

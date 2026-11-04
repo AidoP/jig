@@ -18,6 +18,8 @@ pub const STATE: &str = ".rig";
 pub struct Rig<'a> {
     pub build_dir: &'a Path,
     pub toolchain: Option<&'a str>,
+    /// How rig caches, as the project was configured.
+    pub cache: &'a crate::cache::Settings,
 }
 
 /// How `jig build` asks for a build, from its arguments.
@@ -63,7 +65,7 @@ impl Rig<'_> {
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }
-    /// The options of a build, with the cache, unless it is off, as [`crate::cache::dir`] finds it.
+    /// The options of a build, with the cache, unless it is off, as the project was configured.
     fn options(&self) -> Result<rig::exec::Options, Error> {
         let mut options = rig::exec::Options::new(self.build_dir);
         if let Some(toolchain) = self.toolchain {
@@ -71,7 +73,7 @@ impl Rig<'_> {
         }
         // rustup's proxies, such as `rustc`, find the toolchain with these, which is identified by its contents instead
         options.locating.extend(["RUSTUP_HOME", "CARGO_HOME"].map(String::from));
-        options.cache = crate::cache::open(true)?;
+        options.cache = self.cache.open(true)?;
         Ok(options)
     }
     /// Build targets, writing what is shown to `output`, returning whether they were built.
@@ -96,7 +98,7 @@ impl Rig<'_> {
         // once a day, the cache is collected after a build
         if let Some(cache) = &options.cache {
             crate::cache::report_remote(cache);
-            crate::cache::collect_if_due(cache)?;
+            self.cache.collect_if_due(cache);
         }
         match built {
             Ok(report) => Ok(report.succeeded()),

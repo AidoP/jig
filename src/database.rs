@@ -8,7 +8,9 @@
 //! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
 //! paths, the environment variables, as a list of their names followed by a list of their hashes, the tags of the
 //! tests which are run by default, the install prefix,
-//! the severities of `proxy-build` and `other-jig`, and the `jig` which configured it, followed by each section: the
+//! the severities of `proxy-build` and `other-jig`, the `jig` which configured it, then how rig caches: the directory of
+//! the cache, or empty without one, the size it is collected down to as a decimal string, the remote cache, or empty
+//! without one, and whether it is pushed to, followed by each section: the
 //! flychecks, the tests, the lints, the programs, then the installed files. A section is the number of its records
 //! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
 //! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
@@ -21,7 +23,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 18;
+const VERSION: u32 = 19;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -50,6 +52,14 @@ pub struct Database<'a> {
     pub other_jig: &'a str,
     /// The `jig` which configured the project.
     pub jig: &'a str,
+    /// The directory of rig's cache, or empty if it is off.
+    pub cache_dir: &'a str,
+    /// The size the cache is collected down to, in bytes, in decimal.
+    pub cache_size: &'a str,
+    /// The remote cache, or empty without one.
+    pub remote_cache: &'a str,
+    /// Whether what is built is pushed to the remote cache.
+    pub push: bool,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -138,6 +148,10 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.proxy_build)?;
     write_str(w, database.other_jig)?;
     write_str(w, database.jig)?;
+    write_str(w, database.cache_dir)?;
+    write_str(w, database.cache_size)?;
+    write_str(w, database.remote_cache)?;
+    write_u32(w, u32::from(database.push))?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -194,6 +208,10 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         proxy_build: r.str()?,
         other_jig: r.str()?,
         jig: r.str()?,
+        cache_dir: r.str()?,
+        cache_size: r.str()?,
+        remote_cache: r.str()?,
+        push: r.bool()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -310,6 +328,10 @@ mod tests {
             proxy_build: "warning",
             other_jig: "warning",
             jig: "/usr/bin/jig",
+            cache_dir: "/home/user/.cache/jig",
+            cache_size: "1024",
+            remote_cache: "ssh://cache",
+            push: true,
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
