@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use crate::project::{File, Project};
 
-/// Held while timing, so that the benchmarks, which run on several threads, do not slow each other.
-static TIMING: Mutex<()> = Mutex::new(());
+/// Held while timing, so that the benchmarks, which run on several threads, do not slow each other, and by other tests
+/// which would slow them, such as those which run many processes.
+pub static TIMING: Mutex<()> = Mutex::new(());
 
 /// The shortest a sample may take, so that the clock and the loop are a small part of it.
 const SAMPLE: Duration = Duration::from_millis(10);
