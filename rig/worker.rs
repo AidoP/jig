@@ -16,8 +16,12 @@
 //! finished.
 //!
 //! An action reads only what is sent, beside the toolchain, which the worker has, by its identity: one it does not
-//! have is refused, with `NOT_FOUND`. An action which needs a file that was not sent fails, as do those whose paths are
+//! have is refused, with `NOT_FOUND`, unless the worker installs toolchains, and installs it by the name the request
+//! gives, which it tries once. An action which needs a file that was not sent fails, as do those whose paths are
 //! absolute, or do not lead from the build's directory as given, which are refused, and the client runs it itself.
+//!
+//! `GET_CAPABILITIES` is replied to with the worker's [`Capabilities`]: its host, its tags, and its toolchains, with
+//! their names, releases, hosts and installed targets, which clients choose workers by.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,21 +31,71 @@ use crate::graph::{Action, Exec};
 use crate::remote::{Payload, push_str, push_strs};
 
 /// A toolchain a worker has, by the identity a cached edge has in the graph, with the variables an action which has it
-/// is given to run it, such as `RUSTUP_TOOLCHAIN`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// is given to run it, such as `RUSTUP_TOOLCHAIN`, which are not reported to clients.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Toolchain {
     pub identity: String,
+    /// The name rustup knows it by, or empty for the `rustc` which is run without one.
+    pub name: String,
+    /// Its release, as `rustc -vV` reports it, such as `1.97.0`.
+    pub release: String,
+    /// The target it runs on.
+    pub host: String,
+    /// The targets whose standard libraries it has.
+    pub targets: Vec<String>,
     pub env: Vec<(String, String)>,
 }
 
+/// What a worker reports of itself: the target it runs on, the tags it was given, and its toolchains.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    pub host: String,
+    pub tags: Vec<String>,
+    pub toolchains: Vec<Toolchain>,
+}
+
+impl Capabilities {
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_str(&mut bytes, &self.host);
+        push_strs(&mut bytes, &self.tags);
+        bytes.extend_from_slice(&(self.toolchains.len() as u32).to_le_bytes());
+        for toolchain in &self.toolchains {
+            for field in [&toolchain.identity, &toolchain.name, &toolchain.release, &toolchain.host] {
+                push_str(&mut bytes, field);
+            }
+            push_strs(&mut bytes, &toolchain.targets);
+        }
+        bytes
+    }
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut p = Payload(bytes);
+        let (host, tags) = (p.str()?, p.strs()?);
+        let toolchains = (0..p.u32()?).map(|_| {
+            let (identity, name, release, host, targets) = (p.str()?, p.str()?, p.str()?, p.str()?, p.strs()?);
+            Some(Toolchain { identity, name, release, host, targets, env: Vec::new() })
+        });
+        let toolchains = toolchains.collect::<Option<Vec<_>>>()?;
+        p.0.is_empty().then_some(Self { host, tags, toolchains })
+    }
+}
+
+/// Installs a toolchain by the name a request gives, returning whether it did.
+type Install = Box<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// What a worker runs actions with: the directory of the directories they run in, which is on the same file system as
-/// its cache, so that their inputs are linked from it, the number which run at once, and its toolchains, which are
-/// found when an action is first run, so that a client which connects is answered at once.
+/// its cache, so that their inputs are linked from it, the number which run at once, and its capabilities, which are
+/// found when they are first needed, so that a client which connects is answered at once, and again once a toolchain
+/// is installed, if the worker installs them.
 pub struct Executor {
     pub root: PathBuf,
     pub jobs: usize,
-    toolchains: std::sync::OnceLock<Vec<Toolchain>>,
-    find: Box<dyn Fn() -> Vec<Toolchain> + Send + Sync>,
+    found: std::sync::Mutex<Option<std::sync::Arc<Capabilities>>>,
+    find: Box<dyn Fn() -> Capabilities + Send + Sync>,
+    install: Option<Install>,
+    /// The names of the toolchains which have been installed, or tried to be, each of which is tried once. Installs
+    /// hold it, so that they take turns.
+    installed: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// An input of an action which is sent to a worker: its path relative to the build's directory, its blob, and whether
@@ -58,6 +112,9 @@ pub struct Input {
 pub struct Request {
     /// The identity of the toolchain it runs with.
     pub identity: String,
+    /// The name rustup installs the toolchain by, such as `1.97.0` or `nightly-2026-11-03`, for a worker which does not
+    /// have it, or empty if it is not known.
+    pub install: String,
     /// The action, with the build's directory replaced by a marker, as [`crate::plan::relocated_action_bytes`] does.
     pub action: Action,
     /// The variables it is given, beside those of its toolchain and its action.
@@ -90,6 +147,7 @@ impl Request {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         push_str(&mut bytes, &self.identity);
+        push_str(&mut bytes, &self.install);
         match &self.action {
             Action::Shell(line) => {
                 bytes.push(0);
@@ -118,7 +176,7 @@ impl Request {
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut p = Payload(bytes);
-        let identity = p.str()?;
+        let (identity, install) = (p.str()?, p.str()?);
         let action = match p.take(1)?[0] {
             0 => Action::Shell(p.str()?),
             1 => {
@@ -141,7 +199,7 @@ impl Request {
         });
         let inputs = inputs.collect::<Option<Vec<_>>>()?;
         let outputs = p.strs()?;
-        p.0.is_empty().then_some(Self { identity, action, env, locating, inputs, outputs })
+        p.0.is_empty().then_some(Self { identity, install, action, env, locating, inputs, outputs })
     }
     /// The blobs of its inputs, each once.
     #[must_use]
@@ -210,13 +268,41 @@ impl Drop for Sandbox {
 }
 
 impl Executor {
-    /// An executor with toolchains, which `find` finds once they are first needed.
-    pub fn new(root: PathBuf, jobs: usize, find: impl Fn() -> Vec<Toolchain> + Send + Sync + 'static) -> Self {
-        Self { root, jobs, toolchains: std::sync::OnceLock::new(), find: Box::new(find) }
+    /// An executor with capabilities, which `find` finds once they are first needed.
+    pub fn new(root: PathBuf, jobs: usize, find: impl Fn() -> Capabilities + Send + Sync + 'static) -> Self {
+        let (found, installed) = (std::sync::Mutex::default(), std::sync::Mutex::default());
+        Self { root, jobs, found, find: Box::new(find), install: None, installed }
     }
-    /// Returns the toolchains, finding them if they have not been.
-    pub fn toolchains(&self) -> &[Toolchain] {
-        self.toolchains.get_or_init(|| (self.find)())
+    /// Install the toolchains requests need which the worker does not have, by the names they give, with `install`,
+    /// which returns whether it did.
+    #[must_use]
+    pub fn installing(mut self, install: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+        self.install = Some(Box::new(install));
+        self
+    }
+    /// Returns the capabilities, finding them if they have not been.
+    pub fn capabilities(&self) -> std::sync::Arc<Capabilities> {
+        let mut found = self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::sync::Arc::clone(found.get_or_insert_with(|| std::sync::Arc::new((self.find)())))
+    }
+    /// Returns the toolchain of an identity, installing it by its name if the worker does not have it and installs
+    /// toolchains, unless it has tried to.
+    fn toolchain(&self, identity: &str, install: &str) -> Option<Toolchain> {
+        let find = || self.capabilities().toolchains.iter().find(|toolchain| toolchain.identity == identity).cloned();
+        if let Some(toolchain) = find() {
+            return Some(toolchain);
+        }
+        let installer = self.install.as_ref().filter(|_| !install.is_empty())?;
+        let mut tried = self.installed.lock().ok()?;
+        // another action may have installed it while this one waited
+        if let Some(toolchain) = find() {
+            return Some(toolchain);
+        }
+        if !tried.insert(install.to_string()) || !installer(install) {
+            return None;
+        }
+        *self.found.lock().ok()? = None;
+        find()
     }
     /// Run an action, with the blobs of its inputs in the cache, adding the outputs it writes to it.
     ///
@@ -226,8 +312,7 @@ impl Executor {
     /// in the cache, or the directory to run it in cannot be made.
     pub fn execute(&self, cache: &Cache, request: &Request) -> Result<Executed, Refused> {
         use std::os::unix::fs::PermissionsExt;
-        let toolchain = self.toolchains().iter().find(|toolchain| toolchain.identity == request.identity);
-        let toolchain = toolchain.ok_or(Refused::Toolchain)?;
+        let toolchain = self.toolchain(&request.identity, &request.install).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
         let mut paths: Vec<&str> = inputs.chain(request.outputs.iter().map(String::as_str)).collect();
@@ -308,8 +393,10 @@ mod tests {
     }
 
     fn executor(dir: &Path) -> Executor {
-        let toolchain = Toolchain { identity: "toolchain".into(), env: vec![("TOOLCHAIN".into(), "chosen".into())] };
-        Executor::new(dir.join("work"), 2, move || vec![toolchain.clone()])
+        let env = vec![("TOOLCHAIN".into(), "chosen".into())];
+        let toolchain = Toolchain { identity: "toolchain".into(), env, ..Toolchain::default() };
+        let capabilities = Capabilities { toolchains: vec![toolchain], ..Capabilities::default() };
+        Executor::new(dir.join("work"), 2, move || capabilities.clone())
     }
 
     fn input(cache: &Cache, path: &str, contents: &str) -> Input {
@@ -328,6 +415,7 @@ mod tests {
         let blob = crate::blake3::hash(b"input");
         let request = Request {
             identity: "toolchain".into(),
+            install: String::new(),
             action: Action::Exec(exec),
             env: vec![("B".into(), "2".into())],
             locating: vec!["PATH".into()],
@@ -341,6 +429,67 @@ mod tests {
         let entry = Entry { outputs: vec![Output { path: "out".into(), blob, executable: false }], printed: blob };
         let executed = Executed { succeeded: true, entry };
         assert_eq!(Executed::decode(&executed.encode()), Some(executed));
+    }
+
+    #[test]
+    fn capabilities_round_trip() {
+        let toolchain = Toolchain {
+            identity: "identity".into(),
+            name: "1.97-x86_64-unknown-linux-gnu".into(),
+            release: "1.97.0".into(),
+            host: "x86_64-unknown-linux-gnu".into(),
+            targets: vec!["x86_64-unknown-linux-gnu".into(), "riscv64gc-unknown-linux-gnu".into()],
+            env: Vec::new(),
+        };
+        let (host, tags) = ("x86_64-unknown-linux-gnu".into(), vec!["fast".into()]);
+        let capabilities = Capabilities { host, tags, toolchains: vec![toolchain] };
+        assert_eq!(Capabilities::decode(&capabilities.encode()), Some(capabilities.clone()));
+        let encoded = capabilities.encode();
+        assert_eq!(Capabilities::decode(&encoded[..encoded.len() - 1]), None);
+    }
+
+    #[test]
+    fn installs_toolchains_it_does_not_have() {
+        use std::sync::{Arc, Mutex};
+        let dir = dir("installs");
+        let cache = Cache::open(&dir.join("cache")).unwrap();
+        // a toolchain installed by name is found again, by its identity
+        let installed: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (finding, installing) = (Arc::clone(&installed), Arc::clone(&installed));
+        let executor = Executor::new(dir.join("work"), 1, move || {
+            let names = finding.lock().unwrap().clone();
+            let toolchain = |name: String| {
+                Toolchain { identity: format!("{name} identity"), name, ..Toolchain::default() }
+            };
+            let toolchains = names.into_iter().map(toolchain);
+            Capabilities { toolchains: toolchains.collect(), ..Capabilities::default() }
+        });
+        let request = Request {
+            identity: "1.97.0 identity".into(),
+            install: String::new(),
+            action: Action::Shell("echo ran".into()),
+            env: Vec::new(),
+            locating: vec!["PATH".into()],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        // without an installer, or a name, it is refused
+        assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
+        let executor = executor.installing(move |name| {
+            // a toolchain of another identity is installed by the name `other`
+            installing.lock().unwrap().push(if name == "other" { "unexpected".into() } else { name.into() });
+            true
+        });
+        assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
+        let request = Request { install: "1.97.0".into(), ..request };
+        assert!(executor.execute(&cache, &request).unwrap().succeeded);
+        assert_eq!(executor.capabilities().toolchains.len(), 1);
+        // one which is installed and is not of the identity is not installed again
+        let other = Request { identity: "other identity".into(), install: "other".into(), ..request.clone() };
+        assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
+        assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
+        assert_eq!(*installed.lock().unwrap(), ["1.97.0", "unexpected"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -366,6 +515,7 @@ mod tests {
         );
         let request = Request {
             identity: "toolchain".into(),
+            install: String::new(),
             action: Action::Shell(line),
             env: vec![("GIVEN".into(), "given".into())],
             locating: vec!["PATH".into()],
@@ -396,6 +546,7 @@ mod tests {
         let executor = executor(&dir);
         let request = Request {
             identity: "toolchain".into(),
+            install: String::new(),
             action: Action::Shell("true".into()),
             env: Vec::new(),
             locating: Vec::new(),

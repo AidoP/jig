@@ -72,10 +72,12 @@ commands:
                          serve rig's cache on stdin and stdout as a remote cache, as `cache/remote` runs it by ssh, or
                          over TCP at an address, such as `0.0.0.0:7070`, to clients with the token in the file,
                          taking pushes with `--push`
-    worker --stdio [--jobs <n>] | worker --listen <address> --token-file <path> [--jobs <n>]
+    worker (--stdio | --listen <address> --token-file <path>) [--jobs <n>] [--tag <tag> ...] [--install]
                          run the cached commands of builds which send them, as the `workers` property runs it by ssh,
                          on stdin and stdout, or over TCP at an address, for clients with the token in the file, with
-                         rig's cache as its store, and the toolchains rustup has, running as many at once as `--jobs`
+                         rig's cache as its store, and the toolchains rustup has, running as many at once as `--jobs`,
+                         reporting its tags, and with `--install`, installing a toolchain a command needs with rustup
+    workers              show the workers of the `workers` property, with their hosts, tags and toolchains
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -155,6 +157,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         "cache" => cache::command(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "serve" => cache::serve(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "worker" => cache::worker(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
+        "workers" => cache::workers(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -213,9 +216,14 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 
     // rig caches when there is a cache, which configures the project again when it is turned on or off, as the variables
     // which override the configuration are read by it
-    let settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
+    let mut settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
     if settings.dir.is_some() {
-        project.cache = Some(toolchain_identity(&mut project, &verbose_version, &sysroot));
+        let identity = toolchain_identity(&mut project, &verbose_version, &sysroot);
+        // a worker which does not have the toolchain may install it by its name
+        if let Some(name) = toolchain::install_name(Path::new(&sysroot)) {
+            settings.installable = Some((identity.clone(), name));
+        }
+        project.cache = Some(identity);
         project.identify_cached_customs();
     }
     project.cache_settings = settings;
@@ -625,10 +633,10 @@ fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> 
 /// Returns what identifies a toolchain, as [`toolchain::identity`] finds it, which the configuration depends on the
 /// files of, so that the toolchain is identified again when it is updated in place.
 fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str) -> String {
-    let (identity, files) = toolchain::identity(verbose_version, Path::new(sysroot));
+    let (identity, file) = toolchain::identity(verbose_version, Path::new(sysroot));
     // a file which is missing is not depended on, as ninja would configure the project again each time
-    for path in files {
-        project.depend(path);
+    if let Some(file) = file {
+        project.depend(file);
     }
     identity
 }

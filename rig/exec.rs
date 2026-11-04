@@ -63,6 +63,9 @@ pub struct Options {
     pub locating: Vec<String>,
     /// The workers which cached edges may run on, once the build's own jobs are full.
     pub workers: Vec<Arc<Remote>>,
+    /// The names rustup installs toolchains by, by their identities, which a worker which does not have one, and
+    /// installs toolchains, installs it by.
+    pub installable: HashMap<String, String>,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -80,6 +83,7 @@ impl Options {
             cache: None,
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
             workers: Vec::new(),
+            installable: HashMap::new(),
         }
     }
 }
@@ -178,6 +182,7 @@ struct Dispatch {
     worker: Arc<Remote>,
     cache: Cache,
     identity: String,
+    install: String,
     action: Action,
     env: Vec<(String, String)>,
     locating: Vec<String>,
@@ -205,6 +210,7 @@ impl Dispatch {
         }
         let request = crate::worker::Request {
             identity: self.identity.clone(),
+            install: self.install.clone(),
             action: self.action.clone(),
             env: self.env.clone(),
             locating: self.locating.clone(),
@@ -743,6 +749,7 @@ impl Run<'_, '_> {
             worker: Arc::clone(&self.options.workers[worker]),
             cache: self.options.cache.as_ref()?.without_remote(),
             identity: edge.cache()?.to_string(),
+            install: self.options.installable.get(edge.cache()?).cloned().unwrap_or_default(),
             action: plan::relocated(self.action(index), &self.relocation),
             env,
             locating: self.options.locating.clone(),
@@ -1497,9 +1504,11 @@ mod tests {
 
     /// A worker whose store is a cache in a directory of its own, which has toolchains by these identities.
     fn worker(cache: &TempCache, identities: &[&str]) -> Arc<Remote> {
-        let toolchain = |identity: &&str| crate::worker::Toolchain { identity: (*identity).into(), env: Vec::new() };
-        let toolchains: Vec<_> = identities.iter().map(toolchain).collect();
-        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 2, move || toolchains.clone());
+        let toolchain =
+            |identity: &&str| crate::worker::Toolchain { identity: (*identity).into(), ..Default::default() };
+        let toolchains = identities.iter().map(toolchain).collect();
+        let capabilities = crate::worker::Capabilities { toolchains, ..Default::default() };
+        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 2, move || capabilities.clone());
         Arc::new(crate::remote::served_worker(cache.0.clone(), executor))
     }
 

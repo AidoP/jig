@@ -179,15 +179,19 @@ workers, given by the `workers` property, usually in the user's configuration, o
 variable, with the workers separated by `;`, which overrides it. A worker is `ssh://[<user>@]<host>[:<port>][/<jig>]`,
 which runs `jig worker --stdio` there by ssh, `tcp://<host>:<port>`, which `jig worker --listen <address> --token-file
 <path>` serves, proved to by the token of `cache/token-file`, or a command which serves one on its stdin and stdout.
-A worker runs as many commands at once as `--jobs`, or as the machine runs threads.
+A worker runs as many commands at once as `--jobs`, or as the machine runs threads, and reports the tags of each
+`--tag <tag>`. `jig workers` shows each worker, with its host, jobs and tags, and the toolchains it has, with the
+targets they have standard libraries for.
 
-A command runs on a worker once it has run here, so that the files its dep-info lists are known. Those and the files
-it declares are sent to the worker, once each, as the worker keeps them in its cache, where the command runs in a
-directory of its own with only them, beside the toolchain, which the worker must have: one with the same `rustc -vV`
-and the same components, which rustup installs. As the paths rustc is given and writes are relative, what it writes
-there is what it would write here, which is fetched into the cache, and pushed to the remote cache as what is built
-here is. A command which fails there, or reads a file it was not sent, runs here again, as do those of a toolchain the
-worker does not have. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+A command runs on a worker once it has run here, so that the files its dep-info lists are known. Those and the files it
+declares are sent to the worker, once each, as the worker keeps them in its cache, where the command runs in a directory
+of its own with only them, beside the toolchain, which the worker must have: one with the same `rustc -vV`, installed by
+rustup from the same release, whichever components it has. A worker run with `--install` installs a toolchain it does
+not have with rustup, by the release's version, such as `1.97.0`, or its channel and date, such as `nightly-2026-11-03`,
+with its minimal profile, trying each once. As the paths rustc is given and writes are relative, what it writes there is
+what it would write here, which is fetched into the cache, and pushed to the remote cache as what is built here is. A
+command which fails there, or reads a file it was not sent, runs here again, as do those of a toolchain the worker does
+not have. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
 
 ```
 # ~/.config/jig/config

@@ -87,6 +87,9 @@ pub struct Settings {
     pub token_file: Option<PathBuf>,
     /// The workers, as `workers` gives them.
     pub workers: Vec<String>,
+    /// The identity of the project's toolchain, and the name rustup installs it by, which a worker which does not have
+    /// it, and installs toolchains, installs it by, if it is known, which configuring finds.
+    pub installable: Option<(String, String)>,
 }
 
 impl Settings {
@@ -122,7 +125,7 @@ impl Settings {
         if let Some(worker) = workers.iter().find(|worker| worker_transport(worker).is_none()) {
             return Err(Error::InvalidWorker(worker.clone()));
         }
-        Ok(Self { dir, size, remote, push, token_file, workers })
+        Ok(Self { dir, size, remote, push, token_file, workers, installable: None })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -293,12 +296,16 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
     }
 }
 
-/// `jig worker --stdio [--jobs <n>]`, which runs the actions of cached edges a build sends it on stdin and stdout, as a
-/// worker, with the toolchains rustup has, and the cache as its store, then collects the cache if it is due, or `jig
-/// worker --listen <address> --token-file <path> [--jobs <n>]`, which runs them for every client which connects over
-/// TCP with the token. It runs as many at once as `--jobs`, or as the machine runs threads at once by default.
+/// `jig worker --stdio`, which runs the actions of cached edges a build sends it on stdin and stdout, as a worker,
+/// with the toolchains rustup has, and the cache as its store, then collects the cache if it is due, or
+/// `jig worker --listen <address> --token-file <path>`, which runs them for every client which connects over TCP with
+/// the token.
+///
+/// It runs as many at once as `--jobs <n>`, or as the machine runs threads at once by default, reports the tags of
+/// each `--tag <tag>`, and with `--install`, installs a toolchain an action needs which it does not have, with rustup.
 pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     let (mut stdio, mut listen, mut token_file, mut jobs) = (false, None, None, None);
+    let (mut tags, mut install) = (Vec::new(), false);
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
     while let Some(arg) = args.next() {
         let mut value = |name: &'static str| args.next().ok_or(Error::MissingArg(name));
@@ -306,6 +313,8 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
             "--stdio" => stdio = true,
             "--listen" => listen = Some(value("--listen <address>")?),
             "--token-file" => token_file = Some(PathBuf::from(value("--token-file <path>")?)),
+            "--tag" => tags.push(value("--tag <tag>")?),
+            "--install" => install = true,
             "--jobs" => {
                 let count = value("--jobs <n>")?;
                 jobs = Some(count.parse::<usize>().ok().filter(|&jobs| jobs > 0).ok_or(Error::InvalidJobs(count))?);
@@ -315,7 +324,12 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
     }
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let jobs = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
-    let executor = rig::worker::Executor::new(cache.dir().join("work"), jobs, crate::toolchain::installed);
+    let mut executor = rig::worker::Executor::new(cache.dir().join("work"), jobs, move || {
+        crate::toolchain::capabilities(tags.clone())
+    });
+    if install {
+        executor = executor.installing(crate::toolchain::install);
+    }
     match (stdio, listen) {
         (true, None) => {
             let server = rig::remote::Server { cache: &cache, push: false, token: None, executor: Some(&executor) };
@@ -328,7 +342,7 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
             let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
             let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
             let bound = listener.local_addr().map_err(Error::Serve)?;
-            eprintln!("running actions with {} toolchains on {bound}", executor.toolchains().len());
+            eprintln!("running actions with {} toolchains on {bound}", executor.capabilities().toolchains.len());
             let token = Some(token.as_slice());
             let server = rig::remote::Server { cache: &cache, push: false, token, executor: Some(&executor) };
             let after = || settings.collect_if_due(&cache);
@@ -337,6 +351,41 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
         (true, Some(_)) => Err(Error::ExtraArg("--listen".into())),
         (false, None) => Err(Error::MissingArg("--stdio or --listen <address>")),
     }
+}
+
+/// `jig workers`, which shows each worker of the `workers` property, with its host, jobs, tags and toolchains, or why
+/// it cannot be reached.
+pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
+    if let Some(extra) = args.next() {
+        return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
+    }
+    let workers = settings.workers()?;
+    if workers.is_empty() {
+        println!("no workers, as the `workers` property and `JIG_WORKERS` give none");
+    }
+    // each is asked at once, as connecting can take a while
+    let reports: Vec<_> = std::thread::scope(|scope| {
+        let mut asked = Vec::new();
+        for worker in &workers {
+            asked.push(scope.spawn(|| (worker.jobs(), worker.capabilities())));
+        }
+        let failed = || (0, Err("the worker could not be asked".into()));
+        asked.into_iter().map(|asked| asked.join().unwrap_or_else(|_| failed())).collect()
+    });
+    for (name, (jobs, report)) in settings.workers.iter().zip(reports) {
+        match report {
+            Ok(capabilities) => {
+                let tags: String = capabilities.tags.iter().flat_map(|tag| [", tagged ", tag.as_str()]).collect();
+                println!("{name}: {}, {jobs} jobs{tags}", capabilities.host);
+                for toolchain in &capabilities.toolchains {
+                    let name = if toolchain.name.is_empty() { "rustc" } else { &toolchain.name };
+                    println!("    {name}: {} for {}", toolchain.release, toolchain.targets.join(", "));
+                }
+            },
+            Err(error) => println!("{name}: {error}"),
+        }
+    }
+    Ok(())
 }
 
 /// Warn of a remote cache which failed during a build, which went on without it.
@@ -461,6 +510,7 @@ mod tests {
             push: true,
             token_file: Some("/t".into()),
             workers: vec!["ssh://worker".into()],
+            installable: None,
         };
         assert_eq!(settings, expected);
         let overridden = env(&[
@@ -478,6 +528,7 @@ mod tests {
             push: false,
             token_file: Some("/t".into()),
             workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
+            installable: None,
         };
         assert_eq!(settings, expected);
         // and turns it off, or has no remote cache

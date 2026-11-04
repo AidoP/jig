@@ -167,6 +167,8 @@ fn cache_settings(database: &database::Database) -> crate::cache::Settings {
         push: database.push,
         token_file: (!database.token_file.is_empty()).then(|| database.token_file.into()),
         workers: database.workers.iter().map(|&worker| worker.into()).collect(),
+        installable: (!database.toolchain_install.is_empty())
+            .then(|| (database.toolchain_identity.into(), database.toolchain_install.into())),
     }
 }
 
