@@ -66,6 +66,22 @@ const CODEGEN_OPTIONS: &[CodegenOption] = &[
     CodegenOption { name: "target-feature", list: ListKind::Joined(",") },
 ];
 
+/// The codegen options which describe the machine the crates are for, or how they are linked for it, which a procedural
+/// macro is not given by `codegen/<option>`, as it is for the host, where rustc loads it, so that one set for a whole
+/// project, such as for a target without an operating system, does not stop it linking or loading.
+const TARGET_OPTIONS: &[&str] = &[
+    "code-model",
+    "default-linker-libraries",
+    "link-arg",
+    "link-self-contained",
+    "linker",
+    "linker-flavor",
+    "no-redzone",
+    "relocation-model",
+    "target-cpu",
+    "target-feature",
+];
+
 /// The value of a codegen option from an attribute of a crate, `codegen/<option>`, which replaces its property.
 pub(super) struct CodegenAttribute {
     pub(super) option: String,
@@ -140,8 +156,9 @@ impl Project {
     /// whose values cannot be given to rustc.
     ///
     /// So that they can be set for the whole project, as with cargo, a procedural macro is not given `lto` or `panic`
-    /// by the properties, as rustc refuses LTO for one, and it must unwind, while an attribute of the crate still gives
-    /// either.
+    /// by the properties, as rustc refuses LTO for one, and it must unwind, nor the options of [`TARGET_OPTIONS`] by
+    /// `codegen/<option>`, as it is for the host, while `codegen/<host>/<option>` and an attribute of the crate still
+    /// give them.
     pub(super) fn codegen_options(
         &mut self,
         span: Span,
@@ -153,13 +170,16 @@ impl Project {
         for option in CODEGEN_OPTIONS {
             // the last attribute for the option replaces the others, and the properties for the targets
             let attribute = attributes.iter().rev().find(|attribute| attribute.option == option.name);
-            let skipped = kind == rust::Kind::ProcMacro && matches!(option.name, "lto" | "panic");
-            if attribute.is_none() && skipped {
+            let proc_macro = kind == rust::Kind::ProcMacro && attribute.is_none();
+            if proc_macro && matches!(option.name, "lto" | "panic") {
                 continue;
             }
             let operand = if let Some(CodegenAttribute { operand, .. }) = attribute {
                 let Operand { data, span, coerce, origin } = operand;
                 Some(Operand { data: data.clone(), span: *span, coerce: *coerce, origin: *origin })
+            } else if proc_macro && TARGET_OPTIONS.contains(&option.name) {
+                // only for the host, by `codegen/<host>/<option>`
+                None
             } else {
                 self.property_operand(&property_name(option), span)
             };
