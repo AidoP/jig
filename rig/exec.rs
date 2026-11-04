@@ -244,6 +244,7 @@ pub fn build(
         directories: HashSet::new(),
         processes: HashMap::new(),
         keys: HashMap::new(),
+        relocation: std::path::absolute(&options.dir).map(|dir| dir.display().to_string()).unwrap_or_default(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -343,6 +344,9 @@ struct Run<'g, 's> {
     processes: HashMap<usize, u32>,
     /// The first key in the cache of each running cached edge.
     keys: HashMap<usize, Hash>,
+    /// The build's directory, absolute, which is replaced in the actions of cached edges by a marker in their keys, so
+    /// that a build in another directory shares their results, or empty if it is not known.
+    relocation: String,
 }
 
 impl Run<'_, '_> {
@@ -633,7 +637,7 @@ impl Run<'_, '_> {
         let outputs: Vec<&str> = outputs.map(|&node| self.graph.path(node)).collect();
         let inputs = self.inputs.get(&index)?;
         let inputs: Vec<(&str, Option<&Hash>)> = inputs.iter().map(|(path, stamp)| (path.as_str(), stamp.hash())).collect();
-        let action = plan::action_bytes(edge);
+        let action = plan::relocated_action_bytes(edge, &self.relocation);
         let key = cache::first_key(identity, &action, &self.options.env, &outputs, edge.depfile(), &inputs);
         self.keys.insert(index, key);
         for discovery in cache.manifest(&key) {
@@ -1222,6 +1226,35 @@ mod tests {
         third.options.cache = Some(cache.0.clone());
         assert_eq!(third.build(&[]).0.cached, 1);
         assert_eq!(third.read("a.o"), "a\nh\n");
+    }
+
+    #[test]
+    fn shares_results_with_builds_in_other_directories() {
+        // a program given its build's directory, as rustc is to remap it, is the same in the key of the cache wherever
+        // the build is
+        let cache = TempCache::new("relocated");
+        let graph = |name: &str| {
+            let dir = std::env::temp_dir().join(format!("rig-exec-{}-{name}", std::process::id()));
+            let script = "printf '%s' \"${1#\"$2\"}\" > out";
+            let exec = Exec {
+                program: "sh".into(),
+                args: vec!["-c".into(), script.into(), "sh".into(), format!("{}/sub", dir.display()), dir.display().to_string()],
+                ..Default::default()
+            };
+            let mut graph = Graph::new();
+            let out = graph.file("out");
+            let kind = EdgeKind::Command(Action::Exec(exec));
+            graph.add_edge(crate::Edge { kind, outputs: vec![out], cache: Some("id".into()), ..Default::default() }).unwrap();
+            graph
+        };
+        let mut first = Build::new("relocated-first", graph("relocated-first"), &[]);
+        first.options.cache = Some(cache.0.clone());
+        assert_eq!(first.build(&[]).0.cached, 0);
+        assert_eq!(first.read("out"), "/sub");
+        let mut second = Build::new("relocated-second", graph("relocated-second"), &[]);
+        second.options.cache = Some(cache.0.clone());
+        assert_eq!(second.build(&[]).0.cached, 1);
+        assert_eq!(second.read("out"), "/sub");
     }
 
     #[test]

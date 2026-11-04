@@ -46,32 +46,72 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
 
 /// Rebases the paths of a project, relative to its root, for ninja, which runs in the build directory.
 ///
-/// A path within the build directory is relative to it, while any other is absolute, so that rustc, which also runs in
-/// the build directory, writes the paths of sources in its dep-info and diagnostics as absolute paths, which ninja and
-/// rust-analyzer can both find.
+/// Every path is relative to the build directory, so that what rustc, which also runs there, is given and writes does
+/// not depend on where the project is: a path within the build directory is relative to it, and any other leads out of
+/// it with `..`, from where the build directory is once symbolic links are followed, so that it leads to the same file
+/// when the build directory is a link. rustc writes the paths of sources in its dep-info as it is given them, which
+/// ninja finds, while what it writes elsewhere, such as in diagnostics and debug info, is remapped to be relative to the
+/// project root, by [`Rebase::remap`].
 struct Rebase {
     /// The project root, which is absolute.
     root: PathBuf,
     /// The build directory, which is absolute.
     build_dir: PathBuf,
+    /// The build directory once symbolic links are followed, which `..` leaves.
+    physical: PathBuf,
 }
 impl Rebase {
     fn new(build_dir: &Path) -> Self {
         let root = normalize(&std::env::current_dir().unwrap_or_default());
         let build_dir = normalize(&root.join(build_dir));
-        Self { root, build_dir }
+        let physical = std::fs::canonicalize(&build_dir).unwrap_or_else(|_| build_dir.clone());
+        Self { root, build_dir, physical }
     }
     fn path(&self, path: &Path) -> PathBuf {
         let path = normalize(&self.root.join(path));
         match path.strip_prefix(&self.build_dir) {
             Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from("."),
             Ok(relative) => relative.to_path_buf(),
-            Err(_) => path,
+            Err(_) => relative_to(&self.physical, &path),
         }
+    }
+    /// Returns the arguments of rustc, rustdoc and clippy which remap the paths they write, other than in dep-info, to be
+    /// relative to the project root, rather than the build directory, as its sources are, given the root module of the
+    /// crate, rebased.
+    ///
+    /// - The build directory, which rustc writes as the working directory of debug info, is the project root, `.`.
+    /// - The path from the build directory to the root is removed from the paths of sources outside the build directory.
+    /// - A root module in the build directory, as one which is generated, has the build directory before it, by the first
+    ///   component of its path, which its modules share.
+    ///
+    /// rustc takes the last of the prefixes which match a path.
+    fn remap(&self, root_module: &Path) -> Vec<String> {
+        let mut remap = vec![format!("--remap-path-prefix={}=.", self.build_dir.display())];
+        let up = self.path(&self.root);
+        if up != Path::new(".") {
+            remap.push(format!("--remap-path-prefix={}=", up.display()));
+            let first = root_module.components().next();
+            if let Some(std::path::Component::Normal(first)) = first {
+                let build_dir = relative_to(&self.root, &self.build_dir).join(first);
+                let first = first.to_string_lossy();
+                remap.push(format!("--remap-path-prefix={first}={}", build_dir.display()));
+            }
+        }
+        remap
     }
     fn paths<'a>(&self, paths: impl IntoIterator<Item = &'a PathBuf>) -> Vec<PathBuf> {
         paths.into_iter().map(|path| self.path(path)).collect()
     }
+}
+
+/// Returns a path relative to a directory, both of which are absolute and normalized, with a `..` for each component of
+/// the directory which the path does not share, or `.` if they are the same.
+fn relative_to(dir: &Path, path: &Path) -> PathBuf {
+    let (dir, path): (Vec<_>, Vec<_>) = (dir.components().collect(), path.components().collect());
+    let shared = dir.iter().zip(&path).take_while(|(lhs, rhs)| lhs == rhs).count();
+    let mut relative: PathBuf = std::iter::repeat_n(std::path::Component::ParentDir, dir.len() - shared).collect();
+    relative.extend(&path[shared..]);
+    if relative.as_os_str().is_empty() { PathBuf::from(".") } else { relative }
 }
 
 /// Returns a path with its `.` and `..` components resolved, for ninja.
@@ -497,7 +537,8 @@ fn write_graph(
         }
         let target = TargetFlag::new(&c.target, project, build_dir);
         let spec = at.paths(&target.spec);
-        let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &codegen(c, project), at);
+        let input = at.path(&c.path);
+        let mut flags = rustc_flags(&target, &at.path(&c.dir), c.kind, &deps, &codegen(c, project), &input, at);
         flags.cfg(&c.cfg);
         let crate_env = crate_env(&c.env);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
@@ -513,7 +554,6 @@ fn write_graph(
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
-        let input = at.path(&c.path);
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
@@ -585,10 +625,10 @@ fn write_graph(
         let target = TargetFlag::new(&unit.target, project, build_dir);
         let spec = at.paths(&target.spec);
         let outdir = at.path(&unit.check_dir());
-        let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &unit.codegen, at);
+        let root = at.path(&unit.root);
+        let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &unit.codegen, &root, at);
         flags.cfg(&unit.cfg);
         let crate_env = crate_env(&unit.env);
-        let root = at.path(&unit.root);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
         let rust = Rust { crate_type, name, input: &root, env, toolchain };
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
@@ -846,8 +886,17 @@ fn write_database(
 ///
 /// The outputs for a target share a directory, `search`, for the dependencies of `--extern` crates. A linker given as a
 /// path, which is relative to the project root, is rebased like the other paths.
-fn rustc_flags(target: &TargetFlag, search: &Path, kind: Kind, deps: &[Extern], codegen: &[String], at: &Rebase) -> Flags {
+fn rustc_flags(
+    target: &TargetFlag,
+    search: &Path,
+    kind: Kind,
+    deps: &[Extern],
+    codegen: &[String],
+    root_module: &Path,
+    at: &Rebase,
+) -> Flags {
     let mut flags = Flags::default();
+    flags.quoted(&at.remap(root_module));
     match &target.spec {
         Some(spec) => flags.plain(&[&format!("--target={}", at.path(spec).display()), "-Zunstable-options"]),
         None => flags.plain(&[&format!("--target={}", target.target)]),
@@ -885,6 +934,14 @@ impl Flags {
             self.ninja.push(' ');
             self.ninja.push_str(arg);
             self.args.push((*arg).to_string());
+        }
+    }
+    /// Add arguments, each quoted for `sh` in `build.ninja`, as a path may have spaces, and ninja would take a `$` as a
+    /// variable.
+    fn quoted(&mut self, args: &[String]) {
+        for arg in args {
+            let _ = write!(self.ninja, " {}", ninja_quote(arg));
+            self.args.push(arg.clone());
         }
     }
     /// Add a codegen option, `-C <option>=<value>`, quoted for `sh` in `build.ninja` if it has to be, as a value, such

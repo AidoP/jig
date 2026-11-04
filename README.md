@@ -119,8 +119,8 @@ branch is checked out and back, or once the build directory is removed, is resto
 printed. The cache is found by the contents of each crate's sources, the crates it uses and the variables it read, and
 by the identity of the toolchain, from `rustc -vV` and the files rustup writes when it installs or updates it, so
 that the project is configured again when the toolchain is updated in place. Setting or unsetting `JIG_CACHE`
-configures the project again too, and the cache is not shared between checkouts yet, as rustc is given the absolute
-paths of their sources. Nothing is removed from the cache yet, so it grows until it is removed. The cache has no
+configures the project again too. The cache is shared between checkouts of a project in different directories, as what
+rustc is given and writes does not depend on where the project is. Nothing is removed from the cache yet, so it grows until it is removed. The cache has no
 effect with ninja.
 
 ```
@@ -151,8 +151,13 @@ reinstalled and run again in place of the program. A wrapper whose program the p
 ./build/bootstrap/jig install --proxy ~/.local
 ```
 
-Ninja runs in the build directory, so paths in `build.ninja` within the build directory are relative to it, and others
-are absolute. Custom commands, tests and `run` run from the project root, so their paths are relative to it as usual.
+Ninja runs in the build directory, so every path in `build.ninja` is relative to it, with those outside it leading out
+of it with `..`, from where it is once symbolic links are followed. rustc, rustdoc and clippy run there too, and are
+given those paths, but the paths they write other than in dep-info, as in diagnostics, panics, `file!()` and debug
+info, are remapped to be relative to the project root, as `src/main.rs`, or `build/gen.rs` for a crate generated in the
+build directory, with the project root as the working directory of debug info, so that what they write does not depend
+on where the project is, and a build in another directory is the same. Custom commands, tests and `run` run from the
+project root, so their paths are relative to it as usual.
 Ninja cannot write a line break, so a path in `build.ninja`, such as an input, an output, a crate or a linker script,
 or an argument of a command, such as an `env` value or a codegen option, cannot contain one, which is the error
 `newline-in-path` or `newline-in-argument`. A path cannot be empty either, as it would be the directory it is relative
