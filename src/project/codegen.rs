@@ -4,7 +4,7 @@
 use super::diagnostic::{Diagnostic, Message, Severity};
 use super::syntax::Span;
 use super::value::{Coercion, Data, Operand, Property, Type};
-use super::{Project, has_line_break};
+use super::{Project, has_line_break, rust};
 
 /// A codegen option which can be given to a crate.
 struct CodegenOption {
@@ -138,9 +138,13 @@ impl Project {
     /// Returns the codegen options of a crate declared at `span` for each of its targets, as `<option>=<value>`, from
     /// its attributes, or the properties which are set, those for the target replacing the others, reporting those
     /// whose values cannot be given to rustc.
+    ///
+    /// A procedural macro is not given `lto` by the properties, as rustc refuses it for one, so that it can be set for
+    /// the whole project, as cargo does, while an attribute of the crate still gives it.
     pub(super) fn codegen_options(
         &mut self,
         span: Span,
+        kind: rust::Kind,
         attributes: &[CodegenAttribute],
         targets: &[String],
     ) -> Vec<Vec<String>> {
@@ -148,6 +152,9 @@ impl Project {
         for option in CODEGEN_OPTIONS {
             // the last attribute for the option replaces the others, and the properties for the targets
             let attribute = attributes.iter().rev().find(|attribute| attribute.option == option.name);
+            if attribute.is_none() && kind == rust::Kind::ProcMacro && option.name == "lto" {
+                continue;
+            }
             let operand = if let Some(CodegenAttribute { operand, .. }) = attribute {
                 let Operand { data, span, coerce, origin } = operand;
                 Some(Operand { data: data.clone(), span: *span, coerce: *coerce, origin: *origin })

@@ -652,7 +652,9 @@ crate build_tool
 The stable codegen options of rustc are builtin properties named `codegen/<option>`, such as `codegen/opt-level`, which
 have no value until they are set. A crate is compiled, and checked, with `-C <option>=<value>` for each of them which is
 set where it is declared, as with the `target` property, unless the crate has an attribute for the option,
-`codegen/<option> <value>`, which replaces it. A value is converted to a string as in a string template.
+`codegen/<option> <value>`, which replaces it. A procedural macro is not given `codegen/lto`, which rustc refuses for
+one, so LTO can be set for the whole project, as with cargo, unless it has the attribute itself. A value is converted to
+a string as in a string template.
 For `target-feature` and `remark`, a list is joined by `,`, for `llvm-args` and `passes` by spaces, and for `link-arg`
 each item is a separate option. A path, such as for `linker`, is relative to the project root, unless it is a reference.
 `codegen/` is a dict of the options which are set, by name, as a crate declared there would be given them, such as
@@ -675,8 +677,14 @@ crate boot 'boot.rs'
 
 The builtin profiles set the codegen options which are usually wanted together, as cargo's profiles do:
 
-- `profile/release`: `opt-level` 3, `debuginfo` 0, and `debug-assertions` and `overflow-checks` off
-- `profile/debug`: `opt-level` 0, `debuginfo` 2, and `debug-assertions` and `overflow-checks` on
+- `profile/release`: optimised aggressively, with `opt-level` 3, fat LTO, as `lto` `'fat'`, a single codegen unit, as
+  `codegen-units` 1, and `strip` `'symbols'`, which takes the symbols and debug information from what is linked, with
+  `debuginfo` 0, and `debug-assertions` and `overflow-checks` off. It builds slowly, as each binary is optimised with
+  all of the crates it links, in one codegen unit. It does not set `panic`, as tests cannot be built with
+  `panic=abort` on stable rustc, so `set codegen/panic 'abort'` after it makes binaries smaller where tests are not
+  built
+- `profile/debug`: `opt-level` 0, `debuginfo` 2, `debug-assertions` and `overflow-checks` on, and `lto` `'off'`,
+  `codegen-units` 256 and `strip` `'none'`, so that it undoes the release profile
 
 ```
 use profile/release

@@ -4308,23 +4308,37 @@ set codegen/opt-level 1
 use profile/{profile}
 crate other 'other.rs'
 log note codegen/
+crate macro 'macro.rs'
+    crate-type 'proc-macro'
+crate forced 'forced.rs'
+    crate-type 'proc-macro'
+    codegen/lto 'thin'
 ")]);
     let host = project.host();
     let output = project.configure().ok();
     assert_contains(
         output.build(&format!("{host}/libfast.rlib")),
-        "-C debug-assertions=false -C debuginfo=0 -C opt-level=3 -C overflow-checks=false",
+        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C strip=symbols",
     );
     assert_contains(
         output.build(&format!("{host}/libslow.rlib")),
-        "-C debug-assertions=true -C debuginfo=2 -C opt-level=0 -C overflow-checks=true",
+        "-C codegen-units=256 -C debug-assertions=true -C debuginfo=2 -C lto=off -C opt-level=0 -C overflow-checks=true -C strip=none",
     );
     // a profile which has already been used is applied again, replacing what was set since
     assert_contains(
         output.build(&format!("{host}/libother.rlib")),
-        "-C debug-assertions=false -C debuginfo=0 -C opt-level=3 -C overflow-checks=false",
+        "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C lto=fat -C opt-level=3 -C overflow-checks=false -C strip=symbols",
     );
-    output.stderr("note: debug-assertions: false, debuginfo: 0, opt-level: 3, overflow-checks: false");
+    output.stderr(
+        "note: codegen-units: 1, debug-assertions: false, debuginfo: 0, lto: fat, opt-level: 3, overflow-checks: false, \
+strip: symbols",
+    );
+    // a procedural macro is not given LTO by the properties, as rustc refuses it, but is by its own attribute
+    let (prefix, suffix) = (std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
+    let proc_macro = output.build(&format!("{host}/{prefix}macro{suffix}"));
+    assert_contains(proc_macro, "-C codegen-units=1 -C debug-assertions=false -C debuginfo=0 -C opt-level=3");
+    assert!(!proc_macro.contains("lto"), "{proc_macro}");
+    assert_contains(output.build(&format!("{host}/{prefix}forced{suffix}")), "-C lto=thin");
     // the profiles are part of jig, so the configuration does not depend on them as files
     let depfile = project.depfile();
     assert!(depfile.starts_with("build.ninja: ../Jig reconfigure.stamp"), "{depfile}");
