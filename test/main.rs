@@ -89,6 +89,11 @@ impl Project {
         String::from_utf8(output.stdout).unwrap().trim().into()
     }
 }
+/// Whether `jig` builds with rig, as `JIG_ENGINE=rig` has it, rather than ninja.
+fn rig_engine() -> bool {
+    std::env::var_os("JIG_ENGINE").is_some_and(|engine| engine == "rig")
+}
+
 fn configure_path() -> PathBuf {
     match std::env::var_os("CONFIGURE") {
         Some(path) => std::path::absolute(path).unwrap(),
@@ -1348,9 +1353,16 @@ log note 'data read'
     let output = build();
     assert_contains(&output, "CONFIGURE build.ninja");
     assert_contains(&output, "note: extra exists");
-    // ninja keeps the dependencies in its log, rather than the depfile
-    let deps = Command::new("ninja").args(["-t", "deps", "build.ninja"]).current_dir(project.dir.join("build")).output().unwrap();
-    assert_contains(&String::from_utf8(deps.stdout).unwrap(), &format!("\n    {}/extra\n", project.dir.display()));
+    // the engine keeps the dependencies in its log, rather than the depfile
+    let extra = format!("{}/extra", project.dir.display());
+    if rig_engine() {
+        let log = std::fs::read(project.dir.join("build/.rig/log")).unwrap();
+        assert!(log.windows(extra.len()).any(|window| window == extra.as_bytes()), "{extra} is not in rig's log");
+    } else {
+        let mut deps = Command::new("ninja");
+        let deps = deps.args(["-t", "deps", "build.ninja"]).current_dir(project.dir.join("build")).output().unwrap();
+        assert_contains(&String::from_utf8(deps.stdout).unwrap(), &format!("\n    {extra}\n"));
+    }
     // only once, as it is now a dependency
     assert!(!build().contains("CONFIGURE"));
     // a file which could not be read is missing too
@@ -2239,11 +2251,11 @@ build {host}/lint/libapp.rmeta | {host}/lint/app.txt: clippy app.rs | {host}/che
     std::fs::write(project.dir.join("app.rs"), "fn four() -> u32 { util::two() * 2 }\nfn main() { four(); }\n").unwrap();
     let (success, stdout, _) = lint(&["util"]);
     assert!(success, "{stdout}");
-    assert_contains(&stdout, "ninja: no work to do.\nwarning: unneeded `return` statement\n");
+    assert_contains(&stdout, ": no work to do.\nwarning: unneeded `return` statement\n");
     // which fails with `-D`, without linting again
     let (success, stdout, stderr) = lint(&["-D", "util"]);
     assert!(!success, "{stdout}");
-    assert_contains(&stdout, "ninja: no work to do.\n");
+    assert_contains(&stdout, ": no work to do.\n");
     assert_contains(&stderr, "linting raised warnings, which `-D` denies");
     let (success, stdout, _) = lint(&[]);
     assert!(success, "{stdout}");

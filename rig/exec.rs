@@ -41,6 +41,8 @@ pub struct Options {
     pub jobserver: bool,
     /// Set to stop the build, as an interrupt does: no more edges start, and those running are sent `SIGINT`.
     pub cancel: Arc<AtomicBool>,
+    /// Environment variables every command is run with, beside those rig is run with.
+    pub env: Vec<(String, String)>,
 }
 impl Options {
     /// Options for a build in a directory, with as many jobs as the machine runs at once, which stops at the first
@@ -48,7 +50,7 @@ impl Options {
     #[must_use]
     pub fn new(dir: &Path) -> Self {
         let jobs = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
-        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default() }
+        Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(), env: Vec::new() }
     }
 }
 
@@ -313,13 +315,15 @@ impl Run<'_, '_> {
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let Action::Shell(command) = self.action(index).clone();
                     let (dir, sender, makeflags) = (self.options.dir.clone(), sender.clone(), makeflags.clone());
+                    let env = self.options.env.clone();
                     scope.spawn(move || {
                         let start = SystemTime::now();
                         let clock = Instant::now();
                         let spawned = |pid| {
                             let _ = sender.send(Message::Spawned(index, pid));
                         };
-                        let (outcome, output) = run_command(&command, &dir, console, makeflags.as_deref(), &spawned);
+                        let environment = Environment { makeflags: makeflags.as_deref(), env: &env };
+                        let (outcome, output) = run_command(&command, &dir, console, &environment, &spawned);
                         let finished = Finished { index, outcome, output, start, duration: clock.elapsed() };
                         let _ = sender.send(Message::Finished(finished));
                     });
@@ -393,6 +397,14 @@ impl Run<'_, '_> {
         let edge = self.edges[index];
         self.inputs.insert(index, plan::input_stamps(self.graph, edge, &mut self.stamps));
         let data = self.graph.edge(edge);
+        // the directories of the outputs and depfile are created first, as ninja creates them, which the command
+        // fails without if it needs them
+        let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+        for path in outputs.chain(data.depfile()) {
+            if let Some(dir) = Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                let _ = std::fs::create_dir_all(self.options.dir.join(dir));
+            }
+        }
         if data.restat() {
             let outputs = data.outputs().iter().chain(data.implicit_outputs());
             let before = outputs.map(|&output| self.stamps.node(output)).collect();
@@ -499,6 +511,13 @@ fn read_depfile(path: &Path) -> Result<Vec<String>, String> {
     }
 }
 
+/// What a command is run with, beside the environment rig is run with.
+struct Environment<'a> {
+    /// The value of `MAKEFLAGS` which gives it the jobserver, if rig created one.
+    makeflags: Option<&'a str>,
+    env: &'a [(String, String)],
+}
+
 /// Run a command with `sh -c` in a directory, returning how it finished and its output, stdout and stderr together,
 /// with the jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
 ///
@@ -509,13 +528,14 @@ fn run_command(
     command: &str,
     dir: &Path,
     console: bool,
-    makeflags: Option<&str>,
+    environment: &Environment,
     spawned: &dyn Fn(u32),
 ) -> (Outcome, Vec<u8>) {
     use std::os::unix::process::CommandExt;
     let mut sh = Command::new("/bin/sh");
     sh.arg("-c").arg(command).current_dir(dir);
-    if let Some(makeflags) = makeflags {
+    sh.envs(environment.env.iter().map(|(name, value)| (name, value)));
+    if let Some(makeflags) = environment.makeflags {
         sh.env("MAKEFLAGS", makeflags).env("CARGO_MAKEFLAGS", makeflags);
     }
     if console {
@@ -555,10 +575,12 @@ fn run_command(
 
 /// Shows a build as ninja does on a terminal which is not smart: the status and description of each edge once it
 /// finishes, or as it starts for a console edge, which then has the terminal, followed by its output. A failed edge
-/// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown.
+/// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown, and
+/// with `verbose`, each edge is shown by its command rather than its description.
 pub struct Console<W: std::io::Write> {
     pub out: W,
     pub quiet: bool,
+    pub verbose: bool,
 }
 impl<W: std::io::Write> Console<W> {
     fn status(&mut self, graph: &Graph, edge: EdgeId, progress: Progress) {
@@ -567,7 +589,9 @@ impl<W: std::io::Write> Console<W> {
         }
         let data = graph.edge(edge);
         let description = match (data.description(), data.kind()) {
-            ("", EdgeKind::Command(Action::Shell(command))) => command.as_str(),
+            (description, EdgeKind::Command(Action::Shell(command))) if description.is_empty() || self.verbose => {
+                command.as_str()
+            },
             (description, _) => description,
         };
         let _ = writeln!(self.out, "[{}/{}] {description}", progress.finished, progress.total);
@@ -679,6 +703,14 @@ mod tests {
     }
 
     #[test]
+    fn creates_the_directories_of_outputs() {
+        let ninja = "rule cc\n  command = touch $out $out.d\n  depfile = deps/$out.d\nbuild out/sub/a.o: cc\n";
+        let mut build = Build::new("directories", ninja, &[]);
+        assert_eq!(build.ran(&[]), ["out/sub/a.o"]);
+        assert!(build.dir.join("deps/out/sub").is_dir());
+    }
+
+    #[test]
     fn runs_in_parallel() {
         let ninja = "rule sleep\n  command = sleep 0.4 && touch $out\nbuild a: sleep\nbuild b: sleep\nbuild c: sleep\n";
         let mut build = Build::new("parallel", ninja, &[]);
@@ -776,7 +808,7 @@ mod tests {
         let ninja = format!("{CAT}{fail}build ab: cat a b\nbuild bad: fail\n");
         let mut build = Build::new("console-output", &ninja, &[("a", "a\n"), ("b", "b\n")]);
         build.options.jobs = 1;
-        let mut console = Console { out: Vec::new(), quiet: false };
+        let mut console = Console { out: Vec::new(), quiet: false, verbose: false };
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         let out = String::from_utf8(console.out).unwrap();
         assert_eq!(out, "[1/2] cat a b > ab\n[2/2] FAIL bad\nFAILED: bad\necho why && false\nwhy\n");

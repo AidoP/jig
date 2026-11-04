@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::builder::{self, Builder};
 use crate::project::{self, Diagnostic, Message, Severity};
-use crate::{Error, database, generate, ninja};
+use crate::{Error, database, generate, ninja, rig_builder, rig_graph};
 
 /// Where the output of regenerating the build graph is written while finding a project, as `jig check` keeps it out of
 /// stdout.
@@ -24,6 +24,25 @@ pub struct Configured {
     pub build_dir: PathBuf,
     /// The rustup toolchain the project is configured with, which the build and the tests are run with.
     pub toolchain: Option<String>,
+    /// What builds the project, from `JIG_ENGINE`.
+    pub engine: Engine,
+}
+
+/// What builds a project's graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    Ninja,
+    Rig,
+}
+impl Engine {
+    /// Returns the engine `JIG_ENGINE` names, which is ninja by default.
+    pub fn from_env() -> Result<Self, Error> {
+        match std::env::var("JIG_ENGINE").as_deref() {
+            Err(_) | Ok("" | "ninja") => Ok(Self::Ninja),
+            Ok("rig") => Ok(Self::Rig),
+            Ok(other) => Err(Error::UnknownEngine(other.into())),
+        }
+    }
 }
 impl Configured {
     /// Find the project which contains the working directory, which must have been configured.
@@ -59,7 +78,7 @@ impl Configured {
             }
         }
         let toolchain = toolchain(&database);
-        Ok(Self { root, build_dir, toolchain })
+        Ok(Self { root, build_dir, toolchain, engine: Engine::from_env()? })
     }
     /// Report `other-jig` if the running `jig` is not the one which configured the project, which regenerates
     /// `build.ninja`.
@@ -95,7 +114,11 @@ impl Configured {
     }
     /// Returns what builds the project's graph, in the build directory.
     pub fn builder(&self) -> Box<dyn Builder + '_> {
-        Box::new(ninja::Ninja { build_dir: &self.build_dir, toolchain: self.toolchain.as_deref() })
+        let (build_dir, toolchain) = (&self.build_dir, self.toolchain.as_deref());
+        match self.engine {
+            Engine::Ninja => Box::new(ninja::Ninja { build_dir, toolchain }),
+            Engine::Rig => Box::new(rig_builder::Rig { build_dir, toolchain }),
+        }
     }
     /// Build what is requested, failing if it was not built.
     pub fn build(&self, request: &builder::Request) -> Result<(), Error> {
@@ -146,7 +169,8 @@ pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     let database = bytes.as_deref().and_then(|bytes| database::read(bytes).ok());
     let (input, configured, current) = match &database {
         Some(database) => {
-            let built = root.join(database.build_dir).join(ninja::FILE).is_file();
+            let build_dir = root.join(database.build_dir);
+            let built = build_dir.join(ninja::FILE).is_file() && build_dir.join(rig_graph::FILE).is_file();
             let configured = (!database.toolchain.is_empty()).then(|| database.toolchain.to_string());
             let current = built && toolchain.is_none_or(|toolchain| toolchain == database.toolchain);
             (database.input.to_string(), configured, current)
