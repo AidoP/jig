@@ -21,7 +21,8 @@ set release-target 'x86_64-unknown-linux-musl'
 
 ## Building
 
-Building `jig` needs Rust 1.95 or later, and ninja 1.11 or later. Its tests need a nightly toolchain as well, for those
+Building `jig` needs Rust 1.95 or later. ninja 1.11 or later is optional, for building with ninja rather than rig, and
+for the tests which compare the two, which are skipped without it. The tests need a nightly toolchain as well, for those
 of custom targets.
 
 The `perf` test times `jig` on large generated projects, failing if one takes far longer than expected, or grows much
@@ -34,17 +35,17 @@ The unit tests, run by `jig test jig`, include micro-benchmarks of parts of `jig
 finding the crates passed to each crate, which fail if one grows much faster than its input. Their times are shown by
 running the test harness with `--nocapture`, as in `build/<target>/test/jig benches --nocapture`.
 
-`rig/` is rig, the build engine which is replacing ninja, as `docs/build-engine.md` plans. It is a crate which `jig`
-uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate`
-writes rig's graph to `graph` in the build directory beside `build.ninja`, from the same description. ninja builds the
-project by default, while with `JIG_ENGINE=rig`, rig does, keeping the state of the build in `.rig` in the build
-directory. `jig build` then takes a subset of ninja's options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run,
-which shows why each edge would run, `-v` and `--quiet`.
+`rig/` is rig, the build engine which builds projects, as `docs/build-engine.md` plans. It is a crate which `jig`
+uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate` writes rig's
+graph to `graph` in the build directory beside `build.ninja`, from the same description. rig builds the project,
+keeping the state of the build in `.rig` in the build directory, while with `JIG_ENGINE=ninja`, ninja does, with
+`build.ninja`, which ninja can also use on its own in the build directory.
 
-The build system needs to be bootstrapped. To do so, use the `bootstrap.ninja` ninja file.
+The build system needs to be bootstrapped, with `bootstrap.sh`, which builds `jig` with rustc alone, or with
+`bootstrap.ninja`, which does the same with ninja.
 
 ```
-ninja -f bootstrap.ninja
+sh bootstrap.sh
 ```
 
 Then run the bootstrapped `jig` to install.
@@ -55,23 +56,25 @@ build/bootstrap/jig install [prefix]
 
 ## Usage
 
-This builds `build/bootstrap/jig` and generates `build/build.ninja`. From then on, the project is rebuilt with `jig build`,
-which runs ninja in the build directory, and tested with `jig test`.
+This builds `build/bootstrap/jig` and configures the project. From then on, the project is rebuilt with `jig build`, and
+tested with `jig test`.
 
 ```
 ./build/bootstrap/jig build
 ./build/bootstrap/jig test
 ```
 
-`jig generate` evaluates `Jig`, writes `build.ninja` and rig's `graph` to the build directory and records the build directory in `.jig`,
-at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install` find `.jig` in the
-working directory or its parents, so they can be run from anywhere in the project. They configure the project first if
-it is not, from the `Jig` in the closest of those directories with one, or again from what it was configured with if its
-build directory has been removed or `.jig` is from another version of jig. `jig build` passes its arguments to ninja,
-such as the targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`,
-`test`, `test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom
-commands with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the
-checks, which are for rust-analyzer, nor the lints.
+`jig generate` evaluates `Jig`, writes `build.ninja` and rig's `graph` to the build directory and records the build
+directory in `.jig`, at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install`
+find `.jig` in the working directory or its parents, so they can be run from anywhere in the project. They configure the
+project first if it is not, from the `Jig` in the closest of those directories with one, or again from what it was
+configured with if its build directory has been removed or `.jig` is from another version of jig. `jig build` takes the
+targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test`,
+`test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom commands
+with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the checks,
+which are for rust-analyzer, nor the lints. With rig, it takes a subset of ninja's options before them:
+`-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would run, `-v` to show commands rather
+than descriptions, and `--quiet`. With ninja, every argument is passed to ninja.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
 until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
@@ -120,7 +123,7 @@ arguments, so that it is rebuilt when it is out of date. Any other file is insta
 The wrapper runs the `jig` which installed it, writing the build's output to stderr.
 
 `jig build --proxy` brings the configuration up to date, finds the program installed at the wrapper in the prefix, and
-builds it with ninja's `--quiet`, which needs ninja 1.11 or later. If the configuration or the program is out of date,
+builds it quietly, which with ninja needs ninja 1.11 or later. If the configuration or the program is out of date,
 it first reports the `proxy-build` warning, before any diagnostics from configuring. Its severity is that of
 `diagnostic/proxy-build` at the end of the configuration when it was last generated, where `'error'` fails without
 configuring, building or running the program, and `'allow'` hides it. Then, if the wrapper would be

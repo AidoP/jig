@@ -36,17 +36,9 @@ jobs:
           if [ "$toolchain" = msrv ]; then toolchain=$MSRV; fi
           rustup toolchain install "$toolchain" nightly --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
-      - name: Install ninja
-        run: |
-          if ! command -v ninja >/dev/null; then
-            if [ "$RUNNER_OS" = macOS ]; then
-              brew install ninja
-            else
-              sudo apt-get update && sudo apt-get install -y ninja-build
-            fi
-          fi
+      # without ninja, which rig, the default engine, does not need
       - name: Bootstrap
-        run: ninja -f bootstrap.ninja
+        run: sh bootstrap.sh
       - name: Build
         run: build/bootstrap/jig build
       - name: Test
@@ -55,12 +47,27 @@ jobs:
         env:
           # the budgets of the performance tests are for a fast machine, while their scaling is checked regardless
           JIG_PERF_SCALE: ${{ matrix.os == 'ubuntu-24.04-riscv' && '10' || '4' }}
-      - name: Test with rig
-        # the suite again, with rig building rather than ninja, which the projects the tests configure inherit, without
-        # the performance tests, which compare the engines themselves
-        run: build/bootstrap/jig test
+
+  ninja:
+    # the suite with ninja as the engine, bootstrapped with it, which also compares rig with ninja, in the
+    # differential and performance tests
+    name: test with ninja
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchains
+        run: |
+          rustup toolchain install stable nightly --profile minimal --component clippy
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+      - name: Install ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Bootstrap
+        run: ninja -f bootstrap.ninja
+      - name: Test
+        run: build/bootstrap/jig test --all
         env:
-          JIG_ENGINE: rig
+          JIG_ENGINE: ninja
+          JIG_PERF_SCALE: 4
 
   lint:
     # on one machine, with the latest clippy, as its lints change between versions
@@ -72,10 +79,8 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
-      - name: Install ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: Bootstrap
-        run: ninja -f bootstrap.ninja
+        run: sh bootstrap.sh
       - name: Lint
         # any warning fails, as the levels of the lints, set in `Jig`, are those the project keeps to
         run: build/bootstrap/jig lint -D

@@ -46,7 +46,8 @@ A rustup toolchain given with `+` configures the project with it, and is used un
 commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
                          directory
-    build [<arg> ...]    run ninja in the build directory, with any arguments, such as the targets to build
+    build [<arg> ...]    build the project, or the targets given, with rig, or with ninja if `JIG_ENGINE` is
+                         `ninja`, which is given the arguments
     test [-v] [--all] [--tag <tag> ...] [<name> ...]
                          build and run the tests without tags and those with a tag in `test-tags`, or only those named
                          or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the

@@ -329,7 +329,7 @@ fn compare(seed: u64, verbose: bool) {
 
 #[test]
 fn rig_builds_as_ninja_does() {
-    if Command::new("ninja").arg("--version").output().is_err() {
+    if !Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success()) {
         eprintln!("ninja is not installed, so rig is not compared with it");
         return;
     }
