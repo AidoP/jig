@@ -8,16 +8,19 @@
 //! to bring targets up to date, and why, by comparing the [`Stamp`]s of their files with those recorded, and
 //! [`exec::build`] runs them, in parallel.
 //!
-//! rig has no dependencies other than `std`.
+//! rig has no dependencies other than `std`. What it needs of the system which `std` does not provide, such as
+//! signals and FIFOs, is declared from the C library in one module, behind a safe interface.
 
 pub mod depfile;
 pub mod exec;
 mod format;
 mod graph;
+pub mod jobserver;
 pub mod ninja;
 pub mod plan;
 mod stamp;
 pub mod state;
+mod sys;
 
 pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Graph, NodeId, Pool};
 pub use stamp::{Stamp, Stamps};

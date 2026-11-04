@@ -1,0 +1,109 @@
+//! What rig needs of the system which `std` does not provide: signals, process groups and FIFOs.
+//!
+//! The `unsafe` code of rig is here, behind a safe interface.
+
+use std::ffi::{CString, c_int};
+use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
+
+unsafe extern "C" {
+    fn signal(signum: c_int, handler: usize) -> usize;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
+    fn mkfifo(path: *const std::ffi::c_char, mode: ModeT) -> c_int;
+}
+
+#[cfg(target_os = "macos")]
+type ModeT = u16;
+#[cfg(not(target_os = "macos"))]
+type ModeT = u32;
+
+pub const SIGHUP: c_int = 1;
+pub const SIGINT: c_int = 2;
+pub const SIGKILL: c_int = 9;
+pub const SIGTERM: c_int = 15;
+
+/// The flag of `open` which makes reads and writes not block, for a FIFO.
+#[cfg(target_os = "macos")]
+pub const O_NONBLOCK: i32 = 0x0004;
+#[cfg(not(target_os = "macos"))]
+pub const O_NONBLOCK: i32 = 0o4000;
+
+const SIG_ERR: usize = usize::MAX;
+
+/// The signal which interrupted a build, or `0`.
+static INTERRUPTED: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn on_signal(signal: c_int) {
+    // storing to an atomic is safe in a signal handler
+    INTERRUPTED.store(signal, Ordering::SeqCst);
+}
+
+/// Catches the signals which interrupt a build while it is held, rather than letting them end the process, so that
+/// the build can stop the commands it is running and wait for them. The previous handlers are restored when it is
+/// dropped.
+pub struct Interrupts {
+    previous: Vec<(c_int, usize)>,
+}
+impl Interrupts {
+    #[must_use]
+    pub fn catch() -> Self {
+        INTERRUPTED.store(0, Ordering::SeqCst);
+        let mut previous = Vec::new();
+        for signum in [SIGINT, SIGTERM, SIGHUP] {
+            // SAFETY: the handler only stores to an atomic, which is async-signal-safe
+            let handler = unsafe { signal(signum, on_signal as extern "C" fn(c_int) as usize) };
+            if handler != SIG_ERR {
+                previous.push((signum, handler));
+            }
+        }
+        Self { previous }
+    }
+    /// Returns the signal which interrupted the build since it started catching them, if one has, which none can if
+    /// no handler could be installed.
+    #[must_use]
+    pub fn interrupted(&self) -> Option<c_int> {
+        if self.previous.is_empty() {
+            return None;
+        }
+        match INTERRUPTED.load(Ordering::SeqCst) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+}
+impl Drop for Interrupts {
+    fn drop(&mut self) {
+        for &(signum, handler) in &self.previous {
+            // SAFETY: the handler is one `signal` returned, so it was valid for the signal
+            unsafe { signal(signum, handler) };
+        }
+    }
+}
+
+/// Send a signal to the process group of a process, which leads it.
+pub fn signal_group(leader: u32, signum: c_int) {
+    let Ok(pid) = c_int::try_from(leader) else {
+        return;
+    };
+    // SAFETY: `kill` has no memory safety requirements, and a negative pid is the group of its absolute value, which
+    // is never 0 or -1 here, as a child's pid is positive
+    if pid > 1 {
+        unsafe { kill(-pid, signum) };
+    }
+}
+
+/// Create a FIFO at a path, readable and writable by its owner.
+///
+/// # Errors
+///
+/// If the path has a NUL byte, or the FIFO cannot be created.
+pub fn make_fifo(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    // SAFETY: the path is a valid C string, which outlives the call
+    if unsafe { mkfifo(path.as_ptr(), 0o600) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
