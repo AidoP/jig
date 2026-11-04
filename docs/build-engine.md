@@ -1011,10 +1011,36 @@ implementation of that trait, so `generate.rs` doesn't change.
      - A manifest found, and one not found, each asked for once.
      - A result found by the remote's set of inputs, which the local manifest lacks, in one request, and kept.
      - The tests which push wait for the queue.
-   - **Not done yet.** Blobs are still sent whole in a frame, and held in memory. Streaming large blobs should be
-     measured first.
-4. A TCP transport for `jig serve`, with a shared token for private networks.
-5. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
+   - **Not done yet,** at first: blobs were sent whole in a frame, and held in memory. Step 4 streams them.
+4. **Done:** large blobs streamed in parts (protocol version 3).
+   - **`MORE` frames.** A blob larger than a part, 1 MiB, is sent as a frame of the kind `MORE` for each part but the
+     last, with the request's id, then its usual frame with the last part. It is sent that way both as the reply to
+     `GET_BLOB` and as the request `PUT_BLOB`, whose hash leads its last frame.
+     - Each part is written under the writer's lock on its own, so other requests and replies go between them rather
+       than waiting for the whole blob.
+     - The largest frame read is now 16 MiB.
+   - **Parts are written as they are received.** `Cache::blob_writer` writes them to a file in `tmp`, hashed as it
+     goes, which `BlobWriter::finish` adds once the blob is whole and has its hash, and which is removed otherwise.
+     - On the client, a request may have a sink, which the connection's reader thread gives each part to, so the
+       reader never waits on a bounded channel, and streams which interleave can't deadlock.
+     - On the server, the reader thread writes the parts of each upload, by request id.
+   - **Parts are read as they are sent.** `Cache::open_blob` opens the blob, which is read a part at a time, for
+     pushes and for the server's replies.
+     - The server hashes what it sends. If the blob turns out not to have its hash, it ends the reply with
+       `NOT_FOUND` and removes the blob, and the client discards the parts it has.
+   - **Measured.** A cached custom command writes 200 MB, which is pushed through `jig serve --stdio --push`, then
+     fetched into an empty cache:
+     - Pushing used 385 MiB at most in any process, now 32 MiB, and took 17.3 s, now 6.9 s.
+     - Fetching used 194 MiB, now 32 MiB, and took 9.1 s, now 7.4 s.
+   - **Tests.**
+     - A blob of three parts and a bit fetched with small blobs, and blobs of two parts and a bit and of exactly one
+       pushed.
+     - A blob refused as it doesn't have its hash, leaving nothing in `tmp`.
+     - A blob corrupted after its first part ended with `NOT_FOUND`, removed from the server, and not added to the
+       client.
+     - The tests which fetched blobs into memory now fetch them into a cache.
+5. A TCP transport for `jig serve`, with a shared token for private networks.
+6. The HTTP/1.1 client, for `GET`/`PUT /cas/<hash>` and `/ac/<key>` caches such as bazel-remote.
 
 ### Phase 6: distributed execution
 
