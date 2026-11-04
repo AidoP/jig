@@ -8,8 +8,14 @@
 //! requests of a whole build without one waiting for another's round trip. Hashes and keys are 32 bytes, numbers are
 //! little-endian `u32`s and strings are their length followed by their UTF-8 bytes.
 //!
-//! - The client sends `HELLO`, with the magic bytes and the version, and the server replies `HELLO`, with the version
-//!   and whether it takes pushes, `1` or `0`, or `ERROR` with why it does not speak the version.
+//! - The client sends `HELLO`, with the magic bytes and the version, and the server replies `HELLO`, with the version,
+//!   whether it takes pushes, `1` or `0`, and whether it needs a token, `1` followed by a random nonce of 32 bytes,
+//!   or `0`, or `ERROR` with why it does not speak the version.
+//! - A server which needs a token, as one which is reached over TCP does, answers nothing until the client sends
+//!   `AUTH`, with the BLAKE3 hash of the token and the nonce, which it replies to with `OK`, or `ERROR`, ending the
+//!   connection, if it is not of its token. The token itself is never sent, and an answer which is overheard is of no
+//!   use with another nonce. The connection is not encrypted, so a remote cache reached over TCP belongs on a private
+//!   network, while ssh both authenticates and encrypts.
 //! - `GET_MANIFEST` and `GET_BLOB`, with a key or hash, are replied to with `FOUND` and the manifest as it is stored,
 //!   or the blob, or `NOT_FOUND`.
 //! - `GET_RESULTS`, with a number of second keys, is replied to with `FOUND`, the index of the first key whose result
@@ -47,7 +53,7 @@ use std::sync::{Arc, Mutex};
 use crate::cache::{Cache, Discovery, Hash};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -57,6 +63,7 @@ const MISSING: u8 = 5;
 const PUT_BLOB: u8 = 6;
 const PUT_RESULT: u8 = 7;
 const ADD_TO_MANIFEST: u8 = 8;
+const AUTH: u8 = 9;
 const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
@@ -176,6 +183,8 @@ struct Connection {
     /// Whether the server takes pushes.
     pushes: bool,
     process: Mutex<Option<Process>>,
+    /// The socket of a connection over TCP, which is shut down to end it, as the thread which reads it holds it too.
+    socket: Option<std::net::TcpStream>,
 }
 
 /// The process which serves a connection, if one does, with what it writes to stderr, which is kept to tell why it
@@ -238,7 +247,8 @@ impl Connection {
                 waiting.clear();
             }
         });
-        Self { writer: Mutex::new(writer), waiting, next: AtomicU32::new(1), failed, pushes: false, process: Mutex::new(process) }
+        let process = Mutex::new(process);
+        Self { writer: Mutex::new(writer), waiting, next: AtomicU32::new(1), failed, pushes: false, process, socket: None }
     }
     fn fail(&self, why: String) {
         if let Ok(mut failed) = self.failed.lock() {
@@ -318,9 +328,7 @@ impl Connection {
     fn failure(&self) -> Option<String> {
         let why = self.failed.lock().ok()?.clone()?;
         // the server ends once its stdin does
-        if let Ok(mut writer) = self.writer.lock() {
-            *writer = Box::new(std::io::sink());
-        }
+        self.close();
         let stderr = self.process.lock().ok().and_then(|mut process| process.as_mut()?.stderr());
         Some(match stderr {
             Some(stderr) => format!("{why}: {stderr}"),
@@ -328,19 +336,41 @@ impl Connection {
         })
     }
 }
-impl Drop for Connection {
-    fn drop(&mut self) {
+impl Connection {
+    /// End the connection: close what is written to the server, which it ends once it reads to the end of, and shut
+    /// down its socket, if it has one.
+    fn close(&self) {
         if let Ok(mut writer) = self.writer.lock() {
+            let _ = writer.flush();
             *writer = Box::new(std::io::sink());
         }
+        if let Some(socket) = &self.socket {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.close();
         if let Ok(Some(process)) = self.process.get_mut().map(Option::as_mut) {
             let _ = process.child.wait();
         }
     }
 }
 
+/// How a remote cache is reached.
+#[derive(Debug)]
+enum Transport {
+    /// A program and arguments which run the server, speaking the protocol on its stdin and stdout.
+    Command(Vec<String>),
+    /// The address of a server which listens for connections over TCP, as `<host>:<port>`.
+    Tcp(String),
+    /// Streams which were given, as to a server on another thread.
+    Streams,
+}
+
 enum State {
-    /// Not connected yet, with the streams to connect over if they were given rather than a command.
+    /// Not connected yet, with the streams to connect over if they were given rather than a transport.
     Unconnected(Option<(Box<dyn Read + Send>, Box<dyn Write + Send>)>),
     Connected(Arc<Connection>),
     /// It could not connect, for this reason.
@@ -357,8 +387,9 @@ struct Push {
 
 /// A remote cache, which is connected to when it is first used.
 pub struct Remote {
-    /// The program and arguments which run the server, speaking the protocol on its stdin and stdout.
-    command: Vec<String>,
+    transport: Transport,
+    /// The token which proves the client to a server which needs one.
+    token: Option<Vec<u8>>,
     /// Whether results are pushed to it, if it takes them.
     push: bool,
     state: Mutex<State>,
@@ -369,25 +400,37 @@ pub struct Remote {
 }
 impl std::fmt::Debug for Remote {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.debug_struct("Remote").field("command", &self.command).field("push", &self.push).finish_non_exhaustive()
+        f.debug_struct("Remote").field("transport", &self.transport).field("push", &self.push).finish_non_exhaustive()
     }
 }
 
 impl Remote {
-    fn with_state(command: Vec<String>, push: bool, state: State) -> Self {
-        Self { command, push, state: Mutex::new(state), manifests: Mutex::default(), pusher: Mutex::default() }
+    fn with_state(transport: Transport, push: bool, state: State) -> Self {
+        let (manifests, pusher) = (Mutex::default(), Mutex::default());
+        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher }
     }
     /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
     /// results are pushed to with `push`, if it takes them.
     #[must_use]
     pub fn command(command: Vec<String>, push: bool) -> Self {
-        Self::with_state(command, push, State::Unconnected(None))
+        Self::with_state(Transport::Command(command), push, State::Unconnected(None))
+    }
+    /// A remote cache which a server listening at an address, `<host>:<port>`, serves over TCP, as [`listen`] does.
+    #[must_use]
+    pub fn tcp(address: String, push: bool) -> Self {
+        Self::with_state(Transport::Tcp(address), push, State::Unconnected(None))
     }
     /// A remote cache which is served over streams, as by [`serve`] on another thread.
     #[must_use]
     pub fn streams(reader: impl Read + Send + 'static, writer: impl Write + Send + 'static, push: bool) -> Self {
         let streams: (Box<dyn Read + Send>, Box<dyn Write + Send>) = (Box::new(reader), Box::new(writer));
-        Self::with_state(Vec::new(), push, State::Unconnected(Some(streams)))
+        Self::with_state(Transport::Streams, push, State::Unconnected(Some(streams)))
+    }
+    /// Prove the client with a token, to a server which needs one.
+    #[must_use]
+    pub fn with_token(mut self, token: Vec<u8>) -> Self {
+        self.token = Some(token);
+        self
     }
     /// Returns why the remote cache failed, if it did, after which it is not used.
     #[must_use]
@@ -421,8 +464,18 @@ impl Remote {
     fn connect(&self, streams: Option<(Box<dyn Read + Send>, Box<dyn Write + Send>)>) -> Result<Connection, String> {
         let mut connection = if let Some((reader, writer)) = streams {
             Connection::new(reader, writer, None)
+        } else if let Transport::Tcp(address) = &self.transport {
+            let stream = connect_tcp(address).map_err(|error| format!("failed to connect to {address}: {error}"))?;
+            let clone = |stream: &std::net::TcpStream| stream.try_clone().map_err(|error| error.to_string());
+            let (reader, socket) = (clone(&stream)?, clone(&stream)?);
+            let mut connection = Connection::new(Box::new(BufReader::new(reader)), Box::new(BufWriter::new(stream)), None);
+            connection.socket = Some(socket);
+            connection
         } else {
-            let (program, args) = self.command.split_first().ok_or("no command for the remote cache")?;
+            let Transport::Command(command) = &self.transport else {
+                return Err("no way to reach the remote cache".into());
+            };
+            let (program, args) = command.split_first().ok_or("no command for the remote cache")?;
             let mut command = Command::new(program);
             command.args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
             let mut child = command.spawn().map_err(|error| format!("failed to run `{program}`: {error}"))?;
@@ -453,8 +506,19 @@ impl Remote {
         hello.extend_from_slice(&VERSION.to_le_bytes());
         let receiver = connection.send(HELLO, &hello);
         match receiver.and_then(|receiver| receiver.recv().ok()) {
-            Some((HELLO, payload)) if payload.len() == 5 && payload[..4] == VERSION.to_le_bytes() => {
+            Some((HELLO, payload)) if payload.len() >= 6 && payload[..4] == VERSION.to_le_bytes() => {
                 connection.pushes = payload[4] == 1;
+                if payload[5] == 1 {
+                    let nonce = payload.get(6..38).ok_or("the server sent no nonce")?;
+                    let token = self.token.as_deref().ok_or("the server needs a token")?;
+                    // the reply is taken as it is, as the server ends the connection once it refuses the token
+                    let receiver = connection.send(AUTH, &proof(token, nonce));
+                    match receiver.and_then(|receiver| receiver.recv().ok()) {
+                        Some((OK, _)) => (),
+                        Some((ERROR, message)) => return Err(String::from_utf8_lossy(&message).into_owned()),
+                        _ => return Err(connection.failure().unwrap_or_else(|| "the server refused the token".into())),
+                    }
+                }
                 Ok(connection)
             },
             Some((ERROR, message)) => Err(String::from_utf8_lossy(&message).into_owned()),
@@ -646,6 +710,65 @@ fn invalid(message: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, message)
 }
 
+/// Returns the proof of a token, for a nonce: the hash of both.
+fn proof(token: &[u8], nonce: &[u8]) -> Hash {
+    crate::cache::Key::new("rig remote token").part(token).part(nonce).finish()
+}
+
+/// Returns a random nonce, from the system's source of random bytes.
+fn nonce() -> std::io::Result<[u8; 32]> {
+    let mut nonce = [0; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    Ok(nonce)
+}
+
+/// Connect to a server listening at an address over TCP, trying each address it resolves to in turn, and giving up on
+/// one after 10 seconds.
+fn connect_tcp(address: &str) -> std::io::Result<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+    let mut error = std::io::Error::new(std::io::ErrorKind::NotFound, "the address resolves to nothing");
+    for resolved in address.to_socket_addrs()? {
+        match std::net::TcpStream::connect_timeout(&resolved, std::time::Duration::from_secs(10)) {
+            Ok(stream) => {
+                // requests are small, and waited for, so they are not held back to be sent together
+                stream.set_nodelay(true)?;
+                return Ok(stream);
+            },
+            Err(failed) => error = failed,
+        }
+    }
+    Err(error)
+}
+
+/// Serve a cache to every client which connects to a listener over TCP, each on a thread of its own, as `jig serve
+/// --listen` does, taking pushes if `push`, from clients which prove they have the token. `after` is run once each
+/// client is done, as to collect the cache. It serves until the listener fails.
+///
+/// # Errors
+///
+/// If the listener cannot accept a connection.
+pub fn listen(
+    cache: &Cache,
+    listener: &std::net::TcpListener,
+    push: bool,
+    token: &[u8],
+    after: &(dyn Fn() + Sync),
+) -> std::io::Result<()> {
+    std::thread::scope(|scope| {
+        loop {
+            let (stream, _) = listener.accept()?;
+            scope.spawn(move || {
+                let _ = stream.set_nodelay(true);
+                if let Ok(reader) = stream.try_clone() {
+                    // a client which fails, or is refused, ends only its connection
+                    let _ = serve_with_token(cache, reader, stream, push, Some(token));
+                }
+                after();
+            });
+        }
+    })
+}
+
 /// Serve a cache over streams, as `jig serve --stdio` does on its stdin and stdout, until the client ends the stream,
 /// taking pushes if `push`, answering requests on several threads.
 ///
@@ -653,6 +776,21 @@ fn invalid(message: &str) -> std::io::Error {
 ///
 /// If the streams cannot be read or written, or the client does not speak the protocol.
 pub fn serve(cache: &Cache, reader: impl Read, writer: impl Write + Send, push: bool) -> std::io::Result<()> {
+    serve_with_token(cache, reader, writer, push, None)
+}
+
+/// Serve a cache over streams, as [`serve`] does, to a client which proves it has the token, if there is one.
+///
+/// # Errors
+///
+/// If the streams cannot be read or written, the client does not speak the protocol, or does not have the token.
+pub fn serve_with_token(
+    cache: &Cache,
+    reader: impl Read,
+    writer: impl Write + Send,
+    push: bool,
+    token: Option<&[u8]>,
+) -> std::io::Result<()> {
     let (mut reader, mut writer) = (BufReader::new(reader), BufWriter::new(writer));
     let Ok(Some((HELLO, id, hello))) = read_frame(&mut reader) else {
         return Err(invalid("the client does not speak rig's protocol"));
@@ -666,7 +804,29 @@ pub fn serve(cache: &Cache, reader: impl Read, writer: impl Write + Send, push: 
     }
     let mut reply = VERSION.to_le_bytes().to_vec();
     reply.push(u8::from(push));
+    let nonce = token.map(|_| nonce()).transpose()?;
+    match &nonce {
+        Some(nonce) => {
+            reply.push(1);
+            reply.extend_from_slice(nonce);
+        },
+        None => reply.push(0),
+    }
     write_frame(&mut writer, HELLO, id, &reply)?;
+    if let (Some(token), Some(nonce)) = (token, nonce) {
+        let proved = match read_frame(&mut reader) {
+            Ok(Some((AUTH, id, proof_sent))) => Some((id, same(&proof_sent, &proof(token, &nonce)))),
+            _ => None,
+        };
+        match proved {
+            Some((id, true)) => write_frame(&mut writer, OK, id, &[])?,
+            Some((id, false)) => {
+                write_frame(&mut writer, ERROR, id, b"the token is not the server's")?;
+                return Err(invalid("a client with another token"));
+            },
+            None => return Err(invalid("a client which did not prove its token")),
+        }
+    }
     let writer = Mutex::new(writer);
     let (requests, work) = std::sync::mpsc::channel::<Frame>();
     let work = Mutex::new(work);
@@ -765,6 +925,12 @@ fn send_blob(cache: &Cache, hash: &Hash, reply: &dyn Fn(u8, &[u8])) {
     reply(FOUND, &last);
 }
 
+/// Whether two byte strings are the same, comparing every byte, so that how long it takes does not tell where they
+/// differ.
+fn same(lhs: &[u8], rhs: &[u8]) -> bool {
+    lhs.len() == rhs.len() && lhs.iter().zip(rhs).fold(0, |differ, (lhs, rhs)| differ | (lhs ^ rhs)) == 0
+}
+
 /// Returns the reply to a request.
 fn answer(cache: &Cache, push: bool, kind: u8, payload: &[u8]) -> (u8, Vec<u8>) {
     let error = |message: &str| (ERROR, message.as_bytes().to_vec());
@@ -810,6 +976,20 @@ pub(crate) fn served(cache: Cache, push: bool, pushes: bool) -> Remote {
     let (server, replies) = std::io::pipe().unwrap();
     std::thread::spawn(move || serve(&cache, requests, replies, pushes));
     Remote::streams(server, client, push)
+}
+
+/// Returns a remote cache which `cache` is served as, over pipes, to a client which has the token, if there is one,
+/// which proves itself with `client`, if it is given.
+#[cfg(test)]
+pub(crate) fn served_with_token(cache: Cache, token: Option<&'static [u8]>, client: Option<&[u8]>) -> Remote {
+    let (requests, writer) = std::io::pipe().unwrap();
+    let (reader, replies) = std::io::pipe().unwrap();
+    std::thread::spawn(move || serve_with_token(&cache, requests, replies, false, token));
+    let remote = Remote::streams(reader, writer, false);
+    match client {
+        Some(client) => remote.with_token(client.to_vec()),
+        None => remote,
+    }
 }
 
 #[cfg(test)]
@@ -893,7 +1073,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut requests = requests;
             while let Ok(Some((kind, id, _))) = read_frame(&mut requests) {
-                let reply: &[u8] = if kind == HELLO { &[3, 0, 0, 0, 0] } else { b"corrupted" };
+                let reply: &[u8] = if kind == HELLO { &[4, 0, 0, 0, 0, 0] } else { b"corrupted" };
                 let _ = write_frame(&mut replies, if kind == HELLO { HELLO } else { FOUND }, id, reply);
             }
         });
@@ -916,7 +1096,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut requests = requests;
             let Ok(Some((HELLO, id, _))) = read_frame(&mut requests) else { return };
-            let _ = write_frame(&mut replies, HELLO, id, &[3, 0, 0, 0, 0]);
+            let _ = write_frame(&mut replies, HELLO, id, &[4, 0, 0, 0, 0, 0]);
             let mut pending = Vec::new();
             while let Ok(Some((_, id, payload))) = read_frame(&mut requests) {
                 pending.push((id, if payload == a { b"a" } else { b"b" }));
@@ -1045,6 +1225,74 @@ mod tests {
         assert_eq!(client.read_blob(&entry.printed).unwrap(), b"printed");
         assert!(client.without_remote().find(&first, second).is_some());
         for cache in [server, client] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
+    }
+
+    #[test]
+    fn serves_clients_with_the_token() {
+        let server = cache("token");
+        let blob = server.put_bytes(b"contents").unwrap();
+        let local = cache("token-local");
+        let fetch = |token, client| served_with_token(server.clone(), token, client).fetch_blobs(&local, &[blob]);
+        assert_eq!(fetch(Some(b"secret"), Some(b"secret")), [blob]);
+        // a server without one takes a client with one
+        assert_eq!(fetch(None, Some(b"secret")), [blob]);
+        // while a client with another, or none, is refused
+        let remote = served_with_token(server.clone(), Some(b"secret"), Some(b"other"));
+        assert!(remote.fetch_blobs(&local, &[blob]).is_empty());
+        assert!(remote.error().unwrap().contains("the token is not the server's"), "{:?}", remote.error());
+        let remote = served_with_token(server.clone(), Some(b"secret"), None);
+        assert!(remote.manifest(&blob).is_none());
+        assert_eq!(remote.error().as_deref(), Some("the server needs a token"));
+        // and the proof is of the nonce, so one for another nonce is not of use
+        assert_ne!(proof(b"secret", &[1; 32]), proof(b"secret", &[2; 32]));
+        assert!(same(b"abc", b"abc") && !same(b"abc", b"abd") && !same(b"abc", b"ab"));
+        for cache in [server, local] {
+            let _ = std::fs::remove_dir_all(cache.dir());
+        }
+    }
+
+    #[test]
+    fn serves_over_tcp() {
+        let server = cache("tcp");
+        let blob = server.put_bytes(b"over tcp").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let listening = server.clone();
+        let collected = Arc::new(AtomicU32::new(0));
+        let after = Arc::clone(&collected);
+        std::thread::spawn(move || {
+            let after = move || {
+                after.fetch_add(1, Ordering::SeqCst);
+            };
+            listen(&listening, &listener, true, b"secret", &after)
+        });
+        // two clients at once, one of which pushes
+        let pusher = cache("tcp-pusher").with_remote(Arc::new(Remote::tcp(address.clone(), true).with_token(b"secret".to_vec())));
+        let local = cache("tcp-local");
+        let fetcher = Remote::tcp(address.clone(), false).with_token(b"secret".to_vec());
+        assert_eq!(fetcher.fetch_blobs(&local, &[blob]), [blob]);
+        assert_eq!(local.read_blob(&blob).unwrap(), b"over tcp");
+        let blob_pushed = crate::blake3::hash(b"pushed");
+        assert!(pusher.remote().unwrap().put_blob(&blob_pushed, b"pushed"));
+        assert!(server.has_blob(&blob_pushed));
+        // a client without the token is refused, and the server goes on
+        let refused = Remote::tcp(address.clone(), false);
+        assert!(refused.manifest(&blob).is_none());
+        assert_eq!(fetcher.fetch_blobs(&local, &[blob_pushed]), [blob_pushed]);
+        // each client which is done is collected after
+        drop((fetcher, refused, pusher));
+        let waited = std::time::Instant::now();
+        while collected.load(Ordering::SeqCst) < 3 && waited.elapsed() < std::time::Duration::from_secs(5) {
+            std::thread::yield_now();
+        }
+        assert_eq!(collected.load(Ordering::SeqCst), 3);
+        // and an address which nothing listens at fails
+        let closed = Remote::tcp("127.0.0.1:1".into(), false);
+        assert!(closed.manifest(&blob).is_none());
+        assert!(closed.error().unwrap().contains("failed to connect to 127.0.0.1:1"));
+        for cache in [server, local] {
             let _ = std::fs::remove_dir_all(cache.dir());
         }
     }

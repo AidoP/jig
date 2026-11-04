@@ -11,7 +11,10 @@
 //! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache it is in front of, if any, as
 //!   `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there with ssh, or as a command, split at
 //!   spaces, which serves it on its stdin and stdout.
+//!   It can also be `tcp://<host>:<port>`, which `jig serve --listen` serves.
 //! - `cache/push`, or `JIG_REMOTE_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
+//! - `cache/token-file`: the file of the token which proves the client to a remote cache which needs one, as one
+//!   reached over TCP does, read when it is connected to, so that the token is not recorded with the project.
 //!
 //! The settings are resolved when the project is configured, as the variables are read by the configuration, and
 //! recorded in its database, which a build reads them from.
@@ -55,6 +58,7 @@ pub struct Properties {
     pub size: String,
     pub remote: String,
     pub push: bool,
+    pub token_file: String,
 }
 
 /// How rig caches, from the cache's properties and the variables which override them.
@@ -67,6 +71,8 @@ pub struct Settings {
     /// The remote cache, as `cache/remote` gives it, if there is one.
     pub remote: Option<String>,
     pub push: bool,
+    /// The file of the token for the remote cache, absolute, if there is one.
+    pub token_file: Option<PathBuf>,
 }
 
 impl Settings {
@@ -87,11 +93,13 @@ impl Settings {
         let size = parse_size(&size).ok_or(Error::InvalidSize(size))?;
         let remote = (!remote.trim().is_empty()).then_some(remote);
         if let Some(remote) = &remote
-            && remote_command(remote, push).is_none()
+            && remote_transport(remote, push).is_none()
         {
             return Err(Error::InvalidRemote(remote.clone()));
         }
-        Ok(Self { dir, size, remote, push })
+        let token_file = &properties.token_file;
+        let token_file = (!token_file.is_empty()).then(|| std::path::absolute(token_file).unwrap_or_else(|_| token_file.into()));
+        Ok(Self { dir, size, remote, push, token_file })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -99,16 +107,46 @@ impl Settings {
             return Ok(None);
         };
         let cache = rig::cache::Cache::open(dir).map_err(Error::Rig)?;
-        let command = self.remote.as_deref().filter(|_| remote).and_then(|remote| remote_command(remote, self.push));
-        Ok(Some(match command {
-            Some(command) => cache.with_remote(std::sync::Arc::new(rig::remote::Remote::command(command, self.push))),
-            None => cache,
-        }))
+        let transport = self.remote.as_deref().filter(|_| remote).and_then(|remote| remote_transport(remote, self.push));
+        let mut remote = match transport {
+            Some(Transport::Command(command)) => rig::remote::Remote::command(command, self.push),
+            Some(Transport::Tcp(address)) => rig::remote::Remote::tcp(address, self.push),
+            None => return Ok(Some(cache)),
+        };
+        if let Some(path) = &self.token_file {
+            remote = remote.with_token(read_token(path)?);
+        }
+        Ok(Some(cache.with_remote(std::sync::Arc::new(remote))))
     }
     /// Collect the cache after a build, if it was last collected a day ago or longer.
     pub fn collect_if_due(&self, cache: &rig::cache::Cache) {
         let _ = cache.gc_if_due(self.size, EVERY);
     }
+}
+
+/// How a remote cache is reached.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// A command which serves it on its stdin and stdout.
+    Command(Vec<String>),
+    /// A server which listens at `<host>:<port>` over TCP.
+    Tcp(String),
+}
+
+/// Returns how a remote cache is reached, from `cache/remote`, which pushes if `push`: `tcp://<host>:<port>` over TCP,
+/// or otherwise by a command, as [`remote_command`] finds it, or `None` if it is neither.
+pub fn remote_transport(remote: &str, push: bool) -> Option<Transport> {
+    let Some(address) = remote.strip_prefix("tcp://") else {
+        return remote_command(remote, push).map(Transport::Command);
+    };
+    let (host, port) = address.rsplit_once(':')?;
+    (!host.is_empty() && port.parse::<u16>().is_ok()).then(|| Transport::Tcp(address.to_string()))
+}
+
+/// Returns a token, from its file, without the whitespace around it, such as the line break which ends it.
+fn read_token(path: &std::path::Path) -> Result<Vec<u8>, Error> {
+    let token = std::fs::read(path).map_err(|error| Error::Read(path.into(), error))?;
+    Ok(token.trim_ascii().to_vec())
 }
 
 /// Returns the command which serves a remote cache, from `JIG_REMOTE_CACHE`, which pushes if `push`, or `None` if it is
@@ -143,24 +181,41 @@ pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
     Some(command)
 }
 
-/// `jig serve --stdio [--push]`, which serves the cache on stdin and stdout, as a remote cache, taking pushes with
-/// `--push`, then collects it if it is due.
+/// `jig serve --stdio [--push]`, which serves the cache on stdin and stdout, as a remote cache, then collects it if it
+/// is due, or `jig serve --listen <address> --token-file <path> [--push]`, which serves it to every client which
+/// connects over TCP with the token, collecting it after each, taking pushes with `--push`.
 pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
-    let (mut stdio, mut push) = (false, false);
-    for arg in args {
-        match arg.to_str() {
-            Some("--stdio") => stdio = true,
-            Some("--push") => push = true,
-            _ => return Err(Error::ExtraArg(arg.to_string_lossy().into_owned())),
+    let (mut stdio, mut push, mut listen, mut token_file) = (false, false, None, None);
+    let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
+    while let Some(arg) = args.next() {
+        let mut value = |name: &'static str| args.next().ok_or(Error::MissingArg(name));
+        match arg.as_str() {
+            "--stdio" => stdio = true,
+            "--push" => push = true,
+            "--listen" => listen = Some(value("--listen <address>")?),
+            "--token-file" => token_file = Some(PathBuf::from(value("--token-file <path>")?)),
+            _ => return Err(Error::ExtraArg(arg)),
         }
     }
-    if !stdio {
-        return Err(Error::MissingArg("--stdio"));
-    }
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
-    let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout(), push);
-    settings.collect_if_due(&cache);
-    served.map_err(Error::Serve)
+    match (stdio, listen) {
+        (true, None) => {
+            let served = rig::remote::serve(&cache, std::io::stdin().lock(), std::io::stdout(), push);
+            settings.collect_if_due(&cache);
+            served.map_err(Error::Serve)
+        },
+        (false, Some(address)) => {
+            // over TCP, which authenticates no one, a client must have the token
+            let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
+            let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
+            let bound = listener.local_addr().map_err(Error::Serve)?;
+            eprintln!("serving {} on {bound}", cache.dir().display());
+            let after = || settings.collect_if_due(&cache);
+            rig::remote::listen(&cache, &listener, push, &token, &after).map_err(Error::Serve)
+        },
+        (true, Some(_)) => Err(Error::ExtraArg("--listen".into())),
+        (false, None) => Err(Error::MissingArg("--stdio or --listen <address>")),
+    }
 }
 
 /// Warn of a remote cache which failed during a build, which went on without it.
@@ -269,9 +324,15 @@ mod tests {
         assert_eq!(default_dir(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")])), "/h/.cache/jig");
         assert_eq!(default_dir(env(&[])), "");
         // each variable overrides its property
-        let properties = Properties { dir: "/p".into(), size: "1G".into(), remote: "ssh://cache".into(), push: true };
+        let properties = Properties {
+            dir: "/p".into(),
+            size: "1G".into(),
+            remote: "ssh://cache".into(),
+            push: true,
+            token_file: "/t".into(),
+        };
         let settings = resolved(Settings::resolve(&properties, env(&[])));
-        let expected = Settings { dir: Some("/p".into()), size: 1 << 30, remote: Some("ssh://cache".into()), push: true };
+        let expected = Settings { dir: Some("/p".into()), size: 1 << 30, remote: Some("ssh://cache".into()), push: true, token_file: Some("/t".into()) };
         assert_eq!(settings, expected);
         let overridden = env(&[
             ("JIG_CACHE", "/c"),
@@ -280,12 +341,12 @@ mod tests {
             ("JIG_REMOTE_CACHE_PUSH", "0"),
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
-        let expected = Settings { dir: Some("/c".into()), size: 2 << 20, remote: Some("ssh://other".into()), push: false };
+        let expected = Settings { dir: Some("/c".into()), size: 2 << 20, remote: Some("ssh://other".into()), push: false, token_file: Some("/t".into()) };
         assert_eq!(settings, expected);
         // and turns it off, or has no remote cache
         let off = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE", "off"), ("JIG_REMOTE_CACHE", " ")])));
         assert_eq!((off.dir, off.remote), (None, None));
-        let empty = Properties { dir: String::new(), size: "10G".into(), remote: String::new(), push: false };
+        let empty = Properties { dir: String::new(), size: "10G".into(), remote: String::new(), push: false, token_file: String::new() };
         assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
         // what is not a size or a remote cache is an error
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_SIZE", "lots")])), Err(Error::InvalidSize(_))));
@@ -320,5 +381,10 @@ mod tests {
         assert_eq!(command("ssh://ci@", false), None);
         assert_eq!(command("env JIG_CACHE=/srv jig serve --stdio", false).as_deref(), Some("env JIG_CACHE=/srv jig serve --stdio"));
         assert_eq!(command("  ", false), None);
+        assert_eq!(remote_transport("tcp://cache:7000", true), Some(Transport::Tcp("cache:7000".into())));
+        assert_eq!(remote_transport("tcp://[::1]:7000", false), Some(Transport::Tcp("[::1]:7000".into())));
+        assert_eq!(remote_transport("tcp://cache", false), None);
+        assert_eq!(remote_transport("tcp://:7000", false), None);
+        assert_eq!(remote_transport("tcp://cache:port", false), None);
     }
 }

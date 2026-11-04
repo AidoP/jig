@@ -1513,6 +1513,70 @@ fn cache_command() {
 }
 
 #[test]
+fn remote_cache_over_tcp() {
+    if !rig_engine() {
+        return;
+    }
+    // `jig serve --listen` serves its cache over TCP to clients with its token, which the user's configuration names
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-tcp-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("token"), "secret\n").unwrap();
+    let mut server = jig_command()
+        .args(["serve", "--listen", "127.0.0.1:0", "--token-file", "token", "--push"])
+        .env("JIG_CACHE", dir.join("server"))
+        .current_dir(&dir)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // it says where it listens, which is a port of its own
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(server.stderr.take().unwrap()), &mut line).unwrap();
+    let address = line.trim().rsplit(' ').next().unwrap().to_string();
+    assert!(address.starts_with("127.0.0.1:"), "{line}");
+    let config = dir.join("config");
+    let settings = |token: &str| format!("\
+set cache/remote 'tcp://{address}'
+set cache/token-file path('{token}')
+set cache/push true
+");
+    std::fs::write(&config, settings("token")).unwrap();
+    std::fs::write(dir.join("other-token"), "another").unwrap();
+    let files = [("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() { let unused = 1; }\n")];
+    let build = |project: &Project, local: &str, path: Option<&str>| {
+        let mut command = jig_command();
+        command.arg("build").env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let output = command.output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{text}");
+        text
+    };
+    let configure = |project: &Project, local: &str| {
+        let mut command = jig_command();
+        command.arg("generate").env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        assert!(command.output().unwrap().status.success());
+    };
+    let first = Project::new("tcp-first", &files);
+    configure(&first, "first");
+    assert!(!build(&first, "first", None).contains("warning: the remote cache"));
+    // another checkout, with an empty cache of its own, fetches what the first pushed
+    let second = Project::new("tcp-second", &files);
+    configure(&second, "second");
+    assert_contains(&build(&second, "second", Some("/nonexistent")), "unused variable");
+    // while a client with another token is refused, and builds without it
+    std::fs::write(&config, settings("other-token")).unwrap();
+    let third = Project::new("tcp-third", &files);
+    configure(&third, "third");
+    assert_contains(&build(&third, "third", None), "the token is not the server's");
+    let _ = server.kill();
+    let _ = server.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn user_configuration() {
     if !rig_engine() {
         return;

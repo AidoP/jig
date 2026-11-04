@@ -68,8 +68,9 @@ commands:
                          show what rig's cache holds, remove what was used longest ago until it is no larger than a
                          size, `JIG_CACHE_SIZE` or 10 GiB by default, as is done after a build once a day, or remove
                          everything in it
-    serve --stdio [--push]
-                         serve rig's cache on stdin and stdout as a remote cache, as `JIG_REMOTE_CACHE` runs it by ssh,
+    serve --stdio [--push] | serve --listen <address> --token-file <path> [--push]
+                         serve rig's cache on stdin and stdout as a remote cache, as `cache/remote` runs it by ssh, or
+                         over TCP at an address, such as `0.0.0.0:7070`, to clients with the token in the file,
                          taking pushes with `--push`
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
@@ -312,6 +313,13 @@ fn declare_builtins(
                 "the remote cache which rig's cache is in front of, as `'ssh://[<user>@]<host>[:<port>][/<jig>]'` or \
                  a command which serves it on its stdin and stdout, or empty without one, which `JIG_REMOTE_CACHE` \
                  overrides",
+            ),
+            String::new(),
+        ),
+        (
+            project::Property::new("cache/token-file".into(), project::Type::String).info(
+                "the file of the token which proves rig to a remote cache which needs one, as `jig serve --listen` \
+                 does, or empty without one",
             ),
             String::new(),
         ),

@@ -165,6 +165,7 @@ fn cache_settings(database: &database::Database) -> crate::cache::Settings {
         size: database.cache_size.parse().unwrap_or(0),
         remote: (!database.remote_cache.is_empty()).then(|| database.remote_cache.into()),
         push: database.push,
+        token_file: (!database.token_file.is_empty()).then(|| database.token_file.into()),
     }
 }
 
