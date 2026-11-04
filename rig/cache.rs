@@ -269,13 +269,22 @@ impl Cache {
     /// Fetch a blob from the remote cache if this one does not have it, once it is checked against its hash, returning
     /// whether this one has it then.
     fn fetch_blob(&self, hash: &Hash) -> bool {
-        if self.has_blob(hash) {
-            return true;
-        }
-        let Some(bytes) = self.remote().and_then(|remote| remote.blob(hash)) else {
-            return false;
+        self.fetch_blobs(std::slice::from_ref(hash));
+        self.has_blob(hash)
+    }
+    /// Fetch the blobs this cache does not have from the remote cache, asking for them at once, each checked against
+    /// its hash.
+    pub fn fetch_blobs(&self, blobs: &[Hash]) {
+        let Some(remote) = self.remote() else {
+            return;
         };
-        self.accept_blob(hash, &bytes)
+        let missing: Vec<Hash> = blobs.iter().filter(|blob| !self.has_blob(blob)).copied().collect();
+        if missing.is_empty() {
+            return;
+        }
+        for (blob, contents) in remote.blobs(&missing) {
+            self.accept_blob(&blob, &contents);
+        }
     }
     /// Add a blob which was sent, if it has its hash, returning whether it was added.
     pub(crate) fn accept_blob(&self, hash: &Hash, bytes: &[u8]) -> bool {
@@ -336,15 +345,53 @@ impl Cache {
     /// remote cache has it, when it is added to this one, and its blobs are fetched when they are restored.
     #[must_use]
     pub fn result(&self, key: &Hash) -> Option<Entry> {
-        let local = read(RESULT, &self.keyed("ac", key)).and_then(|bytes| read_result(&bytes));
-        let complete = |entry: &Entry| entry_blobs(entry).all(|blob| self.has_blob(blob));
-        if let Some(entry) = local.filter(complete) {
+        if let Some(entry) = self.local_result(key) {
             return Some(entry);
         }
-        let bytes = self.remote()?.result(key)?;
-        let entry = read_result(valid(RESULT, &bytes)?)?;
-        self.accept_raw(&self.keyed("ac", key), &bytes).ok()?;
+        let (_, bytes) = self.remote()?.first_result(std::slice::from_ref(key))?;
+        self.accept_fetched(key, &bytes)
+    }
+    /// Returns the result of an edge by its second key, if this cache has it and every blob it needs.
+    fn local_result(&self, key: &Hash) -> Option<Entry> {
+        let entry = read(RESULT, &self.keyed("ac", key)).and_then(|bytes| read_result(&bytes))?;
+        let complete = entry_blobs(&entry).all(|blob| self.has_blob(blob));
+        complete.then_some(entry)
+    }
+    /// Add a result fetched from the remote cache, as it is stored, by its second key, if it is valid.
+    fn accept_fetched(&self, key: &Hash, bytes: &[u8]) -> Option<Entry> {
+        let entry = read_result(valid(RESULT, bytes)?)?;
+        self.accept_raw(&self.keyed("ac", key), bytes).ok()?;
         Some(entry)
+    }
+    /// Returns the result of an edge by its first key, and its second, which `second` finds from a set of inputs the
+    /// edge discovered: by each set in this cache's manifest, the latest first, then, if none of them leads to a result
+    /// here, by every set in this one's and the remote's, asked for at once. A result found in the remote cache is
+    /// added to this one, with its set of inputs, and its blobs are fetched when they are restored. The result found is
+    /// made the latest used.
+    #[must_use]
+    pub fn find(&self, first: &Hash, second: impl Fn(&Discovery) -> Hash) -> Option<(Hash, Entry)> {
+        let mut discoveries = self.local_manifest(first);
+        let mut keys = Vec::new();
+        for discovery in &discoveries {
+            let key = second(discovery);
+            if let Some(entry) = self.local_result(&key) {
+                self.used(first, &key);
+                return Some((key, entry));
+            }
+            keys.push(key);
+        }
+        let remote = self.remote()?;
+        let manifest = remote.manifest(first).and_then(|bytes| read_manifest(valid(MANIFEST, &bytes)?));
+        for discovery in manifest.unwrap_or_default() {
+            if !discoveries.contains(&discovery) {
+                keys.push(second(&discovery));
+                discoveries.push(discovery);
+            }
+        }
+        let (index, bytes) = remote.first_result(&keys)?;
+        let entry = self.accept_fetched(&keys[index], &bytes)?;
+        let _ = self.add_to_manifest(first, discoveries[index].clone());
+        Some((keys[index], entry))
     }
     /// Returns a result as it is stored, by its second key, if it is valid and the cache has every blob it needs, as a
     /// remote cache sends it.
@@ -375,32 +422,14 @@ impl Cache {
         std::fs::write(&tmp, bytes)?;
         Self::place(&tmp, path)
     }
-    /// Push the result of an edge, by its keys, and the inputs it discovered, to the remote cache, if it takes pushes:
-    /// first the blobs it does not have, then the result, then the manifest, so that it never has a result without its
-    /// blobs. Returns whether it was pushed.
+    /// Push the result of an edge, by its keys, and the inputs it discovered, to the remote cache, if it takes pushes,
+    /// in the background, returning whether it is to be pushed. [`Self::wait_for_pushes`] waits for it.
+    #[must_use]
     pub fn push(&self, first: &Hash, second: &Hash, discovery: &Discovery) -> bool {
-        let Some(remote) = self.remote().filter(|remote| remote.pushes()) else {
+        let Some(remote) = self.remote() else {
             return false;
         };
-        let Some(bytes) = std::fs::read(self.keyed("ac", second)).ok() else {
-            return false;
-        };
-        let Some(entry) = valid(RESULT, &bytes).and_then(read_result) else {
-            return false;
-        };
-        let blobs: Vec<Hash> = entry_blobs(&entry).copied().collect();
-        let Some(missing) = remote.missing(&blobs) else {
-            return false;
-        };
-        for blob in &missing {
-            let Ok(contents) = self.read_blob(blob) else {
-                return false;
-            };
-            if !remote.put_blob(blob, &contents) {
-                return false;
-            }
-        }
-        remote.put_result(second, &bytes) && remote.add_to_manifest(first, discovery)
+        remote.queue_push(self.without_remote(), first, second, discovery)
     }
     /// Add the result of an edge by its second key, once its blobs have been added.
     ///
@@ -418,6 +447,17 @@ impl Cache {
         }
         self.write(&self.keyed("ac", key), w)
     }
+    /// Wait until what is to be pushed to the remote cache has been, if there is one.
+    pub fn wait_for_pushes(&self) {
+        if let Some(remote) = self.remote() {
+            remote.wait_for_pushes();
+        }
+    }
+    /// Returns the cache without the remote cache it is in front of.
+    #[must_use]
+    pub fn without_remote(&self) -> Self {
+        Self { dir: self.dir.clone(), remote: None }
+    }
     fn write(&self, path: &Path, w: Writer) -> std::io::Result<()> {
         let mut bytes = w.0;
         let hash = blake3::hash(&bytes);
@@ -428,8 +468,14 @@ impl Cache {
     }
 }
 
+/// Returns the blobs a result as it is stored refers to, if it is valid.
+pub(crate) fn result_blobs(result: &[u8]) -> Option<Vec<Hash>> {
+    let entry = read_result(valid(RESULT, result)?)?;
+    Some(entry_blobs(&entry).copied().collect())
+}
+
 /// Returns the blobs a result refers to.
-fn entry_blobs(entry: &Entry) -> impl Iterator<Item = &Hash> {
+pub(crate) fn entry_blobs(entry: &Entry) -> impl Iterator<Item = &Hash> {
     std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob))
 }
 

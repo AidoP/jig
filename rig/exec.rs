@@ -148,28 +148,63 @@ enum Message {
     Finished(Finished),
 }
 
-/// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and its result
-/// in the cache, which is restored rather than running the action, if it has one.
+/// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and where its
+/// result is looked for in the cache, which is restored rather than running the action, if it is found.
 struct Job {
     index: usize,
     action: Action,
     console: bool,
-    restore: Option<Restore>,
+    lookup: Option<Lookup>,
     /// The variables a hermetic edge inherits, or `None` if it inherits every one.
     inherit: Option<Vec<String>>,
 }
 
-/// The result of an edge in the cache, which is restored to its outputs.
-struct Restore {
+/// Where the result of a cached edge is looked for: the cache, the edge's first key, and the variables every command
+/// is given, by which the variables it discovered are stamped.
+///
+/// It is looked for on the thread which runs the edge, rather than the build's, so that edges which wait on a remote
+/// cache wait together, and stamps the inputs the edge discovered itself, by their contents.
+struct Lookup {
     cache: Cache,
+    key: Hash,
+    env: Arc<Vec<(String, String)>>,
+}
+impl Lookup {
+    /// Returns the second key of a set of inputs the edge discovered, by their contents as they are now, relative to
+    /// the build's directory, or that they are missing, and the values of the variables, as a command sees them.
+    fn second_key(&self, dir: &Path, discovery: &cache::Discovery) -> Hash {
+        use std::os::unix::ffi::OsStrExt;
+        let hashes: Vec<_> = discovery.inputs.iter().map(|path| crate::blake3::hash_file(&dir.join(path)).ok()).collect();
+        let inputs: Vec<_> = discovery.inputs.iter().zip(&hashes).map(|(path, hash)| (path.as_str(), hash.as_ref())).collect();
+        let value = |name: &str| match self.env.iter().rev().find(|(variable, _)| variable == name) {
+            Some((_, value)) => Some(crate::blake3::hash(value.as_bytes())),
+            None => std::env::var_os(name).map(|value| crate::blake3::hash(value.as_bytes())),
+        };
+        let values: Vec<_> = discovery.env.iter().map(|name| value(name)).collect();
+        let env: Vec<_> = discovery.env.iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref())).collect();
+        cache::second_key(&self.key, &inputs, &env)
+    }
+    /// Find the edge's result, and restore it, returning what its command printed, or `None` if it is not found or
+    /// cannot be restored.
+    fn restore(&self, dir: &Path) -> Option<Vec<u8>> {
+        let (_, entry) = self.cache.find(&self.key, |discovery| self.second_key(dir, discovery))?;
+        Restore { cache: &self.cache, entry }.apply(dir).ok()
+    }
+}
+
+/// The result of an edge in the cache, which is restored to its outputs.
+struct Restore<'a> {
+    cache: &'a Cache,
     entry: cache::Entry,
 }
-impl Restore {
-    /// Restore the outputs of the edge, relative to the build's directory, returning what its command printed.
+impl Restore<'_> {
+    /// Restore the outputs of the edge, relative to the build's directory, returning what its command printed, once
+    /// the blobs which are not in the cache are fetched from the remote cache together.
     ///
     /// If one cannot be, every blob of the result is checked, so that those which are corrupted are removed, and are
     /// added again once the edge has run.
     fn apply(&self, dir: &Path) -> std::io::Result<Vec<u8>> {
+        self.cache.fetch_blobs(&cache::entry_blobs(&self.entry).copied().collect::<Vec<_>>());
         let restored = self.entry.outputs.iter().try_for_each(|output| {
             self.cache.restore(&output.blob, &dir.join(&output.path), output.executable)
         });
@@ -254,6 +289,7 @@ pub fn build(
         directories: HashSet::new(),
         processes: HashMap::new(),
         keys: HashMap::new(),
+        env: Arc::new(options.env.clone()),
         relocation: std::path::absolute(&options.dir).map(|dir| dir.display().to_string()).unwrap_or_default(),
     };
     if options.jobserver && !run.edges.is_empty() {
@@ -265,7 +301,12 @@ pub fn build(
     for index in ready {
         run.make_ready(index);
     }
-    run.run(observer)?;
+    let ran = run.run(observer);
+    // what was added to the cache is pushed to the remote cache before the build ends
+    if let Some(cache) = &options.cache {
+        cache.wait_for_pushes();
+    }
+    ran?;
     run.report.not_run = run.status.iter().filter(|status| matches!(status, Status::Waiting)).count();
     Ok(run.report)
 }
@@ -354,6 +395,8 @@ struct Run<'g, 's> {
     processes: HashMap<usize, u32>,
     /// The first key in the cache of each running cached edge.
     keys: HashMap<usize, Hash>,
+    /// The variables every command is given, for the threads which look edges up in the cache.
+    env: Arc<Vec<(String, String)>>,
     /// The build's directory, absolute, which is replaced in the actions of cached edges by a marker in their keys, so
     /// that a build in another directory shares their results, or empty if it is not known.
     relocation: String,
@@ -375,11 +418,11 @@ impl Run<'_, '_> {
                 let (work, sender, dir, env, makeflags) = (&work, sender.clone(), &dir, &env, makeflags.as_deref());
                 scope.spawn(move || {
                     // the lock is held while waiting for a job, which the other threads wait for in turn
-                    while let Ok(Ok(Job { index, action, console, restore, inherit })) = work.lock().map(|work| work.recv()) {
+                    while let Ok(Ok(Job { index, action, console, lookup, inherit })) = work.lock().map(|work| work.recv()) {
                         let start = SystemTime::now();
                         let clock = Instant::now();
                         // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
-                        let restored = restore.and_then(|restore| restore.apply(dir).ok());
+                        let restored = lookup.and_then(|lookup| lookup.restore(dir));
                         let cached = restored.is_some();
                         let (outcome, output) = if let Some(printed) = restored {
                             (Outcome::Succeeded, printed)
@@ -441,7 +484,7 @@ impl Run<'_, '_> {
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
                     let action = self.action(index).clone();
-                    let restore = self.lookup(index);
+                    let lookup = self.lookup(index);
                     let edge = self.graph.edge(self.edges[index]);
                     let inherit = edge.hermetic().then(|| {
                         let mut inherit = self.options.locating.clone();
@@ -449,7 +492,7 @@ impl Run<'_, '_> {
                         inherit
                     });
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console, restore, inherit });
+                    let _ = jobs.send(Job { index, action, console, lookup, inherit });
                 }
                 if self.progress.running == 0 {
                     break;
@@ -637,12 +680,10 @@ impl Run<'_, '_> {
             observer.finished(self.graph, edge, &outcome, &output, self.progress);
         }
     }
-    /// Returns the result of a cached edge in the cache, if it has run with the same action and inputs before, finding
-    /// its first key, which its result is added to the cache by if it runs.
-    ///
-    /// Each set of inputs the edge discovered with that key, the latest first, is stamped by their contents as they
-    /// are now, which leads to the result with those contents if there is one.
-    fn lookup(&mut self, index: usize) -> Option<Restore> {
+    /// Returns where the result of a cached edge is looked for, by its first key, which its result is added to the
+    /// cache by if it runs. The thread which runs it looks for it, by the sets of inputs the edge discovered with that
+    /// key.
+    fn lookup(&mut self, index: usize) -> Option<Lookup> {
         let cache = self.options.cache.as_ref()?;
         let edge = self.graph.edge(self.edges[index]);
         let identity = edge.cache()?;
@@ -658,19 +699,7 @@ impl Run<'_, '_> {
         let passed: Vec<_> = edge.pass_env().iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref())).collect();
         let key = cache::first_key(identity, &action, &self.options.env, &passed, &outputs, edge.depfile(), &inputs);
         self.keys.insert(index, key);
-        for discovery in cache.manifest(&key) {
-            let stamps: Vec<Stamp> = discovery.inputs.iter().map(|path| self.stamps.path_as(path, true, None)).collect();
-            let inputs = discovery.inputs.iter().zip(&stamps).map(|(path, stamp)| (path.as_str(), stamp.hash()));
-            let inputs: Vec<_> = inputs.collect();
-            let values: Vec<_> = discovery.env.iter().map(|name| self.stamps.env_hash(name)).collect();
-            let env = discovery.env.iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref()));
-            let second = cache::second_key(&key, &inputs, &env.collect::<Vec<_>>());
-            if let Some(entry) = cache.result(&second) {
-                cache.used(&key, &second);
-                return Some(Restore { cache: cache.clone(), entry });
-            }
-        }
-        None
+        Some(Lookup { cache: cache.clone(), key, env: Arc::clone(&self.env) })
     }
     /// Add the result of a cached edge which has run to the cache, by its first key: its outputs, its depfile and what
     /// its command printed, which it is restored from by its second key, of the contents of the inputs it discovered,
