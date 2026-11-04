@@ -1,7 +1,6 @@
 //! Stamps, which tell whether a file has changed since it was recorded.
 //!
-//! The stamps a build needs are found together before it is planned, by [`stamps_of`], on several threads, or with
-//! `io_uring`, which submits them in batches, if `RIG_IO_URING` is `1` and the system supports it.
+//! The stamps a build needs are found together before it is planned, by [`stamps_of`], on several threads.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -108,17 +107,9 @@ impl<'a> Stamps<'a> {
 /// The fewest files stamped on threads of their own, below which they are stamped on the calling thread.
 const PARALLEL_MIN: usize = 256;
 
-/// Returns the stamps of files, in the same order, found together: with `io_uring` if `RIG_IO_URING` is `1` and the
-/// system supports it, or otherwise on several threads if there are enough of them.
+/// Returns the stamps of files, in the same order, found together on several threads if there are enough of them.
 #[must_use]
 pub fn stamps_of(paths: &[&Path]) -> Vec<Stamp> {
-    #[cfg(all(target_os = "linux", target_pointer_width = "64", target_endian = "little"))]
-    if paths.len() > 1
-        && std::env::var_os("RIG_IO_URING").is_some_and(|value| value == "1")
-        && let Ok(mut ring) = crate::uring::Ring::new()
-    {
-        return ring.stamps(paths);
-    }
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     if paths.len() < PARALLEL_MIN || threads == 1 {
         return paths.iter().map(|path| Stamp::of(path)).collect();
