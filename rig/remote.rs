@@ -73,7 +73,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;

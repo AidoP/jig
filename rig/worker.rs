@@ -23,6 +23,9 @@
 //! was matched by. An action which needs a file that was not sent fails, as do those whose paths are
 //! absolute, or do not lead from the build's directory as given, which are refused, and the client runs it itself.
 //!
+//! An action without a toolchain, whose identity is empty, as a test which runs what was built, runs with none, as a
+//! worker runs it with only what it is sent, and the tools it finds in its `PATH`.
+//!
 //! `GET_CAPABILITIES` is replied to with the worker's [`Capabilities`]: its host, its tags, and its toolchains, with
 //! their names, releases, hosts and installed targets, which clients choose workers by.
 
@@ -353,6 +356,9 @@ impl Executor {
     /// Returns the toolchain which runs a request: one of its identity, or else of its release, with the target it
     /// needs, installing it by its name if the worker does not have one and installs toolchains, unless it has tried.
     fn toolchain(&self, request: &Request) -> Option<Toolchain> {
+        if request.identity.is_empty() {
+            return Some(Toolchain::default());
+        }
         let find = || {
             let capabilities = self.capabilities();
             let (identity, target) = (&request.identity, &request.target);
@@ -720,6 +726,9 @@ mod tests {
         };
         let other = Request { identity: "other".into(), ..request.clone() };
         assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
+        // while an action without a toolchain, as a test, runs with none
+        let without = Request { identity: String::new(), outputs: Vec::new(), ..request.clone() };
+        assert!(executor.execute(&cache, &without).unwrap().succeeded);
         for path in ["/etc/passwd", "src/../../escape"] {
             let outside = Request { outputs: vec![path.into()], ..request.clone() };
             assert!(matches!(executor.execute(&cache, &outside), Err(Refused::Error(_))), "{path}");

@@ -821,6 +821,8 @@ struct TestCommand<'a> {
     command: Vec<String>,
     libtest: bool,
     tags: &'a [String],
+    on_workers: &'a str,
+    inputs: Vec<String>,
 }
 
 fn write_database(
@@ -851,7 +853,18 @@ fn write_database(
         if custom.is_test() {
             let command = custom.command(&project.runners);
             let (name, libtest, tags) = (&custom.name, custom.is_libtest(), &custom.tags);
-            commands.push(TestCommand { name, command, libtest, tags });
+            let on_workers = custom.on_workers().unwrap_or_default();
+            // what a test which runs on a worker is sent, relative to the project root, where it runs
+            let inputs = if on_workers.is_empty() {
+                Vec::new()
+            } else {
+                let paths = custom.inputs.iter().chain(&custom.depends);
+                let relative = |path: &PathBuf| {
+                    if path.is_absolute() { relative_to(&at.root, &normalize(path)) } else { normalize(path) }
+                };
+                paths.map(|path| relative(path).display().to_string()).collect()
+            };
+            commands.push(TestCommand { name, command, libtest, tags, on_workers, inputs });
         }
     }
 
@@ -907,7 +920,9 @@ fn write_database(
     for test in &commands {
         let command = test.command.iter().map(String::as_str).collect();
         let tags = test.tags.iter().map(String::as_str).collect();
-        database.tests.push(database::Test { name: test.name, command, libtest: test.libtest, tags });
+        let inputs = test.inputs.iter().map(String::as_str).collect();
+        let (name, libtest, on_workers) = (test.name, test.libtest, test.on_workers);
+        database.tests.push(database::Test { name, command, libtest, tags, on_workers, inputs });
     }
     for (name, path, target, runner, default) in &programs {
         let runner = runner.iter().map(String::as_str).collect();

@@ -70,6 +70,8 @@ pub struct Target {
     /// Whether crates for the target can be tested, from its `test` attribute, or by default, as given by
     /// [`Project::can_test`]. Those for the host target always can be.
     pub test: Option<bool>,
+    /// Whether the tests of crates for the target run on workers, from `test 'workers'`, rather than here.
+    pub on_workers: bool,
     /// The index of the runner of a test harness for the target, which is its last argument, or none to run it
     /// directly.
     pub runner: Option<usize>,
@@ -102,7 +104,7 @@ impl Target {
     /// A builtin target, before any `target` statement overrides it.
     pub fn builtin(name: String) -> Self {
         let kind = TargetKind::Builtin { overridden: None, fields: Vec::new() };
-        Self { name, kind, test: None, runner: None, link_script: None }
+        Self { name, kind, test: None, on_workers: false, runner: None, link_script: None }
     }
     pub fn is_custom(&self) -> bool {
         matches!(self.kind, TargetKind::Custom { .. })
@@ -168,6 +170,7 @@ impl Project {
         let mut inherit = None;
         let mut fields: Vec<Field> = Vec::new();
         let mut test = None;
+        let mut on_workers = false;
         let mut runner = None;
         let mut link_script = None;
         let mut overrides = false;
@@ -202,6 +205,11 @@ impl Project {
                 // tests are only run where they are allowed, and without a runner, they are run directly
                 ("test", Data::None) => test = Some(true),
                 ("test", Data::Bool(value)) => test = Some(value),
+                // or on workers, whichever runs their target
+                ("test", Data::Str(value)) if value == "workers" => {
+                    test = Some(true);
+                    on_workers = true;
+                },
                 // a program and its first arguments, as a `command` is, so it can be a crate or a custom command
                 ("runner", data) => {
                     let operand = Attribute { data, ..attribute }.operand();
@@ -223,7 +231,7 @@ impl Project {
                 },
                 (name @ ("inherit" | "test" | "override"), data) => {
                     let expected = match name {
-                        "test" => "bool",
+                        "test" => "bool or 'workers'",
                         "override" => "none",
                         _ => "str",
                     };
@@ -273,7 +281,7 @@ impl Project {
             },
             None => {
                 let kind = TargetKind::Custom { span, inherit, fields };
-                self.targets.push(Target { name, kind, test, runner, link_script });
+                self.targets.push(Target { name, kind, test, on_workers, runner, link_script });
                 return;
             },
             Some((index, TargetKind::Builtin { overridden: None, .. })) if overrides => {
@@ -289,6 +297,7 @@ impl Project {
                 let target = &mut self.targets[index];
                 target.kind = TargetKind::Builtin { overridden: Some(span), fields };
                 target.test = test;
+                target.on_workers = on_workers;
                 target.runner = runner;
                 target.link_script = link_script;
                 return;
@@ -342,12 +351,29 @@ impl Project {
         can_run
     }
     /// Returns whether crates for a target can be tested, which is given by its `test` attribute, or is whether the
-    /// host can run what is built for a builtin target, while a custom target's specification may describe anything.
+    /// host can run what is built for a builtin target, or else whether there are workers, which may, while a custom
+    /// target's specification may describe anything.
     pub(super) fn can_test(&mut self, name: &str) -> bool {
         match self.target(name).map(|target| (target.test, target.is_custom())) {
             Some((Some(test), _)) => test,
-            Some((None, false)) => self.can_run(name),
+            Some((None, false)) => self.can_run(name) || self.tests_on_workers(name),
             Some((None, true)) | None => false,
+        }
+    }
+    /// Returns whether the tests of crates for a target run on workers: as its `test` attribute is `'workers'`, or as
+    /// it is a builtin target which the host cannot run, and there are workers, of which one may.
+    pub(super) fn tests_on_workers(&mut self, name: &str) -> bool {
+        let Some(target) = self.target(name) else {
+            return false;
+        };
+        let default = target.test.is_none() && !target.is_custom();
+        target.on_workers || (default && name != self.host() && !self.can_run(name) && self.has_workers())
+    }
+    /// Whether there are workers, by `JIG_WORKERS`, if it is set, and otherwise the `workers` property.
+    pub(super) fn has_workers(&mut self) -> bool {
+        match self.read_env(crate::cache::WORKERS) {
+            Some(workers) => workers.to_string_lossy().split(';').any(|worker| !worker.trim().is_empty()),
+            None => self.cache_properties().workers.iter().any(|worker| !worker.trim().is_empty()),
         }
     }
     /// Returns a target which is builtin or has been declared.

@@ -1906,6 +1906,71 @@ fn workers() {
 }
 
 #[test]
+fn tests_on_workers() {
+    // a target whose `test` is `'workers'` has its crates' tests run on a worker which runs it, here the host, which
+    // is sent the test harness and what it depends on, as the files the tests read
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-tests-on-workers", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = dir.join("store").display().to_string();
+    let jig = configure_path().display().to_string();
+    let worker = format!("/usr/bin/env JIG_CACHE={store} {jig} worker --stdio --jobs 2");
+    let passing = "#[test]\nfn reads() { assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"sent\\n\"); }\n";
+    let failing = "#[test]\nfn fails() { panic!(\"on the worker\") }\n";
+    let project = Project::new("tests-on-workers", &[
+        (
+            "Jig",
+            "target {host-target}\n    override\n    test 'workers'\ncrate passing 'passing.rs'\n    test\n    \
+             depends 'data.txt'\ncrate failing 'failing.rs'\n    test\n",
+        ),
+        ("passing.rs", passing),
+        ("failing.rs", failing),
+        ("data.txt", "sent\n"),
+    ]);
+    let test = |workers: &str| {
+        let mut command = jig_command();
+        command.args(["test", "--verbose"]).env("JIG_CACHE", dir.join("local")).env("JIG_WORKERS", workers);
+        let output = command.current_dir(&project.dir).output().unwrap();
+        String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
+    };
+    let shown = test(&worker);
+    // the test which reads what it depends on passes there, and the other fails there, with what it printed
+    assert_contains(&shown, "test passing ... ok");
+    assert_contains(&shown, "test failing ... FAILED");
+    assert_contains(&shown, &format!("failed on {worker}"));
+    assert_contains(&shown, "on the worker");
+    let sent = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &store).output().unwrap();
+    assert!(!String::from_utf8(sent.stdout).unwrap().contains("and 0 blobs"));
+    // without a worker, they cannot run
+    let shown = test("");
+    assert_contains(&shown, "test passing ... FAILED");
+    assert_contains(&shown, "no worker runs");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn targets_which_workers_test() {
+    // a builtin target which the host cannot run is tested, on workers, once there are workers, while without them,
+    // it is tested where the host can run it
+    let host = Command::new("rustc").arg("--print=host-tuple").output().unwrap();
+    let host = String::from_utf8(host.stdout).unwrap();
+    let other = if host.starts_with("s390x") { "powerpc64le-unknown-linux-gnu" } else { "s390x-unknown-linux-gnu" };
+    let project = Project::new("targets-which-workers-test", &[(
+        "Jig",
+        &format!("log note '{{{other}.test}} {{{other}.can-run}}'\n"),
+    )]);
+    let shown = |workers: &str| {
+        let mut command = jig_command();
+        command.arg("generate").env("JIG_WORKERS", workers).current_dir(&project.dir);
+        let output = command.output().unwrap();
+        String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
+    };
+    let with = shown("ssh://worker");
+    assert!(with.contains("true true") || with.contains("true false"), "{with}");
+    let without = shown("");
+    assert!(without.contains("true true") || without.contains("false false"), "{without}");
+}
+
+#[test]
 fn cached_commands_run_the_chosen_toolchain() {
     // a cached command runs in a hermetic environment, which passes on `RUSTUP_TOOLCHAIN`, so that rustc runs the
     // toolchain it chooses, and is identified by, as rustdoc, which is not cached, does, rather than rustup's default,
@@ -3635,7 +3700,7 @@ target worse
     project.configure_with(NIGHTLY).failed()
         // a runner does not allow tests on its own
         .stderr(&format!("error[test-target]: tests for target \"no-tests\" cannot be run, only those for targets which the host \"{host}\" can run, or a target with `test`\n --> Jig:2:12"))
-        .stderr("error[invalid-operand]: str value used where bool is required\n --> Jig:9:10")
+        .stderr("error[invalid-operand]: str value used where bool or 'workers' is required\n --> Jig:9:10")
         .stderr("error[invalid-operand]: list value used where a program, or a list of it and its arguments is required\n  --> Jig:10:12")
         .stderr("error[invalid-operand]: dict value used where str, reference, or a list of them is required\n  --> Jig:13:12")
         .stderr("configuration failed with 4 errors");

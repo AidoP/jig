@@ -60,6 +60,8 @@ pub enum CustomKind {
         runner: Option<usize>,
         /// Whether the command is the test harness of a crate, built by libtest.
         harness: bool,
+        /// The target of a crate's test harness which runs on a worker which runs the target, rather than here.
+        on_workers: Option<String>,
     },
 }
 
@@ -86,7 +88,14 @@ impl Custom {
     /// Whether the test is the test harness of a crate which is run directly, so that it takes libtest's arguments,
     /// while a runner takes the harness as its last argument.
     pub fn is_libtest(&self) -> bool {
-        matches!(self.kind, CustomKind::Test { runner: None, harness: true })
+        matches!(self.kind, CustomKind::Test { runner: None, harness: true, .. })
+    }
+    /// The target of a test which runs on a worker which runs it, rather than here, if it does.
+    pub fn on_workers(&self) -> Option<&str> {
+        match &self.kind {
+            CustomKind::Test { on_workers, .. } => on_workers.as_deref(),
+            CustomKind::Command { .. } => None,
+        }
     }
     /// The inputs, which include the program of the runner, if there is one.
     pub fn inputs(&self, runners: &[Runner]) -> Vec<PathBuf> {
@@ -260,7 +269,11 @@ impl Project {
         let runner = command.unwrap_or_default();
         // the outputs are declared as a property named after the command, once it is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
-        let kind = if test { CustomKind::Test { runner: None, harness: false } } else { CustomKind::Command { outputs, default, install } };
+        let kind = if test {
+            CustomKind::Test { runner: None, harness: false, on_workers: None }
+        } else {
+            CustomKind::Command { outputs, default, install }
+        };
         let custom = Custom {
             name,
             name_span: span,

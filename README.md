@@ -210,6 +210,13 @@ rustc loads it, and what is linked by the host's linker, as binaries and tests a
 set workers ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
 ```
 
+Tests run on workers too, where the host cannot run them. With workers, a builtin target which the host cannot run,
+and which has no `test` attribute, is tested, so that `test {target}.test` tests its crates. `jig test` sends each of
+their tests to a worker whose host is its target, such as an aarch64 or riscv64 machine, with its test harness and what
+it `depends` on, as a test which reads a file at run time must depend on it. It runs there, from where the project root
+is, with the worker's own tools, while the other tests run here, and its result is shown as if it had run here. A
+target whose `test` is `'workers'` has its tests run on workers even where the host can run them.
+
 ### The user's configuration
 
 What belongs to the user or the machine rather than a project, such as rig's cache, is set in the user's
@@ -818,7 +825,9 @@ A `target` statement is followed by indented attributes, which describe the targ
   `-C link-arg=-T<path>`, rather than written to the specification, when a binary, procedural macro or test harness is
   built, which depends on it, unless the crate has its own `link-script`
 - `test <bool>`: whether crates for the target can be tested, which by default is its `can-run` for a builtin target,
-  and `false` for a custom target. Without a value, it is `true`
+  or, if there are workers, `true`, as their tests run on a worker which runs the target, and `false` for a custom
+  target. Without a value, it is `true`, and with `'workers'`, the tests of its crates run on workers, even where the
+  host can run them
 - `runner <program>`: the program which runs a test harness for the target, given as its last argument, or a list of the
   program and its first arguments, as for the `command` of a custom command. As with `run`, a program containing a `/`
   is a path relative to the file, while a reference, such as to a crate or a custom command, is its output, which is
