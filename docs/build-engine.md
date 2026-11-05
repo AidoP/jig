@@ -1382,6 +1382,11 @@ implementation of that trait, so `generate.rs` doesn't change.
 - **Pipelining.** Start dependents from `.rmeta`, using early outputs.
 - **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
   and what tests need.
+- **First builds on workers.** An edge which hasn't run before runs here, even in a build only for workers, as which
+  files it reads is only known from its depfile once it has. A cheap local pass, such as `rustc --emit=dep-info` with
+  the edge's arguments, would find them without compiling, so that a fresh checkout's first build goes to workers too.
+  rig would take it as an edge's discovery action, run it here when there's no record, and send the edge with what it
+  found.
 - **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
 - **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
   so Windows can be added later.
