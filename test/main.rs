@@ -1896,6 +1896,17 @@ fn workers() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
     // and are added to the build's cache, as what runs here is
     assert!(!stats(&second).contains("\n0 results"), "{}", stats(&second));
+    // a build only for workers sends them every crate, as they have run before, however many jobs it has here
+    std::fs::remove_dir_all(&outputs).unwrap();
+    let mut command = jig_command();
+    command.args(["build", "-j", "8"]).env("JIG_CACHE", dir.join("only")).env("JIG_WORKERS", &worker);
+    let output = command.env("JIG_WORKERS_ONLY", "1").current_dir(&project.dir).output().unwrap();
+    let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{shown}");
+    assert_contains(&shown, "6 of 6 commands ran on workers");
+    for (name, local) in libraries.iter().zip(&local) {
+        assert!(read(name) == *local, "{name} differs from what was built here");
+    }
     // a worker which cannot be run builds nothing, and the build goes on without it
     std::fs::remove_dir_all(&outputs).unwrap();
     let mut command = jig_command();

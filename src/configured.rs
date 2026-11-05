@@ -167,6 +167,7 @@ fn cache_settings(database: &database::Database) -> crate::cache::Settings {
         push: database.push,
         token_file: (!database.token_file.is_empty()).then(|| database.token_file.into()),
         workers: database.workers.iter().map(|&worker| worker.into()).collect(),
+        workers_only: database.workers_only,
         release: (!database.toolchain_identity.is_empty()).then(|| {
             let release = rig::worker::Release {
                 identity: database.toolchain_release.into(),

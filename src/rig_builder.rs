@@ -79,6 +79,7 @@ impl Rig<'_> {
         // workers run cached edges, whose outputs are fetched into the cache
         if options.cache.is_some() {
             options.workers = self.cache.workers()?;
+            options.workers_only = self.cache.workers_only;
             options.releases.extend(self.cache.release.clone());
         }
         Ok(options)
@@ -104,6 +105,14 @@ impl Rig<'_> {
         let (quiet, verbose) = (console.quiet, console.verbose);
         let mut observer = rig::exec::Console { out: &mut out, quiet, verbose, colour };
         let built = rig::exec::build(&graph, &mut state, options, targets, &mut observer);
+        // what ran elsewhere is told, as it is not otherwise shown
+        if let Ok(report) = &built
+            && report.remote > 0
+            && !quiet
+        {
+            let plural = if report.ran == 1 { "" } else { "s" };
+            let _ = writeln!(out, "{} of {} command{plural} ran on workers", report.remote, report.ran);
+        }
         // once a day, the cache is collected after a build
         if let Some(cache) = &options.cache {
             crate::cache::report_remote(cache);

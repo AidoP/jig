@@ -26,6 +26,10 @@
 //! from this build, as it wrote or was sent them, and the link's latency and bandwidth, as they are measured. An
 //! interrupted build has its workers interrupt what they run for it, which does not then run here.
 //!
+//! With [`Options::workers_only`], an edge which a worker may run does not run here, but waits for a worker, whatever
+//! its jobs, as long as a worker is connecting, or has reported that it runs the edge. What no worker runs, and an
+//! edge which has not run before, still runs here, as does one which fails on a worker, or which it cannot be sent.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -69,6 +73,8 @@ pub struct Options {
     pub locating: Vec<String>,
     /// The workers which cached edges may run on, once the build's own jobs are full.
     pub workers: Vec<Arc<Remote>>,
+    /// Whether an edge which a worker may run waits for one, rather than running here.
+    pub workers_only: bool,
     /// The releases of toolchains, by their identities, by which a worker may run an edge which may run on another
     /// host with the same release on its own, and which a worker which installs toolchains installs one by.
     pub releases: HashMap<String, crate::worker::Release>,
@@ -89,6 +95,7 @@ impl Options {
             cache: None,
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
             workers: Vec::new(),
+            workers_only: false,
             releases: HashMap::new(),
         }
     }
@@ -628,17 +635,14 @@ impl Run<'_, '_> {
                 // whether an edge is ready but waits for a token
                 let mut waiting_for_token = false;
                 while !self.stopping() {
-                    // an edge runs here while the build's jobs are not full, and otherwise on a worker, if one can
-                    let (index, worker) = if self.local < self.options.jobs.max(1) {
-                        let Some(index) = self.next_ready() else {
-                            break;
-                        };
-                        (index, None)
-                    } else {
-                        let Some((index, worker)) = self.next_for_worker() else {
-                            break;
-                        };
-                        (index, Some(worker))
+                    // an edge runs here while the build's jobs are not full, and otherwise on a worker, if one can,
+                    // while one which waits for a worker only runs on one
+                    let here = (self.local < self.options.jobs.max(1)).then(|| self.next_ready()).flatten();
+                    let next = here.map(|index| (index, None));
+                    let Some((index, worker)) = next.or_else(|| {
+                        self.next_for_worker().map(|(index, worker)| (index, Some(worker)))
+                    }) else {
+                        break;
                     };
                     if self.restat_clean(index) {
                         self.report.restat_skipped += 1;
@@ -687,7 +691,8 @@ impl Run<'_, '_> {
                     // a thread for each job takes it, as no more run than there are jobs
                     let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch });
                 }
-                if self.progress.running == 0 {
+                // the build goes on while an edge waits for a worker which is connecting
+                if self.progress.running == 0 && !self.waiting_for_workers() {
                     break;
                 }
                 // tokens are given back by the commands as well as the edges, so they are looked for again soon,
@@ -737,12 +742,48 @@ impl Run<'_, '_> {
     }
     /// Returns the edge of the highest priority which is ready to run, other than one in the console pool while
     /// another runs.
+    ///
+    /// An edge which waits for a worker is left for one.
     fn next_ready(&mut self) -> Option<usize> {
         let entry = *self.ready.iter().find(|&&(_, index)| {
-            !self.console || self.graph.edge(self.edges[index]).pool() != Pool::Console
+            let console = self.console && self.graph.edge(self.edges[index]).pool() == Pool::Console;
+            !console && !self.waits_for_workers(index)
         })?;
         self.ready.remove(&entry);
         Some(entry.1)
+    }
+    /// Whether an edge waits for a worker rather than running here, as the build is only for workers: one which may
+    /// run on a worker, while one is connecting, or has reported that it runs the edge.
+    fn waits_for_workers(&self, index: usize) -> bool {
+        if !self.options.workers_only || self.local_only.contains(&index) {
+            return false;
+        }
+        (0..self.options.workers.len()).any(|worker| {
+            let remote = &self.options.workers[worker];
+            remote.usable() && (remote.connected_jobs() == 0 || remote.reported().is_none() || self.runs(index, worker))
+        }) && self.remote_identity(index).is_some()
+    }
+    /// Whether an edge which is ready waits for a worker.
+    fn waiting_for_workers(&self) -> bool {
+        self.options.workers_only && self.ready.iter().any(|&(_, index)| self.waits_for_workers(index))
+    }
+    /// Whether a worker may run an edge, by what it reported of itself, and has not refused its toolchain.
+    fn runs(&self, index: usize, worker: usize) -> bool {
+        let edge = self.graph.edge(self.edges[index]);
+        let Some(identity) = edge.cache() else {
+            return false;
+        };
+        let placement = edge.placement();
+        let release = self.options.releases.get(identity).cloned().unwrap_or_default();
+        let needs = crate::worker::Needs {
+            identity,
+            release: if placement.any_host { &release.identity } else { "" },
+            install: &release.install,
+            target: placement.target.as_deref().unwrap_or_default(),
+            tags: &placement.tags,
+        };
+        let remote = &self.options.workers[worker];
+        remote.may_have(identity) && remote.reported().is_some_and(|capabilities| capabilities.may_run(&needs))
     }
     /// Returns the edge of the highest priority which is ready to run and may run on a worker, with a worker which
     /// has a free job, and may run it, by what it reported of itself, if there is one.
@@ -758,26 +799,16 @@ impl Run<'_, '_> {
             if self.local_only.contains(&index) {
                 continue;
             }
-            let Some(identity) = self.remote_identity(index) else {
+            if self.remote_identity(index).is_none() {
                 self.local_only.insert(index);
                 continue;
-            };
-            let placement = self.graph.edge(self.edges[index]).placement();
-            let release = self.options.releases.get(identity).cloned().unwrap_or_default();
-            let needs = crate::worker::Needs {
-                identity,
-                release: if placement.any_host { &release.identity } else { "" },
-                install: &release.install,
-                target: placement.target.as_deref().unwrap_or_default(),
-                tags: &placement.tags,
-            };
+            }
             let wait = self.local_wait();
             let worker = (0..self.options.workers.len()).find(|&worker| {
-                let worker_runs = |capabilities: Arc<crate::worker::Capabilities>| capabilities.may_run(&needs);
-                let remote = &self.options.workers[worker];
-                // it waits for a job here if that is sooner than it would be sent
-                let sooner = wait.is_none_or(|wait| self.sending(index, remote.link()) < wait);
-                free(self, worker) && remote.may_have(identity) && remote.reported().is_some_and(worker_runs) && sooner
+                // it waits for a job here if that is sooner than it would be sent, unless it only runs on workers
+                let link = self.options.workers[worker].link();
+                let sooner = self.options.workers_only || wait.is_none_or(|wait| self.sending(index, link) < wait);
+                free(self, worker) && self.runs(index, worker) && sooner
             });
             if let Some(worker) = worker {
                 self.ready.remove(&entry);
@@ -1796,6 +1827,39 @@ mod tests {
         let (report, finished) = build.build(&[]);
         assert!(report.succeeded(), "{finished:?}");
         assert_eq!(report.remote, 2, "{finished:?}");
+    }
+
+    #[test]
+    fn runs_only_on_workers_where_they_can() {
+        let mut build = Build::new("workers-only", copied(), &[("a", "0\n"), ("b", "0\n")]);
+        let first = TempCache::new("workers-only-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        // with jobs to spare here, the edges which a worker may run wait for one, which is still connecting as the
+        // build starts, while the slow edge, which is not cached, runs here
+        build.options.jobs = 8;
+        build.options.workers_only = true;
+        let store = TempCache::new("workers-only-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let second = TempCache::new("workers-only-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.remote), (3, 2), "{finished:?}");
+        // what no worker runs, as they do not have its toolchain, or cannot be reached, runs here
+        let other = TempCache::new("workers-only-other");
+        let unreachable = Arc::new(Remote::command(vec!["/nonexistent/worker".into()], false));
+        for workers in [vec![worker(&other, &["another toolchain"])], vec![unreachable]] {
+            build.options.workers = workers;
+            remove(&build, &["slow", "a.o", "b.o"]);
+            let fresh = TempCache::new("workers-only-fresh");
+            build.options.cache = Some(fresh.0.clone());
+            let (report, finished) = build.build(&[]);
+            assert!(report.succeeded(), "{finished:?}");
+            assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
+        }
+        assert_eq!(other.0.stats().blobs, 0);
     }
 
     #[test]
