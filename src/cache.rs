@@ -390,11 +390,13 @@ pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) ->
         let failed = || (0, Err("the worker could not be asked".into()));
         asked.into_iter().map(|asked| asked.join().unwrap_or_else(|_| failed())).collect()
     });
-    for (name, (jobs, report)) in settings.workers.iter().zip(reports) {
+    for ((name, worker), (jobs, report)) in settings.workers.iter().zip(&workers).zip(reports) {
         match report {
             Ok(capabilities) => {
                 let tags: String = capabilities.tags.iter().flat_map(|tag| [", tagged ", tag.as_str()]).collect();
-                println!("{name}: {}, {jobs} jobs{tags}", capabilities.host);
+                // the round trip of the first request, which is mostly starting the worker over ssh
+                let away = worker.link().latency.as_millis();
+                println!("{name}: {}, {jobs} jobs{tags}, {away} ms away", capabilities.host);
                 for toolchain in &capabilities.toolchains {
                     let name = if toolchain.name.is_empty() { "rustc" } else { &toolchain.name };
                     println!("    {name}: {} for {}", toolchain.release, toolchain.targets.join(", "));

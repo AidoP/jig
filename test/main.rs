@@ -1877,7 +1877,8 @@ fn workers() {
     // which the worker keeps what identifies, as one which has run before does, so that it reports them at once
     let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();
     let shown = String::from_utf8(shown.stdout).unwrap();
-    assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast\n"));
+    assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast, "));
+    assert_contains(&shown, " ms away\n");
     let release = Command::new("rustc").arg("-vV").output().unwrap();
     let release = String::from_utf8(release.stdout).unwrap();
     let release = release.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
