@@ -120,8 +120,8 @@ impl Configured {
     pub fn builder(&self) -> Box<dyn Builder + '_> {
         let (build_dir, toolchain) = (&self.build_dir, self.toolchain.as_deref());
         match self.engine {
-            Engine::Ninja => Box::new(ninja::Ninja { build_dir, toolchain }),
-            Engine::Rig => Box::new(rig_builder::Rig { build_dir, toolchain, cache: &self.cache }),
+            Engine::Ninja => Box::new(Timed(ninja::Ninja { build_dir, toolchain })),
+            Engine::Rig => Box::new(Timed(rig_builder::Rig { build_dir, toolchain, cache: &self.cache })),
         }
     }
     /// Build what is requested, failing if it was not built.
@@ -135,6 +135,23 @@ impl Configured {
     /// Parse the database, which borrows from its bytes.
     pub fn parse<'a>(&self, bytes: &'a [u8]) -> Result<database::Database<'a>, Error> {
         parse(&self.root, bytes)
+    }
+}
+
+/// A builder whose builds, and generating the graph again, are timed, for `--timings`.
+struct Timed<B>(B);
+impl<B: Builder> Builder for Timed<B> {
+    fn build(&self, request: &builder::Request) -> Result<bool, Error> {
+        crate::timings::step("build", || self.0.build(request))
+    }
+    fn regenerate(&self, quiet: bool, output: builder::Output) -> Result<(), Error> {
+        crate::timings::step("configure", || self.0.regenerate(quiet, output))
+    }
+    fn up_to_date(&self, target: &str) -> Result<bool, Error> {
+        self.0.up_to_date(target)
+    }
+    fn graph_up_to_date(&self) -> Result<bool, Error> {
+        self.0.graph_up_to_date()
     }
 }
 
@@ -219,7 +236,7 @@ pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     if let Err(error) = std::env::set_current_dir(&root) {
         return Err(Error::Read(root, error));
     }
-    crate::generate(PathBuf::from(input), toolchain.or(configured.as_deref()))?;
+    crate::timings::step("configure", || crate::generate(PathBuf::from(input), toolchain.or(configured.as_deref())))?;
     Ok(root)
 }
 

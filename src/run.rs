@@ -33,7 +33,7 @@ pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, 
     command.args(args);
     // with the toolchain the project is configured with, as its tests are
     crate::toolchain::apply(&mut command, project.toolchain.as_deref());
-    match command.status() {
+    match crate::timings::step("run", || command.status()) {
         Ok(status) => Ok(exit_code(status)),
         Err(error) => Err(Error::Exec(Box::new(command), error)),
     }
