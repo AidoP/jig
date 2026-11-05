@@ -79,8 +79,11 @@ rustc and clippy are run in colour, as their output is captured, and with rig, a
 where the build's output is not a terminal, so that what is built does not depend on where its output goes. `jig
 --color <when>`, before the command, chooses otherwise, as `auto`, `always` or `never`, for the build with rig, `jig
 lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. ninja chooses for itself.
-With colour, where the build's output is a terminal, rig lists the commands which are running below those which have
-finished, with how long each has run, and updates the list in place, taking it away once the build is done.
+With colour, where the build's output is a terminal, rig shows the build in place, as ninja does on a smart terminal:
+a line for each of the commands which run at once, by the order it started in, with how long it has run, such as
+`[ 2/15] RUSTC libexample.rlib (3m)`, or `[  /15] -` once its command has finished and no other has started in its
+place. What has finished is not kept, but what it printed is, above the lines, and once the build is done, only the
+status of the command which finished last is left.
 `jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
 program and running tests took, each in total, and with rig, the ten commands of the build which took longest, from
 when each started until it finished, such as `jig --timings test`.
