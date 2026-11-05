@@ -147,6 +147,9 @@ pub struct Build<'a> {
     /// What finds the inputs the edge discovers without running it, in place of the `discover` binding of its rule,
     /// which rig takes as a command which writes its depfile, while ninja does not know it.
     pub discover: Option<Action>,
+    /// The outputs, explicit or implicit, which the edge reports before it finishes, as rustc does, which ninja does
+    /// not know either.
+    pub early: &'a [&'a str],
 }
 
 impl Manifest {
@@ -247,6 +250,13 @@ impl Manifest {
             let discover = scope.lookup("discover", 0).map_err(message)?;
             let bound = (!discover.is_empty()).then_some(Action::Shell(discover));
             edge.discover = build.discover.clone().or(bound);
+            // an early output is one of the edge's outputs
+            let outputs: Vec<NodeId> = edge.outputs.iter().chain(&edge.implicit_outputs).copied().collect();
+            for path in build.early {
+                let node = self.graph.node(path).filter(|node| outputs.contains(node));
+                let node = node.ok_or_else(|| message(format!("the early output {path:?} is not an output")))?;
+                edge.early.push(node);
+            }
         }
         self.graph.add_edge(edge)?;
         Ok(())
@@ -402,5 +412,8 @@ mod tests {
         let error = graph.try_edge("r", &["o"], &[], &[]).unwrap_err();
         assert_eq!(error.to_string(), "\"o\" is produced by more than one edge");
         assert!(Manifest::new().variable("v", "$").is_err());
+        let mut early = crate::testing::graph().rule("r", &[("command", "c")]).early(&["i"]);
+        let error = early.try_edge("r", &["o"], &["i"], &[]).unwrap_err();
+        assert_eq!(error.to_string(), "the early output \"i\" is not an output");
     }
 }

@@ -446,7 +446,7 @@ fn write_graph(
     // the temporary files rustc writes to `--out-dir` are kept in the build directory, in a directory for each edge, as
     // they are named after the crate, which may be compiled for several targets, or as a test harness, at once
     // `crate-env` is the environment variables of a crate, before rustc, as `sh` takes them
-    let rustc = &format!("{env}$crate-env rustc --color=always --out-dir=$tmpdir --emit=link=$out --emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
+    let rustc = &format!("{env}$crate-env rustc --color=always --out-dir=$tmpdir --emit=link=$out ${{emit-metadata}}--emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
     graph.rule(&Rule {
         name: "rustc",
         command: rustc,
@@ -543,12 +543,17 @@ fn write_graph(
     // link it, which unwind
     let unwind = unwind_copies(crates, units);
     for (index, (c, unit)) in crates.iter().zip(units).enumerate() {
-        // a dependency is a library, so it has an output, or its copy which unwinds, for what must unwind
-        let externs = |unwinds: bool| -> Vec<Extern> {
+        // a dependency is a library, so it has an output, or its copy which unwinds, for what must unwind, or its
+        // metadata, for a library, which is compiled against it, so that it starts once it is written
+        let externs = |unwinds: bool, metadata: bool| -> Vec<Extern> {
             let mut deps = Vec::new();
             for &index in &unit.deps {
                 let d = &crates[index];
-                let path = if unwinds && unwind[index] { d.unwind_output() } else { d.output() };
+                let path = match () {
+                    () if unwinds && unwind[index] => d.unwind_output(),
+                    () if metadata && d.kind == Kind::Lib => d.metadata(),
+                    () => d.output(),
+                };
                 deps.push(Extern { name: &d.name, path: at.path(&path) });
             }
             deps
@@ -573,11 +578,11 @@ fn write_graph(
         };
         // a procedural macro unwinds, so it links the copies too
         let proc_macro = c.kind == Kind::ProcMacro;
-        let externs_built = externs(proc_macro);
+        let externs_built = externs(proc_macro, c.kind == Kind::Lib);
         let flags = flags_with(&externs_built, &codegen, proc_macro);
         let built_deps = deps_of(&externs_built);
         let deps: Vec<_> = as_paths(&built_deps);
-        let harness_externs = externs(true);
+        let harness_externs = externs(true, false);
         let harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
         let harness_deps = deps_of(&harness_externs);
         let crate_env = crate_env(&c.env);
@@ -601,8 +606,27 @@ fn write_graph(
             linked_flags
         };
         let linked_flags = link(&flags);
-        let link_deps: Vec<_> = deps.iter().copied().chain(link_script.as_deref()).collect();
-        let harness_link_deps: Vec<_> = as_paths(&harness_deps).into_iter().chain(link_script.as_deref()).collect();
+        // what links needs the library of every crate it uses, through others too, as a library which uses another is
+        // built once the other's metadata is written, before its library is
+        let libraries = |unwinds: bool| -> Vec<PathBuf> {
+            let path = |index: usize| {
+                let d = &crates[index];
+                at.path(&if unwinds && unwind[index] { d.unwind_output() } else { d.output() })
+            };
+            // which only what links needs, as a library which is not tested does not
+            if c.kind == Kind::Lib && !c.test {
+                return Vec::new();
+            }
+            transitive_libraries(crates, units, index).into_iter().map(path).collect()
+        };
+        let (libraries, harness_libraries) = (libraries(proc_macro), libraries(true));
+        let link_deps: Vec<_> =
+            deps.iter().copied().chain(as_paths(&libraries)).chain(link_script.as_deref()).collect();
+        let harness_link_deps: Vec<_> = as_paths(&harness_deps)
+            .into_iter()
+            .chain(as_paths(&harness_libraries))
+            .chain(link_script.as_deref())
+            .collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
@@ -610,11 +634,25 @@ fn write_graph(
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
         let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
-        let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &output), crate_flags, None);
+        // a library writes its metadata too, which rig is told of as rustc writes it, with JSON, which ninja is not
+        let metadata = (c.kind == Kind::Lib).then(|| at.path(&c.metadata()));
+        let emit_metadata =
+            metadata.as_ref().map(|path| format!("--emit=metadata={} ", ninja_quote(&path.display().to_string())));
+        let mut leading = rustc_emit(&tmpdir, &output).to_vec();
+        if let Some(path) = &metadata {
+            // rustc colours what it renders in JSON as it would have printed it, taking no `--color` with JSON
+            leading.retain(|arg| arg != "--color=always");
+            leading.push(format!("--emit=metadata={}", path.display()));
+            leading.extend(["--error-format=json", "--json=artifacts,diagnostic-rendered-ansi"].map(String::from));
+        }
+        let exec = rust.exec("rustc", &leading, crate_flags, None);
         let placement = placement(unit, units, project, linked);
+        let early: Vec<&Path> = metadata.iter().map(PathBuf::as_path).collect();
         graph.edge(&Edge {
             rule: "rustc",
             outputs: &[&output],
+            implicit_outputs: &early,
+            early: &early,
             inputs: &[&input],
             implicit: if linked { &link_deps } else { &deps },
             order_only: &as_paths(&depends),
@@ -624,6 +662,7 @@ fn write_graph(
                 ("flags", crate_flags.ninja()),
                 ("tmpdir", &tmpdir.display().to_string()),
                 ("crate-env", &crate_env),
+                ("emit-metadata", emit_metadata.as_deref().unwrap_or_default()),
             ],
             exec: Some(&exec),
             hashed,
@@ -631,7 +670,6 @@ fn write_graph(
             cache,
             placement: placement.clone(),
             discover: Some(discovery(&exec)),
-            ..Default::default()
         })?;
         everything.push(output.clone());
         if c.test {
@@ -1065,6 +1103,24 @@ fn unwind_copies(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
         }
     }
     copied
+}
+
+/// Returns the libraries a crate uses, through others too, by their indices, each once, without the procedural macros,
+/// which are not linked, nor what they use.
+fn transitive_libraries(crates: &[Crate], units: &[Unit], index: usize) -> Vec<usize> {
+    let mut found = Vec::new();
+    let mut seen = vec![false; crates.len()];
+    let mut stack: Vec<usize> = units[index].deps.clone();
+    while let Some(dep) = stack.pop() {
+        if seen[dep] || crates[dep].kind != Kind::Lib {
+            continue;
+        }
+        seen[dep] = true;
+        found.push(dep);
+        stack.extend(units[dep].deps.iter().copied());
+    }
+    found.sort_unstable();
+    found
 }
 
 /// Returns whether each crate is a library built with `panic=abort`, or which uses one which is.

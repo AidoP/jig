@@ -128,6 +128,10 @@ pub struct Edge {
     /// An action which writes the edge's depfile as running it would, without doing its work, such as rustc with
     /// `--emit=dep-info` alone, by which the inputs of an edge which has not run are found, to send it to a worker.
     pub discover: Option<Action>,
+    /// Outputs which the action writes before it finishes, and reports as rustc does with `--json=artifacts`, as the
+    /// metadata of a crate, so that the edges which need only them start once they are written. An edge which has them
+    /// writes what rustc writes with `--error-format=json`, of which what it would have printed is shown.
+    pub early: Vec<NodeId>,
 }
 
 /// Which workers a cached edge may run on, beside those whose toolchain has its identity: whether it may run with the
@@ -160,6 +164,7 @@ struct EdgeData {
     pass_env: Vec<String>,
     placement: Placement,
     discover: Option<Action>,
+    early: Vec<NodeId>,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
 }
@@ -275,6 +280,7 @@ impl Graph {
             pass_env: edge.pass_env,
             placement: edge.placement,
             discover: edge.discover,
+            early: edge.early,
             lists,
         });
         Ok(id)
@@ -436,6 +442,11 @@ impl<'a> EdgeRef<'a> {
     pub fn discover(&self) -> Option<&'a Action> {
         self.data.discover.as_ref()
     }
+    /// The outputs the edge reports before it finishes, as rustc does, if it has any.
+    #[must_use]
+    pub fn early(&self) -> &'a [NodeId] {
+        &self.data.early
+    }
     /// Returns the edge as it would be added to a graph.
     #[must_use]
     pub fn to_edge(&self) -> Edge {
@@ -456,6 +467,7 @@ impl<'a> EdgeRef<'a> {
             pass_env: self.data.pass_env.clone(),
             placement: self.data.placement.clone(),
             discover: self.data.discover.clone(),
+            early: self.data.early.clone(),
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {

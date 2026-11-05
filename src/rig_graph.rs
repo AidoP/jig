@@ -38,8 +38,10 @@ impl Graph for RigGraph {
         self.manifest.rule(rule.name, &rule.bindings()).map_err(Error::Rig)
     }
     fn edge(&mut self, edge: &Edge) -> Result<(), Error> {
-        let lists = [edge.outputs, edge.implicit_outputs, edge.inputs, edge.implicit, edge.order_only].map(paths);
-        let [outputs, implicit_outputs, inputs, implicit, order_only] = lists.each_ref().map(|list| strs(list));
+        let lists = [edge.outputs, edge.implicit_outputs, edge.inputs, edge.implicit, edge.order_only, edge.early];
+        let [outputs, implicit_outputs, inputs, implicit, order_only, early] = lists.map(paths);
+        let [outputs, implicit_outputs, inputs, implicit, order_only, early] =
+            [&outputs, &implicit_outputs, &inputs, &implicit, &order_only, &early].map(|list| strs(list));
         self.manifest
             .build(&rig::ninja::Build {
                 rule: edge.rule,
@@ -55,6 +57,7 @@ impl Graph for RigGraph {
                 pass_env: edge.pass_env.to_vec(),
                 placement: edge.placement.clone(),
                 discover: edge.discover.clone().map(rig::Action::Exec),
+                early: &early,
             })
             .map_err(Error::Rig)
     }

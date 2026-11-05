@@ -64,6 +64,9 @@ pub struct Edge<'a> {
     pub pass_env: &'a [String],
     /// Which workers rig may send the edge to, if it is cached.
     pub placement: rig::Placement,
+    /// The outputs the edge reports before it finishes, as rustc does, which rig starts what needs only them once they
+    /// are written by, and ninja does not know.
+    pub early: &'a [&'a Path],
     /// What writes the edge's depfile without running it, by which rig finds what an edge which has not run reads, to
     /// send it to a worker, which ninja does not need.
     pub discover: Option<rig::Exec>,
