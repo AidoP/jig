@@ -40,6 +40,13 @@
 //! finished. What such an edge writes is read as it is written, and what rustc would have printed is shown and kept,
 //! rather than its JSON, as for what it printed on a worker.
 //!
+//! With [`Download::Targets`], the outputs an edge writes on a worker are left there, rather than fetched, but for the
+//! targets of the build, through aliases, and its depfile. Each is stamped by its contents, which its edge's record
+//! keeps, while its file is missing, and is fetched once an edge which runs here, or is sent to another worker, reads
+//! it, and at the end of the build if it is a target. It is fetched from the cache, or the remote cache, or the
+//! workers. One which none of them has any longer is lost: the edge which needed it does not run, the edge which wrote
+//! it is recorded as missing it, and the build is planned and run again, a few times at most, which builds it again.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -47,8 +54,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cache::{self, Cache, Hash};
@@ -88,6 +95,19 @@ pub struct Options {
     /// The releases of toolchains, by their identities, by which a worker may run an edge which may run on another
     /// host with the same release on its own, and which a worker which installs toolchains installs one by.
     pub releases: HashMap<String, crate::worker::Release>,
+    /// Which outputs of the edges which run on workers are fetched.
+    pub download: Download,
+}
+
+/// Which outputs of the edges which run on workers are fetched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Download {
+    /// Every one, once its edge has run.
+    #[default]
+    All,
+    /// Only the targets of the build, and what an edge which runs here, or on another worker, reads, once it needs
+    /// them, while the others are left on the workers.
+    Targets,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -107,6 +127,7 @@ impl Options {
             workers: Vec::new(),
             workers_only: false,
             releases: HashMap::new(),
+            download: Download::All,
         }
     }
 }
@@ -167,6 +188,8 @@ pub struct Report {
     pub remote: usize,
     /// Whether the build was interrupted, by a signal or [`Options::cancel`].
     pub interrupted: bool,
+    /// The outputs which were left on workers which no longer had them, which were built again.
+    pub lost: usize,
 }
 impl Report {
     /// Whether every edge which had to run succeeded.
@@ -205,6 +228,8 @@ struct Job {
     mark: Option<(Cache, Hash)>,
     /// The early outputs it reports, by their paths, if it has any, as it writes what rustc writes with JSON.
     early: Option<Arc<Vec<(String, NodeId)>>>,
+    /// The inputs it reads which were left on workers, which are fetched before it runs here.
+    fetch: Vec<(String, Stamp)>,
 }
 
 /// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
@@ -231,11 +256,21 @@ struct Dispatch {
     /// For an edge which has not run, the action which writes its depfile without running it, which runs here first,
     /// and the depfile, whose inputs are sent too.
     discovery: Option<(Action, String)>,
+    /// The inputs which were left on workers, which this worker has, or which are fetched here and sent.
+    remote: Vec<(String, Stamp)>,
+    /// The outputs which are left on the worker, rather than fetched.
+    leave: Vec<String>,
+    fetcher: Arc<Fetcher>,
 }
+/// Outputs left on a worker, by path, with their stamps.
+type Left = Vec<(String, Stamp)>;
+
 /// What became of an edge sent to a worker.
 enum Sent {
-    /// It ran there, and printed this, once its outputs were restored.
-    Ran(Vec<u8>),
+    /// It ran there, and printed this, once its outputs were restored, but for those left there, with their stamps.
+    Ran(Vec<u8>, Left),
+    /// It did not run, as inputs it reads were left on workers which no longer have them.
+    Lost(Vec<String>),
     /// It ran there, and failed, or did not write every output.
     Failed,
     /// It was not run there.
@@ -246,13 +281,29 @@ impl Dispatch {
     /// Run the edge on the worker, restoring its outputs.
     fn run(&self, dir: &Path) -> Sent {
         match self.try_run(dir) {
-            Ok(printed) => Sent::Ran(printed),
+            Ok((printed, left)) => Sent::Ran(printed, left),
             Err(sent) => sent,
         }
     }
-    fn try_run(&self, dir: &Path) -> Result<Vec<u8>, Sent> {
+    fn try_run(&self, dir: &Path) -> Result<(Vec<u8>, Left), Sent> {
         use std::os::unix::fs::PermissionsExt;
         let mut paths = self.inputs.clone();
+        // what was left on workers is fetched to be sent, unless this one has it, or the action which discovers what
+        // the edge reads, which runs here, may read it
+        if !self.remote.is_empty() {
+            let fetch = if self.discovery.is_some() {
+                self.remote.clone()
+            } else {
+                let blobs: Vec<Hash> = self.remote.iter().filter_map(|(_, stamp)| stamp.hash().copied()).collect();
+                let missing = self.worker.missing(&blobs).ok_or(Sent::NotRun)?;
+                let missing = |stamp: &Stamp| stamp.hash().is_some_and(|hash| missing.contains(hash));
+                self.remote.iter().filter(|(_, stamp)| missing(stamp)).cloned().collect()
+            };
+            let lost = self.fetcher.fetch_all(&fetch, 1);
+            if !lost.is_empty() {
+                return Err(Sent::Lost(lost));
+            }
+        }
         // an edge which has not run discovers its inputs here first, as it runs here otherwise, which shows why
         if let Some((action, depfile)) = &self.discovery {
             let environment =
@@ -272,8 +323,13 @@ impl Dispatch {
         let mut inputs = Vec::new();
         for path in &paths {
             let full = dir.join(path);
-            // an input which is not a file is not sent, which an action which reads it fails without
+            // an input which is not a file is not sent, which an action which reads it fails without, unless it was
+            // left on a worker, which this one has
             let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
+                let left = self.remote.iter().find(|(remote, _)| remote == path);
+                if let Some(&(_, Stamp::Remote { hash, executable })) = left {
+                    inputs.push(crate::worker::Input { path: path.clone(), blob: hash, executable });
+                }
                 continue;
             };
             let blob = crate::blake3::hash_file(&full).map_err(|_| Sent::NotRun)?;
@@ -299,13 +355,32 @@ impl Dispatch {
         if !executed.succeeded || !self.outputs.iter().all(written) {
             return Err(Sent::Failed);
         }
-        let blobs = cache::entry_blobs(&executed.entry);
+        // the outputs which may be left there are, unless they are here already, as they were
+        let (mut kept, mut left) = (Vec::new(), Vec::new());
+        for output in executed.entry.outputs {
+            let here = || crate::blake3::hash_file(&dir.join(&output.path)).is_ok_and(|hash| hash == output.blob);
+            if !self.leave.contains(&output.path) {
+                kept.push(output);
+            } else if !here() {
+                left.push(output);
+            }
+        }
+        let entry = cache::Entry { outputs: kept, printed: executed.entry.printed };
+        let blobs = cache::entry_blobs(&entry);
         let missing: Vec<Hash> = blobs.filter(|blob| !self.cache.has_blob(blob)).copied().collect();
         let fetching = Instant::now();
         let fetched = self.worker.fetch_blobs(&self.cache, &missing);
         let size = |blob: &Hash| std::fs::metadata(self.cache.blob_path(blob)).map_or(0, |metadata| metadata.len());
         self.worker.measured(fetched.iter().map(size).sum(), fetching.elapsed());
-        Restore { cache: &self.cache, entry: executed.entry }.apply(dir).map_err(|_| Sent::NotRun)
+        let printed = Restore { cache: &self.cache, entry }.apply(dir).map_err(|_| Sent::NotRun)?;
+        // what is left there is missing here, rather than as it was
+        for output in &left {
+            let _ = std::fs::remove_file(dir.join(&output.path));
+        }
+        let left = left.into_iter().map(|output| {
+            (output.path, Stamp::Remote { hash: output.blob, executable: output.executable })
+        });
+        Ok((printed, left.collect()))
     }
     /// Returns what marks the edge to run here, once it failed on the worker and succeeds here, as it depends on what
     /// it does not declare or discover, until its first key changes.
@@ -323,13 +398,19 @@ struct Lookup {
     cache: Cache,
     key: Hash,
     env: Arc<Vec<(String, String)>>,
+    /// The outputs left on workers, whose contents are known while their files are missing.
+    left: Arc<RwLock<HashMap<String, Stamp>>>,
 }
 impl Lookup {
     /// Returns the second key of a set of inputs the edge discovered, by their contents as they are now, relative to
     /// the build's directory, or that they are missing, and the values of the variables, as a command sees them.
     fn second_key(&self, dir: &Path, discovery: &cache::Discovery) -> Hash {
         use std::os::unix::ffi::OsStrExt;
-        let hashes: Vec<_> = discovery.inputs.iter().map(|path| crate::blake3::hash_file(&dir.join(path)).ok()).collect();
+        let hash = |path: &String| {
+            let left = || self.left.read().ok()?.get(path)?.hash().copied();
+            crate::blake3::hash_file(&dir.join(path)).ok().or_else(left)
+        };
+        let hashes: Vec<_> = discovery.inputs.iter().map(hash).collect();
         let inputs: Vec<_> = discovery.inputs.iter().zip(&hashes).map(|(path, hash)| (path.as_str(), hash.as_ref())).collect();
         let value = |name: &str| match self.env.iter().rev().find(|(variable, _)| variable == name) {
             Some((_, value)) => Some(crate::blake3::hash(value.as_bytes())),
@@ -371,6 +452,62 @@ impl Restore<'_> {
     }
 }
 
+/// What fetches the outputs left on workers which are needed here to their files, each once: from the cache, which
+/// fetches what it does not have from the remote cache, or else from the workers.
+struct Fetcher {
+    dir: PathBuf,
+    cache: Option<Cache>,
+    workers: Vec<Arc<Remote>>,
+    /// Whether each file which has been asked for was fetched, by its path, once it has been.
+    fetched: Mutex<HashMap<String, Arc<OnceLock<bool>>>>,
+}
+impl Fetcher {
+    /// Fetch a file left on a worker, returning whether it is here, as it is if it was not left on one.
+    fn fetch(&self, path: &str, stamp: Stamp) -> bool {
+        let Stamp::Remote { hash, executable } = stamp else {
+            return true;
+        };
+        let Some(once) = self.fetched.lock().ok().map(|mut fetched| Arc::clone(fetched.entry(path.into()).or_default()))
+        else {
+            return false;
+        };
+        *once.get_or_init(|| {
+            let Some(cache) = &self.cache else {
+                return false;
+            };
+            cache.fetch_blobs(&[hash]);
+            for worker in &self.workers {
+                if cache.has_blob(&hash) {
+                    break;
+                }
+                if worker.usable() {
+                    worker.fetch_blobs(cache, &[hash]);
+                }
+            }
+            let full = self.dir.join(path);
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            cache.restore(&hash, &full, executable).is_ok()
+        })
+    }
+    /// Fetch files left on workers, on as many threads at once, returning those which none has any longer.
+    fn fetch_all(&self, files: &[(String, Stamp)], threads: usize) -> Vec<String> {
+        let lost = |files: &[(String, Stamp)]| -> Vec<String> {
+            let lost = files.iter().filter(|(path, stamp)| !self.fetch(path, *stamp));
+            lost.map(|(path, _)| path.clone()).collect()
+        };
+        if threads <= 1 || files.len() <= 1 {
+            return lost(files);
+        }
+        std::thread::scope(|scope| {
+            let handles: Vec<_> =
+                files.chunks(files.len().div_ceil(threads)).map(|chunk| scope.spawn(move || lost(chunk))).collect();
+            handles.into_iter().flat_map(|handle| handle.join().unwrap_or_default()).collect()
+        })
+    }
+}
+
 /// An edge which has finished.
 struct Finished {
     /// The index of the edge in the plan.
@@ -383,6 +520,10 @@ struct Finished {
     cached: bool,
     /// Whether it ran on a worker.
     remote: bool,
+    /// The outputs it left on the worker, with their stamps.
+    left: Vec<(String, Stamp)>,
+    /// The inputs it reads which were left on workers which no longer have them, so that it did not run.
+    lost: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -394,6 +535,9 @@ enum Status {
     Done { changed: bool },
     Failed,
 }
+
+/// The most times a build is planned and run, while it loses outputs which were left on workers.
+const PASSES: usize = 3;
 
 /// Build targets, given by their paths, or the default targets if none are given.
 ///
@@ -407,8 +551,42 @@ pub fn build(
     targets: &[&str],
     observer: &mut dyn Observer,
 ) -> Result<Report, Error> {
+    let mut total = Report::default();
+    for _ in 0..PASSES {
+        let report = build_once(graph, state, options, targets, observer)?;
+        total.ran += report.ran;
+        total.failed += report.failed;
+        total.restat_skipped += report.restat_skipped;
+        total.cached += report.cached;
+        total.remote += report.remote;
+        total.lost += report.lost;
+        (total.not_run, total.interrupted) = (report.not_run, report.interrupted);
+        // what was lost is built again, as what needed it is
+        if report.lost == 0 || report.interrupted || report.failed > 0 {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Plan and run a build once.
+fn build_once(
+    graph: &Graph,
+    state: &mut State,
+    options: &Options,
+    targets: &[&str],
+    observer: &mut dyn Observer,
+) -> Result<Report, Error> {
     let mut stamps = Stamps::new(graph, &options.dir).with_env(&options.env);
     let plan = plan::plan(graph, state, &mut stamps, targets)?;
+    let wanted = wanted(graph, &plan::target_nodes(graph, targets)?);
+    let left = Arc::new(RwLock::new(state.remote_outputs()));
+    let fetcher = Arc::new(Fetcher {
+        dir: options.dir.clone(),
+        cache: options.cache.clone(),
+        workers: options.workers.clone(),
+        fetched: Mutex::default(),
+    });
     let edges: Vec<EdgeId> = plan.edges.iter().map(|&(edge, _)| edge).collect();
     let index: HashMap<EdgeId, usize> = edges.iter().enumerate().map(|(index, &edge)| (edge, index)).collect();
     let deps: Vec<Vec<usize>> = edges.iter().map(|&edge| planned_deps(graph, state, edge, &index)).collect();
@@ -460,6 +638,10 @@ pub fn build(
         released: HashSet::new(),
         started: HashMap::new(),
         on_workers: HashSet::new(),
+        wanted,
+        left,
+        fetcher,
+        lost: Vec::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -482,13 +664,43 @@ pub fn build(
         run.make_ready(index);
     }
     let ran = run.run(observer);
+    // the targets which were left on workers are fetched
+    if ran.is_ok() && !run.report.interrupted {
+        run.fetch_targets();
+    }
     // what was added to the cache is pushed to the remote cache before the build ends
     if let Some(cache) = &options.cache {
         cache.wait_for_pushes();
     }
     ran?;
+    if let Some(error) = run.error.take() {
+        return Err(error);
+    }
     run.report.not_run = run.status.iter().filter(|status| matches!(status, Status::Waiting)).count();
+    run.report.lost = run.lost.len();
     Ok(run.report)
+}
+
+/// Returns the files which are fetched if they were left on workers: the targets, and the inputs of those which are
+/// aliases, and so on.
+fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
+    let mut wanted = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut stack = targets.to_vec();
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match graph.producer(node).map(|edge| graph.edge(edge)) {
+            Some(alias) if *alias.kind() == EdgeKind::Alias => {
+                stack.extend(alias.inputs().iter().chain(alias.implicit()).chain(alias.order_only()));
+            },
+            _ => {
+                wanted.insert(node);
+            },
+        }
+    }
+    wanted
 }
 
 /// Returns the priority of each edge in the plan: how long it took when it last ran, in milliseconds, or one if it has
@@ -635,6 +847,14 @@ struct Run<'g, 's> {
     started: HashMap<usize, Instant>,
     /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
     on_workers: HashSet<String>,
+    /// The files which are fetched if they were left on workers.
+    wanted: HashSet<NodeId>,
+    /// The outputs left on workers, by path, with their stamps, while their files are missing, which the threads which
+    /// look edges up in the cache read.
+    left: Arc<RwLock<HashMap<String, Stamp>>>,
+    fetcher: Arc<Fetcher>,
+    /// The outputs left on workers which no longer had them, which are built again.
+    lost: Vec<String>,
 }
 
 impl Run<'_, '_> {
@@ -653,12 +873,14 @@ impl Run<'_, '_> {
         // is first sent an edge
         let stop = Arc::clone(&self.stop);
         let stop = &stop;
+        let fetcher = Arc::clone(&self.fetcher);
+        let fetcher = &fetcher;
         let job_thread = || {
             let sender = sender.clone();
             move || {
                 // the lock is held while waiting for a job, which the other threads wait for in turn
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
-                    let Job { index, action, console, lookup, inherit, dispatch, mark, early } = job;
+                    let Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
@@ -668,26 +890,43 @@ impl Run<'_, '_> {
                         Some(dispatch) if !cached => dispatch.run(dir),
                         _ => Sent::NotRun,
                     };
+                    let (mut left, mut lost) = (Vec::new(), Vec::new());
                     let (ran, failed_there) = match sent {
                         // what a worker printed is what the edge wrote, which is rendered as it is here
-                        Sent::Ran(printed) if early.is_some() => {
+                        Sent::Ran(printed, kept) if early.is_some() => {
+                            left = kept;
                             (Some(crate::json::rendered(&printed, &mut |_| ())), false)
                         },
-                        Sent::Ran(printed) => (Some(printed), false),
+                        Sent::Ran(printed, kept) => {
+                            left = kept;
+                            (Some(printed), false)
+                        },
+                        Sent::Lost(paths) => {
+                            lost = paths;
+                            (None, false)
+                        },
                         Sent::Failed => (None, true),
                         Sent::NotRun => (None, false),
                     };
                     let remote = ran.is_some();
                     // an edge which the worker did not run is given back to run in one of the build's own jobs, unless
                     // the worker was interrupted running it
-                    let given_back = !cached && !remote && !stop.load(Ordering::SeqCst);
+                    let given_back = !cached && !remote && lost.is_empty() && !stop.load(Ordering::SeqCst);
                     if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
                         let mark = dispatch.mark().filter(|_| failed_there);
-                        let job = Job { index, action, console, lookup: None, inherit, dispatch: None, mark, early };
+                        let (lookup, dispatch) = (None, None);
+                        let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch };
                         let _ = sender.send(Message::Returned(Box::new(job)));
                         continue;
                     }
-                    let (outcome, output) = if let Some(printed) = restored.or(ran) {
+                    // what it reads which was left on workers is fetched first, if it runs here
+                    if !cached && !remote && dispatch.is_none() {
+                        lost = fetcher.fetch_all(&fetch, 1);
+                    }
+                    let (outcome, output) = if !lost.is_empty() {
+                        (Outcome::Error(format!("{} were left on workers which no longer have them", lost.join(" "))),
+                            Vec::new())
+                    } else if let Some(printed) = restored.or(ran) {
                         (Outcome::Succeeded, printed)
                     } else if dispatch.is_some() {
                         // an edge which a worker was interrupted running does not run here
@@ -712,7 +951,7 @@ impl Run<'_, '_> {
                         cache.mark_local(key);
                     }
                     let duration = clock.elapsed();
-                    let finished = Finished { index, outcome, output, start, duration, cached, remote };
+                    let finished = Finished { index, outcome, output, start, duration, cached, remote, left, lost };
                     let _ = sender.send(Message::Finished(finished));
                 }
             }
@@ -759,7 +998,8 @@ impl Run<'_, '_> {
                         let now = SystemTime::now();
                         let outcome = Outcome::Interrupted;
                         let finished = Finished { index: job.index, outcome, output: Vec::new(), start: now,
-                            duration: Duration::ZERO, cached: false, remote: false };
+                            duration: Duration::ZERO, cached: false, remote: false, left: Vec::new(),
+                            lost: Vec::new() };
                         self.finish(finished, observer);
                     }
                 }
@@ -834,7 +1074,9 @@ impl Run<'_, '_> {
                     }
                     // a thread for each job takes it, as no more run than there are jobs
                     let early = self.early_outputs(index);
-                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark: None, early });
+                    let fetch = self.remote_inputs(index);
+                    let mark = None;
+                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch });
                 }
                 // the build goes on while an edge waits for a worker which is connecting
                 if self.progress.running == 0 && !self.waiting_for_workers() {
@@ -1085,7 +1327,84 @@ impl Run<'_, '_> {
             outputs,
             stderr,
             discovery,
+            remote: self.remote_inputs(index),
+            leave: self.leaves(index),
+            fetcher: Arc::clone(&self.fetcher),
         })
+    }
+    /// Returns the inputs of a started edge, declared and discovered when it last ran, which were left on workers,
+    /// with their stamps.
+    fn remote_inputs(&mut self, index: usize) -> Vec<(String, Stamp)> {
+        if self.left.read().is_ok_and(|left| left.is_empty()) {
+            return Vec::new();
+        }
+        let declared = self.inputs.get(&index).into_iter().flatten();
+        let mut remote: Vec<(String, Stamp)> = declared.filter(|(_, stamp)| stamp.is_remote()).cloned().collect();
+        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        let discovered: Vec<String> = previous.into_iter().flat_map(|previous| &previous.discovered).map(|(path, _)| {
+            path.clone()
+        }).collect();
+        for path in discovered {
+            let stamp = self.stamps.path(&path);
+            if stamp.is_remote() && !remote.iter().any(|(remote, _)| *remote == path) {
+                remote.push((path, stamp));
+            }
+        }
+        remote
+    }
+    /// Returns the outputs of an edge which are left on the worker which runs it: none, unless only the targets are
+    /// fetched, when they are those which are not.
+    fn leaves(&self, index: usize) -> Vec<String> {
+        if self.options.download != Download::Targets {
+            return Vec::new();
+        }
+        let edge = self.graph.edge(self.edges[index]);
+        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).filter(|node| !self.wanted.contains(node));
+        outputs.map(|&node| self.graph.path(node).to_string()).collect()
+    }
+    /// An output has been left on a worker, with this stamp, or with `None`, is not, or is no longer.
+    fn set_remote(&mut self, path: &str, stamp: Option<Stamp>) {
+        self.stamps.set_remote(path, stamp);
+        if let Ok(mut left) = self.left.write() {
+            match stamp {
+                Some(stamp) => left.insert(path.to_string(), stamp),
+                None => left.remove(path),
+            };
+        }
+    }
+    /// An output left on a worker which no longer has it is lost: its edge is recorded as missing it, so that it is
+    /// built again, by the next pass of the build.
+    fn lose(&mut self, path: &str) {
+        self.set_remote(path, None);
+        self.lost.push(path.to_string());
+        let Some(producer) = self.graph.node(path).and_then(|node| self.graph.producer(node)) else {
+            return;
+        };
+        let Some(mut record) = self.state.get(&plan::first_output(self.graph, producer)).cloned() else {
+            return;
+        };
+        for (output, stamp) in &mut record.outputs {
+            if output == path {
+                *stamp = Stamp::Missing;
+            }
+        }
+        if let Err(error) = self.state.record(record) {
+            self.error.get_or_insert(error);
+        }
+    }
+    /// Fetch the targets of the build which were left on workers, losing those which none has any longer.
+    fn fetch_targets(&mut self) {
+        let wanted: Vec<NodeId> = self.wanted.iter().copied().collect();
+        let mut files = Vec::new();
+        for node in wanted {
+            let stamp = self.stamps.node(node);
+            if stamp.is_remote() {
+                files.push((self.graph.path(node).to_string(), stamp));
+            }
+        }
+        for path in self.fetcher.fetch_all(&files, self.options.jobs.max(1)) {
+            self.lose(&path);
+        }
     }
     /// Returns the early outputs of an edge, by their paths, if it has any.
     fn early_outputs(&self, index: usize) -> Option<Arc<Vec<(String, NodeId)>>> {
@@ -1186,10 +1505,29 @@ impl Run<'_, '_> {
         observer.started(self.graph, edge, &self.reasons[index], self.progress);
     }
     fn finish(&mut self, finished: Finished, observer: &mut dyn Observer) {
-        let Finished { index, mut outcome, output, start, mut duration, cached, remote } = finished;
+        let Finished { index, mut outcome, output, start, mut duration, cached, remote, left, lost } = finished;
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.started.remove(&index);
+        // an edge which needed what was lost has not run, and runs in the next pass, once what it needs has
+        if !lost.is_empty() {
+            self.progress.running -= 1;
+            self.progress.started -= 1;
+            self.status[index] = Status::Waiting;
+            self.inputs.remove(&index);
+            self.keys.remove(&index);
+            self.before.remove(&index);
+            for path in &lost {
+                self.lose(path);
+            }
+            if data.pool() == Pool::Console {
+                self.console = false;
+                for (index, outcome, output) in std::mem::take(&mut self.held) {
+                    observer.finished(self.graph, self.edges[index], &outcome, &output, self.progress);
+                }
+            }
+            return;
+        }
         // what a worker wrote, it has
         if remote {
             let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
@@ -1212,6 +1550,14 @@ impl Run<'_, '_> {
             }
         }
         if outcome.succeeded() {
+            // what it left on a worker is stamped as it was left, and what it did not is stamped by its file
+            let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+            for path in outputs {
+                let stamp = left.iter().find(|(left, _)| left == path).map(|&(_, stamp)| stamp);
+                if stamp.is_some() || self.left.read().is_ok_and(|left| left.contains_key(path)) {
+                    self.set_remote(path, stamp);
+                }
+            }
             let discovered = match data.depfile() {
                 Some(path) => read_depfile(&self.options.dir.join(path)),
                 None => Ok(depfile::Discovered::default()),
@@ -1277,7 +1623,7 @@ impl Run<'_, '_> {
         let passed: Vec<_> = edge.pass_env().iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref())).collect();
         let key = cache::first_key(identity, &action, &self.options.env, &passed, &outputs, edge.depfile(), &inputs);
         self.keys.insert(index, key);
-        Some(Lookup { cache: cache.clone(), key, env: Arc::clone(&self.env) })
+        Some(Lookup { cache: cache.clone(), key, env: Arc::clone(&self.env), left: Arc::clone(&self.left) })
     }
     /// Add the result of a cached edge which has run to the cache, by its first key: its outputs, its depfile and what
     /// its command printed, which it is restored from by its second key, of the contents of the inputs it discovered,
@@ -1290,6 +1636,10 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let edge = self.graph.edge(self.edges[index]);
+        // what was left on a worker is not here to be added
+        if record.outputs.iter().any(|(_, stamp)| stamp.is_remote()) {
+            return Ok(());
+        }
         let mut outputs = Vec::new();
         for (path, stamp) in &record.outputs {
             let Some(hash) = stamp.hash() else {
@@ -2178,6 +2528,68 @@ mod tests {
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         build.write("extra.h", "changed\n");
         assert_eq!(build.ran(&[]).len(), 2);
+    }
+
+    #[test]
+    fn leaves_what_is_not_a_target_on_workers() {
+        // an edge whose output another reads on the worker, and an edge which is not cached reads here
+        let cc = "cat $in > $out && echo \"$out: $in\" > $out.d";
+        let graph = graph()
+            .rule("cp", &[("command", "cp $in $out")])
+            .edge("cp", &["here"], &["mid"])
+            .cached("toolchain")
+            .rule("cc", &[("command", cc), ("depfile", "$out.d")])
+            .rule("twice", &[("command", "cat $in $in > $out && echo \"$out: $in\" > $out.d"), ("depfile", "$out.d")])
+            .edge("cc", &["mid"], &["a.c"])
+            .edge("twice", &["top"], &["mid"])
+            .finish();
+        let mut build = Build::new("leaves", graph, &[("a.c", "a\n")]);
+        let cache = TempCache::new("leaves-cache");
+        build.options.cache = Some(cache.0.clone());
+        // the first build runs here, so that what the edges read is known
+        assert_eq!(build.ran(&["top"]), ["mid", "top"]);
+        build.write("a.c", "b\n");
+        build.options.workers_only = true;
+        build.options.download = Download::Targets;
+        let store = TempCache::new("leaves-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        let (report, finished) = build.build(&["top"]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        assert_eq!(report.remote, 2, "{finished:?}");
+        // the target is fetched, as is the depfile of what it read, which is left there
+        assert_eq!(build.read("top"), "b\nb\n");
+        assert_eq!(build.read("mid.d"), "mid: a.c\n");
+        assert!(!build.dir.join("mid").exists());
+        assert_eq!(build.ran(&["top"]), Vec::<String>::new());
+        // once no worker has it, what reads it here has it built again first, and is left on the new worker until it
+        // is fetched
+        let fresh = TempCache::new("leaves-fresh");
+        build.options.workers = vec![worker(&fresh, &["toolchain"])];
+        let (report, finished) = build.build(&["here"]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        assert_eq!((report.lost, report.remote), (1, 1), "{finished:?}");
+        let order: Vec<&str> = finished.iter().map(|(output, _)| output.as_str()).collect();
+        assert_eq!(order, ["mid", "here"]);
+        assert_eq!(build.read("here"), "b\n");
+        // what was fetched is the same as was left, so nothing is out of date
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
+        build.write("a.c", "c\n");
+        // as `here` and `top` each wait only for `mid`, they finish in either order
+        let mut ran = build.ran(&[]);
+        ran.sort_unstable();
+        assert_eq!(ran, ["here", "mid", "top"]);
+        assert_eq!(build.read("top"), "c\nc\n");
+        // a target which an earlier build left on a worker, which no longer has it, is built again to be fetched
+        build.write("a.c", "d\n");
+        assert_eq!(build.ran(&["top"]), ["mid", "top"]);
+        assert!(!build.dir.join("mid").exists());
+        let other = TempCache::new("leaves-other");
+        build.options.workers = vec![worker(&other, &["toolchain"])];
+        let (report, finished) = build.build(&["mid"]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        assert_eq!((report.lost, report.remote), (1, 1), "{finished:?}");
+        assert_eq!(build.read("mid"), "d\n");
+        assert_eq!(build.ran(&[]), ["here"]);
     }
 
     #[test]

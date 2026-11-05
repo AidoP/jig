@@ -206,6 +206,13 @@ what is not cached, such as custom commands without `cache`. What has not been b
 crates, goes to workers too, once rustc finds the files it reads without compiling it, here first. A command which fails
 on a worker is run here again, as without it.
 
+With the `download` property `'targets'`, or `JIG_DOWNLOAD=targets`, which overrides it, what workers build is left on
+them, rather than fetched, but for what was asked for: what is built by default, the files `jig install` installs, the
+tests `jig test` runs, or the targets `jig build` is given. What is left there is fetched once something built here
+reads it, or a worker which does not have it is sent something which does, and when it is asked for later, without
+being built again. One which no worker has any longer, as its cache was cleared, is built again. With `'all'`, as by
+default, everything a worker builds is fetched.
+
 A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
 the toolchain, with `--install`. A crate's commands are sent only to workers with every tag its `worker-tag` attribute
 gives. Where what rustc writes does not depend on the host, as for a library, or a binary linked by `rust-lld`, a
@@ -921,6 +928,8 @@ target bluemetal-riscv64
   by default, which `JIG_WORKERS` overrides
 - `workers-only`: whether what a worker may build waits for one, rather than being built here, as described for
   workers, `false` by default, which `JIG_WORKERS_ONLY=1` overrides
+- `download`: what is fetched of what workers build, `'all'`, as by default, or `'targets'`, as described for workers,
+  which `JIG_DOWNLOAD` overrides
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
