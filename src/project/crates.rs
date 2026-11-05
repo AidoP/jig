@@ -389,7 +389,7 @@ impl Project {
             depends,
             command,
             program: None,
-            kind: CustomKind::Test { runner: None, harness: true },
+            kind: CustomKind::Test { runner: None, harness: true, on_workers: None },
             tags,
             change_detection: None,
             cached: false,
@@ -418,7 +418,10 @@ impl Project {
                 (test.name_span.file, test.name_span.offset) == (span.file, span.offset)
             });
             let target = c.target.clone();
+            // a test which runs on a worker is run there directly, as the worker runs its target
+            let on_workers = self.tests_on_workers(&target).then(|| target.clone());
             let runner = match self.target(&target).map(|target| target.runner) {
+                _ if on_workers.is_some() => None,
                 Some(runner) if self.can_test(&target) => runner,
                 _ if target == host => None,
                 // an unknown target is reported anyway
@@ -436,7 +439,7 @@ impl Project {
                 },
             };
             if let Some(declared) = declared {
-                self.customs[declared].kind = CustomKind::Test { runner, harness: true };
+                self.customs[declared].kind = CustomKind::Test { runner, harness: true, on_workers };
             }
         }
         if !removed.is_empty() {

@@ -1319,7 +1319,38 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Integration: `jig workers` shows the round trip.
    - **Not done yet:** a worker is assumed to run an edge as fast as it ran here, and a measure of each worker's
      speed would let a faster one take edges sooner.
-5. Tests run on workers whose host is the test's target.
+5. **Done:** tests run on workers whose host is the test's target (database version 24, protocol version 9).
+   - **Which tests.** A crate's test harness, for a builtin target which the host can't run, and which has no
+     `test` attribute, once there are workers, by `workers` or `JIG_WORKERS`. The configuration reads them before the
+     project's `Jig`. Then `{target}.test` is `true`, so `test {target}.test` tests the crate.
+     - A target's `test` may also be `'workers'`, to send its tests to workers even where the host runs them.
+     - Where there are no workers, nothing changes, so a project without them is configured as before.
+   - **What is recorded.** Each such test is recorded with its target and the files it is sent, relative to the
+     project root: its harness, and what it `depends` on. A test which reads a file at run time must depend on it, as
+     it isn't sent otherwise.
+   - **`jig test`.**
+     - The tests on workers are sent at once, on threads of their own, while the others run here in turn.
+     - Each result is shown in order, as if it had run here, with how long it took from when it was sent.
+     - A test goes to the first worker whose host is its target, by the capabilities it reports. The worker is sent
+       the test's files, and runs the harness from where the project root is, with `--color` as here.
+     - What the test printed is fetched into the cache, so tests on workers need rig's cache.
+     - A failure there says which worker it was. With no worker for the target, the test fails, saying what each
+       worker runs.
+   - **Actions without a toolchain.** A request whose identity is empty runs with no toolchain, with the worker's tools
+     in its `PATH`, as a test runs what was built rather than a compiler.
+   - **Tests.**
+     - rig, worker: an action without a toolchain runs.
+     - jig: the database round trips a test with its target and inputs.
+     - Integration:
+       - With a worker for the host, under `test 'workers'`, one crate's test reads a file it depends on, and passes
+         there.
+       - Another crate's test fails there, with what it printed and the worker's name.
+       - Without workers, both fail, as no worker runs the target.
+       - A target the host can't run is tested once there are workers, and is tested only where it runs without them.
+   - **Not done yet:**
+     - A worker runs only its own host's target, not one it could run otherwise, such as a static musl binary on a
+       glibc host of the same architecture.
+     - A test which runs on a worker isn't cached, as a test isn't here either.
 
 ### Phase 7: later
 
