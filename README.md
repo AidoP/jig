@@ -196,12 +196,14 @@ its declared inputs change. A command goes to a worker only if sending its files
 the build, and fetching what it writes, by the latency and bandwidth measured of the worker's link, would take less time
 than waiting for a job here, by how long the commands which run here took before. An interrupted build interrupts what
 its workers run for it, as does one whose connection to a worker ends. A build which used workers ends by saying how
-many of its commands ran on them.  With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it,
-what a worker may build is not built here, however many jobs the build has, but waits for a worker, as for a machine
-which should be left alone. What must be built here still is: what no worker builds, as none has its toolchain or
-target, or none can be reached, what has not been built before, as which files it reads is only known once it has, and
-what is not cached, such as custom commands without `cache`. A command which fails on a worker is run here again, as
-without it. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+many of its commands ran on them. A worker runs whatever it is sent, so it must only be reachable by those who are
+trusted.
+
+With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
+built here, however many jobs the build has, but waits for a worker, as for a machine which should be left alone. What
+must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, what
+has not been built before, as which files it reads is only known once it has, and what is not cached, such as custom
+commands without `cache`. A command which fails on a worker is run here again, as without it.
 
 A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
 the toolchain, with `--install`. A crate's commands are sent only to workers with every tag its `worker-tag` attribute
