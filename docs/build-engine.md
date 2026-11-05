@@ -1237,8 +1237,8 @@ implementation of that trait, so `generate.rs` doesn't change.
      - jig: the names of stable, nightly and beta releases, a beta with a number which rustup names otherwise, and a
        date which isn't a name. A toolchain's identity is the same in another directory, and differs by version.
      - Integration: `jig workers` shows the worker's host, jobs and tag, and the release which built here.
-   - **Not done yet:** a toolchain is installed with its host's standard library alone, and the targets an edge needs
-     aren't known to rig, so step 3 adds them to the platform an edge needs.
+   - **Not done at first, since done:** a toolchain was installed with its host's standard library alone, and the
+     targets an edge needs weren't known to rig. Step 3 adds them to the placement an edge needs, and installs them.
 3. **Done:** platform constraints on edges (graph format version 6, protocol version 7).
    - **`Placement`.** Each edge has one in the graph:
      - `any_host`: whether a toolchain of the same release on another host may run it, as what it writes doesn't
@@ -1288,9 +1288,10 @@ implementation of that trait, so `generate.rs` doesn't change.
      - jig: a library, a binary linked by `rust-lld`, a procedural macro, a crate using one, and a binary are placed as
        above, with their tags and targets.
      - jig: a release's identity is the same with another host.
-   - **Not done yet:**
+   - **Not done, by choice or as it can't be here:**
      - That what rustc writes doesn't depend on the host is assumed, rather than tested, as the tests have one host.
-     - A worker's capabilities are asked for once per build, so a toolchain it installs is used by the next build.
+     - A worker's capabilities are asked for once per build, so a toolchain it installs is used by the next build,
+       which is as intended.
 4. **Done:** scheduling by cost, and interrupts passed on to workers (protocol version 8).
    - **The link.** `Remote` keeps a `Link` estimate of each server: its latency, and its bandwidth.
      - The latency is the round trip of `HELLO`, which has little to send.
@@ -1325,8 +1326,21 @@ implementation of that trait, so `generate.rs` doesn't change.
        - Two edges which sleep ten seconds on a worker. The build is cancelled after 0.6 s, and ends within five
          seconds, interrupted. Neither ran here, and their outputs are as they were.
      - Integration: `jig workers` shows the round trip.
-   - **Not done yet:** a worker is assumed to run an edge as fast as it ran here, and a measure of each worker's
-     speed would let a faster one take edges sooner.
+   - **Not done at first, since done:** a worker was assumed to run an edge as fast as it ran here.
+     - `Link::speed` is how long a worker takes to run an edge, against how long the edge took here, `1.0` until it
+       is measured.
+     - It's measured from each edge which succeeds there and took 100 ms or more here, as what takes less is mostly
+       starting its command. The time is from sending `EXECUTE` until its reply, once its inputs are sent, less the
+       latency. Each measure is weighted equally with what was measured before.
+     - An edge goes to a worker if it would finish sooner there than here. There is sending it, plus running it at the
+       worker's speed. Here is the wait for a job, plus running it.
+     - Of the workers which may run it and have a job free, the one it would finish soonest on takes it, rather than
+       the first.
+     - Tests:
+       - The speed is measured by what took long enough, and weighted.
+       - Of a worker assumed ten times as slow and one twice as fast, the fast one takes two edges which took 0.2 s
+         here, while the slow edge holds the job. With only the slow one, they wait and run here.
+       - A worker on the same machine is measured as running an edge in about the time it took here.
 5. **Done:** tests run on workers whose host is the test's target (database version 24, protocol version 9).
    - **Which tests.** A crate's test harness, for a builtin target which the host can't run, and which has no
      `test` attribute, once there are workers, by `workers` or `JIG_WORKERS`. The configuration reads them before the
@@ -1355,10 +1369,14 @@ implementation of that trait, so `generate.rs` doesn't change.
        - Another crate's test fails there, with what it printed and the worker's name.
        - Without workers, both fail, as no worker runs the target.
        - A target the host can't run is tested once there are workers, and is tested only where it runs without them.
-   - **Not done yet:**
-     - A worker runs only its own host's target, not one it could run otherwise, such as a static musl binary on a
-       glibc host of the same architecture.
-     - A test which runs on a worker isn't cached, as a test isn't here either.
+   - **Not done at first, since done:** a worker ran only its own host's target.
+     - A test whose harness is linked statically, an ELF executable without an interpreter, `PT_INTERP`, also runs on
+       a worker of any Linux of the same architecture. An example is a static musl binary on a host of glibc.
+     - A static PIE has a dynamic section but no interpreter, so it counts too. An ELF file which is cut short in its
+       program headers doesn't count.
+     - Tests: ELF files of 64 and 32 bits, with and without an interpreter, and cut short. Which hosts run which
+       targets, linked statically or not.
+   - **Not done, as it isn't here either:** a test which runs on a worker isn't cached.
 
 6. **Done:** builds only for workers (database version 25).
    - **`Options::workers_only`.** An edge which a worker may run waits for one rather than running here, whatever the

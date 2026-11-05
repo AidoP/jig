@@ -217,12 +217,13 @@ rustc loads it, and what is linked by the host's linker, as binaries and tests a
 set workers ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
 ```
 
-Tests run on workers too, where the host cannot run them. With workers, a builtin target which the host cannot run,
-and which has no `test` attribute, is tested, so that `test {target}.test` tests its crates. `jig test` sends each of
-their tests to a worker whose host is its target, such as an aarch64 or riscv64 machine, with its test harness and what
-it `depends` on, as a test which reads a file at run time must depend on it. It runs there, from where the project root
-is, with the worker's own tools, while the other tests run here, and its result is shown as if it had run here. A
-target whose `test` is `'workers'` has its tests run on workers even where the host can run them.
+Tests run on workers too, where the host cannot run them. With workers, a builtin target which the host cannot run, and
+which has no `test` attribute, is tested, so that `test {target}.test` tests its crates. `jig test` sends each of their
+tests to a worker whose host is its target, or for a test linked statically, any Linux of its architecture, such as an
+aarch64 or riscv64 machine, with its test harness and what it `depends` on, as a test which reads a file at run time
+must depend on it. It runs there, from where the project root is, with the worker's own tools, while the other tests run
+here, and its result is shown as if it had run here. A target whose `test` is `'workers'` has its tests run on workers
+even where the host can run them.
 
 ### The user's configuration
 

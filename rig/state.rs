@@ -304,6 +304,22 @@ mod tests {
         dir
     }
 
+    /// Open the state in a directory, which the test's other threads can hold for a moment after this one closed it,
+    /// as a process which one of them is starting has a copy of every descriptor until it runs its program, the lock's
+    /// among them.
+    fn open(dir: &Path) -> State {
+        let mut tries = 0;
+        loop {
+            match State::open(dir) {
+                Err(Error::Locked(_)) if tries < 100 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                },
+                state => return state.unwrap(),
+            }
+        }
+    }
+
     fn record(output: &str, start: u64) -> Record {
         Record {
             start,
@@ -323,14 +339,14 @@ mod tests {
     #[test]
     fn keeps_records() {
         let dir = dir("keeps");
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         assert!(state.is_empty());
         state.record(record("a", 1)).unwrap();
         state.record(record("b", 2)).unwrap();
         // a later record of an edge replaces the earlier one
         state.record(record("a", 3)).unwrap();
         drop(state);
-        let state = State::open(&dir).unwrap();
+        let state = open(&dir);
         assert_eq!(state.len(), 2);
         assert_eq!(state.get("a"), Some(&record("a", 3)));
         assert_eq!(state.get("b"), Some(&record("b", 2)));
@@ -341,17 +357,17 @@ mod tests {
     #[test]
     fn is_locked_while_open() {
         let dir = dir("locked");
-        let state = State::open(&dir).unwrap();
+        let state = open(&dir);
         assert!(matches!(State::open(&dir), Err(Error::Locked(_))));
         drop(state);
-        assert!(State::open(&dir).is_ok());
+        let _ = open(&dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn ignores_a_torn_record() {
         let dir = dir("torn");
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         state.record(record("a", 1)).unwrap();
         state.record(record("b", 2)).unwrap();
         drop(state);
@@ -359,13 +375,13 @@ mod tests {
         let log = dir.join("log");
         let len = std::fs::metadata(&log).unwrap().len();
         std::fs::File::options().write(true).open(&log).unwrap().set_len(len - 3).unwrap();
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         assert_eq!(state.len(), 1);
         assert!(state.get("b").is_none());
         // which the next record replaces
         state.record(record("c", 3)).unwrap();
         drop(state);
-        let state = State::open(&dir).unwrap();
+        let state = open(&dir);
         assert_eq!((state.len(), state.get("c").is_some()), (2, true));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -375,30 +391,30 @@ mod tests {
         let dir = dir("version");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log"), b"RIGL\x01\0\0\0garbage").unwrap();
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         assert!(state.is_empty());
         state.record(record("a", 1)).unwrap();
         drop(state);
-        assert_eq!(State::open(&dir).unwrap().len(), 1);
+        assert_eq!(open(&dir).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn compacts() {
         let dir = dir("compacts");
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         for start in 0..COMPACT_MIN as u64 {
             state.record(record(if start % 2 == 0 { "a" } else { "b" }, start)).unwrap();
         }
         let before = std::fs::metadata(dir.join("log")).unwrap().len();
         drop(state);
         // the log is rewritten when it is opened, as most of its records have been replaced
-        let mut state = State::open(&dir).unwrap();
+        let mut state = open(&dir);
         assert_eq!(state.logged, 2);
         assert!(std::fs::metadata(dir.join("log")).unwrap().len() < before / 100);
         state.record(record("c", 9999)).unwrap();
         drop(state);
-        let state = State::open(&dir).unwrap();
+        let state = open(&dir);
         assert_eq!(state.len(), 3);
         assert_eq!(state.get("b").unwrap().start, COMPACT_MIN as u64 - 1);
         let _ = std::fs::remove_dir_all(&dir);

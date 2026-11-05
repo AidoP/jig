@@ -414,16 +414,18 @@ struct Push {
 }
 
 /// What a build estimates of the link to a server, by which it finds whether to send an edge to a worker: the time a
-/// request takes to be answered, beside what it sends, and the bytes it sends or fetches each second.
+/// request takes to be answered, beside what it sends, the bytes it sends or fetches each second, and, as a worker,
+/// how long it takes to run an edge, against how long the edge took here, `1.0` for as long.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Link {
     pub latency: std::time::Duration,
     pub bytes_per_second: f64,
+    pub speed: f64,
 }
 
 impl Default for Link {
     fn default() -> Self {
-        Self { latency: std::time::Duration::ZERO, bytes_per_second: Self::ASSUMED }
+        Self { latency: std::time::Duration::ZERO, bytes_per_second: Self::ASSUMED, speed: 1.0 }
     }
 }
 
@@ -433,6 +435,23 @@ impl Link {
     /// The fewest bytes sent or fetched at once which the bandwidth is measured by, as the time of fewer is mostly
     /// latency.
     const MEASURED: u64 = 1 << 16;
+    /// The shortest time an edge took here by which the speed of a worker is measured, as what takes less is mostly
+    /// starting its command.
+    const TIMED: std::time::Duration = std::time::Duration::from_millis(100);
+    /// Returns the time it is estimated a worker takes to run an edge which took a time here.
+    #[must_use]
+    pub fn running(&self, here: std::time::Duration) -> std::time::Duration {
+        here.mul_f64(self.speed.max(0.0))
+    }
+    /// Take a measure of the speed of a worker, from the time it took to run an edge, which has the latency of a round
+    /// trip in it, against the time the edge took here, if it took long enough here to measure it by, weighting what
+    /// was measured before as much as it.
+    fn measure_speed(&mut self, there: std::time::Duration, here: std::time::Duration) {
+        if here >= Self::TIMED {
+            let there = there.saturating_sub(self.latency).as_secs_f64();
+            self.speed = f64::midpoint(self.speed, there / here.as_secs_f64());
+        }
+    }
     /// Returns the time it is estimated to take to send or fetch a number of bytes, in a number of round trips.
     #[must_use]
     // an estimate needs no more precision than an `f64` has of a number of bytes
@@ -860,6 +879,19 @@ impl Remote {
     /// If the worker does not have the toolchain, which it is not asked again, or could not run the action, as when an
     /// input changed as it was sent, or the connection failed, after which the worker is not used again.
     pub fn execute(&self, dir: &std::path::Path, request: &Request) -> Result<Executed, Refused> {
+        self.execute_timed(dir, request).map(|(executed, _)| executed)
+    }
+    /// Run an action on the server, as [`Self::execute`] does, returning too how long it took to run, from when it was
+    /// sent until its reply came, once its inputs were sent.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::execute`].
+    pub fn execute_timed(
+        &self,
+        dir: &std::path::Path,
+        request: &Request,
+    ) -> Result<(Executed, std::time::Duration), Refused> {
         let failed = || Refused::Error(self.error().unwrap_or_else(|| "the worker cannot be reached".into()));
         let connection = self.connection().ok_or_else(failed)?;
         let missing = self.missing(&request.blobs()).ok_or_else(failed)?;
@@ -886,9 +918,11 @@ impl Remote {
             }
         }
         self.measured(bytes, sending.elapsed());
+        let running = std::time::Instant::now();
         let reply = connection.send(EXECUTE, &request.encode()).and_then(|receiver| receiver.recv().ok());
+        let ran = running.elapsed();
         match reply {
-            Some((FOUND, payload)) => Executed::decode(&payload).ok_or_else(|| {
+            Some((FOUND, payload)) => Executed::decode(&payload).map(|executed| (executed, ran)).ok_or_else(|| {
                 connection.fail("an invalid reply from the worker".into());
                 failed()
             }),
@@ -921,6 +955,15 @@ impl Remote {
             && !link.1
         {
             link.0.measure(bytes, took);
+        }
+    }
+    /// Take a measure of the speed of the server, as a worker, from how long it took to run an edge, as
+    /// [`Self::execute_timed`] gives it, against how long the edge took here.
+    pub fn timed(&self, there: std::time::Duration, here: std::time::Duration) {
+        if let Ok(mut link) = self.link.lock()
+            && !link.1
+        {
+            link.0.measure_speed(there, here);
         }
     }
     /// Have the server, as a worker, interrupt the actions it runs for this client, and run no more, as when the
@@ -1673,7 +1716,7 @@ mod tests {
     #[test]
     fn estimates_the_link() {
         use std::time::Duration;
-        let mut link = Link { latency: Duration::from_millis(10), bytes_per_second: 1e6 };
+        let mut link = Link { latency: Duration::from_millis(10), bytes_per_second: 1e6, speed: 1.0 };
         assert_eq!(link.time(500_000, 2), Duration::from_millis(520));
         // the bandwidth is measured by what takes long enough to send, without the latency, and weighted with the
         // measures before
@@ -1685,7 +1728,13 @@ mod tests {
         let measured = served(cache("link"), false, false);
         let _ = measured.pushes();
         assert!(measured.link().latency < Duration::from_secs(1));
-        let assumed = Link { latency: Duration::from_secs(3), bytes_per_second: 1.0 };
+        // a worker's speed is measured by what took long enough here, without the latency, and weighted
+        link.measure_speed(Duration::from_millis(60), Duration::from_millis(50));
+        assert!((link.speed - 1.0).abs() < 1e-9);
+        link.measure_speed(Duration::from_millis(1010), Duration::from_millis(500));
+        assert!((link.speed - 1.5).abs() < 1e-9);
+        assert_eq!(link.running(Duration::from_secs(2)), Duration::from_secs(3));
+        let assumed = Link { latency: Duration::from_secs(3), bytes_per_second: 1.0, speed: 2.0 };
         let remote = served(cache("link-assumed"), false, false).with_link(assumed);
         let _ = remote.pushes();
         assert_eq!(remote.link(), assumed);
