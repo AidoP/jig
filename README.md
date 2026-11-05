@@ -190,20 +190,18 @@ rustup from the same release, whichever components it has. A worker run with `--
 not have with rustup, by the release's version, such as `1.97.0`, or its channel and date, such as `nightly-2026-11-03`,
 with its minimal profile, trying each once. As the paths rustc is given and writes are relative, what it writes there is
 what it would write here, which is fetched into the cache, and pushed to the remote cache as what is built here is. A
-command which fails there, or reads a file it was not sent, runs here again, as do those of a toolchain the worker does
-not have. One which fails there and succeeds here runs here for a month, or until it or its declared inputs change.
-A command goes to a worker only if sending its files, other than those the worker has from the build, and fetching what
-it writes, by the latency and bandwidth measured of the worker's link, would take less time than waiting for a job
-here, by how long the commands which run here took before. An interrupted build interrupts what its workers run for it,
-as does one whose connection to a worker ends. A build which used workers ends by saying how many of its commands ran
-on them.
-
-With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
-built here, however many jobs the build has, but waits for a worker, as for a machine which should be left alone. What
-must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, what
-has not been built before, as which files it reads is only known once it has, and what is not cached, such as custom
-commands without `cache`. A command which fails on a worker is run here again, as without it. A
-worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+command which fails there, or reads a file it was not sent, runs here again, in one of the build's own jobs, as do those
+of a toolchain the worker does not have. One which fails there and succeeds here runs here for a month, or until it or
+its declared inputs change. A command goes to a worker only if sending its files, other than those the worker has from
+the build, and fetching what it writes, by the latency and bandwidth measured of the worker's link, would take less time
+than waiting for a job here, by how long the commands which run here took before. An interrupted build interrupts what
+its workers run for it, as does one whose connection to a worker ends. A build which used workers ends by saying how
+many of its commands ran on them.  With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it,
+what a worker may build is not built here, however many jobs the build has, but waits for a worker, as for a machine
+which should be left alone. What must be built here still is: what no worker builds, as none has its toolchain or
+target, or none can be reached, what has not been built before, as which files it reads is only known once it has, and
+what is not cached, such as custom commands without `cache`. A command which fails on a worker is run here again, as
+without it. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
 
 A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
 the toolchain, with `--install`. A crate's commands are sent only to workers with every tag its `worker-tag` attribute
