@@ -21,10 +21,12 @@
 //! the cache. If it cannot, or the action fails there, it is given back to run here, in one of the build's own jobs,
 //! as any other edge does, once one is free.
 //!
-//! An edge goes to a worker only if sending its files and fetching its outputs is estimated to take less time than it
-//! would wait for one of the build's own jobs: the least time one of the edges which run here has left, by how long it
-//! took when it last ran. Sending is estimated by the size of its files when it last ran, but for those the worker has
-//! from this build, as it wrote or was sent them, and the link's latency and bandwidth, as they are measured. An
+//! An edge goes to a worker only if it is estimated to finish sooner there than here: sending its files, running it
+//! there and fetching its outputs, against waiting for one of the build's own jobs, the least time one of the edges
+//! which run here has left, and running it here, by how long they took when they last ran. Sending is estimated by the
+//! size of its files when it last ran, but for those the worker has from this build, as it wrote or was sent them, and
+//! the link's latency and bandwidth, and running it there by the worker's speed, as they are measured. Of the workers
+//! which may run it, the one it would finish soonest on takes it. An
 //! interrupted build has its workers interrupt what they run for it, which does not then run here.
 //!
 //! With [`Options::workers_only`], an edge which a worker may run does not run here, but waits for a worker, whatever
@@ -201,6 +203,8 @@ struct Dispatch {
     cache: Cache,
     /// The edge's first key, by which an edge which fails there, but not here, is marked to run here.
     key: Option<Hash>,
+    /// How long it took when it last ran, by which the worker's speed is measured.
+    took: Duration,
     identity: String,
     release: String,
     install: String,
@@ -256,7 +260,10 @@ impl Dispatch {
             inputs,
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
         };
-        let executed = self.worker.execute(dir, &request).map_err(|_| Sent::NotRun)?;
+        let (executed, ran) = self.worker.execute_timed(dir, &request).map_err(|_| Sent::NotRun)?;
+        if executed.succeeded {
+            self.worker.timed(ran, self.took);
+        }
         let written = |path: &String| executed.entry.outputs.iter().any(|output| output.path == *path);
         if !executed.succeeded || !self.outputs.iter().all(written) {
             return Err(Sent::Failed);
@@ -853,12 +860,19 @@ impl Run<'_, '_> {
                 self.local_only.insert(index);
                 continue;
             }
-            let wait = self.local_wait();
-            let worker = (0..self.options.workers.len()).find(|&worker| {
-                // it waits for a job here if that is sooner than it would be sent, unless it only runs on workers
+            // the worker it would finish soonest on, by sending it, and running it there
+            let took = self.took(index);
+            let there = |worker: usize| {
                 let link = self.options.workers[worker].link();
-                let sooner = self.options.workers_only || wait.is_none_or(|wait| self.sending(index, link) < wait);
-                free(self, worker) && self.runs(index, worker) && sooner
+                self.sending(index, link).saturating_add(link.running(took))
+            };
+            let candidates = (0..self.options.workers.len())
+                .filter(|&worker| free(self, worker) && self.runs(index, worker));
+            let worker = candidates.min_by_key(|&worker| there(worker));
+            // it waits for a job here if it would finish sooner here, unless it only runs on workers
+            let wait = self.local_wait();
+            let worker = worker.filter(|&worker| {
+                self.options.workers_only || wait.is_none_or(|wait| there(worker) < wait.saturating_add(took))
             });
             if let Some(worker) = worker {
                 self.ready.remove(&entry);
@@ -876,6 +890,11 @@ impl Run<'_, '_> {
             Some(Duration::from_millis(u64::from(record.duration)).saturating_sub(started.elapsed()))
         });
         left.min()
+    }
+    /// Returns how long an edge took when it last ran, or nothing if it has not run.
+    fn took(&self, index: usize) -> Duration {
+        let record = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        record.map_or(Duration::ZERO, |record| Duration::from_millis(u64::from(record.duration)))
     }
     /// Returns how long it is estimated to take to send an edge to a worker over a link, and fetch its outputs: its
     /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
@@ -945,6 +964,7 @@ impl Run<'_, '_> {
             worker: Arc::clone(&self.options.workers[worker]),
             cache,
             key,
+            took: self.took(index),
             identity: identity.to_string(),
             release: if placement.any_host { release.identity } else { String::new() },
             install: release.install,
@@ -1856,7 +1876,7 @@ mod tests {
         build.options.jobs = 1;
         // over a link with a second's latency, sending takes longer than the slow edge has left, or the others take
         let store = TempCache::new("waits-store");
-        let slow = crate::remote::Link { latency: Duration::from_secs(1), bytes_per_second: 1e9 };
+        let slow = crate::remote::Link { latency: Duration::from_secs(1), bytes_per_second: 1e9, speed: 1.0 };
         build.options.workers = vec![linked(&store, slow)];
         remove(&build, &["slow", "a.o", "b.o"]);
         let second = TempCache::new("waits-second");
@@ -1867,7 +1887,7 @@ mod tests {
         assert_eq!(store.0.stats().blobs, 0);
         // while over a fast link, they are sent
         let fast = TempCache::new("waits-fast");
-        let link = crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9 };
+        let link = crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9, speed: 1.0 };
         build.options.workers = vec![linked(&fast, link)];
         remove(&build, &["slow", "a.o", "b.o"]);
         let third = TempCache::new("waits-third");
@@ -1908,6 +1928,58 @@ mod tests {
             assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
         }
         assert_eq!(other.0.stats().blobs, 0);
+    }
+
+    #[test]
+    fn sends_edges_to_the_worker_they_finish_soonest_on() {
+        // the edges which copy their inputs take 0.2 s here, while the slow edge holds the one job for 0.3 s
+        let mut build = Build::new("soonest", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
+        let first = TempCache::new("soonest-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        build.options.jobs = 1;
+        // a worker which takes ten times as long as here would finish them later than here, and one which takes half
+        // as long, sooner, so of the two, that one takes them
+        let link = |speed| crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9, speed };
+        let (slow, fast) = (TempCache::new("soonest-slow"), TempCache::new("soonest-fast"));
+        build.options.workers = vec![linked(&slow, link(10.0)), linked(&fast, link(0.5))];
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let second = TempCache::new("soonest-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 2, "{finished:?}");
+        assert_eq!(slow.0.stats().blobs, 0);
+        // and with only the slow one, they wait for the job here
+        let alone = TempCache::new("soonest-alone");
+        build.options.workers = vec![linked(&alone, link(10.0))];
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let third = TempCache::new("soonest-third");
+        build.options.cache = Some(third.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 0, "{finished:?}");
+        assert_eq!(alone.0.stats().blobs, 0);
+    }
+
+    #[test]
+    fn measures_how_fast_workers_run_edges() {
+        // an edge which took 0.2 s here, which a worker runs as fast, is measured as taking as long there
+        let mut build = Build::new("speed", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
+        let first = TempCache::new("speed-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        build.options.jobs = 1;
+        let store = TempCache::new("speed-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        assert!(build.options.workers[0].capabilities().is_ok());
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let second = TempCache::new("speed-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded() && report.remote > 0, "{report:?} {finished:?}");
+        let speed = build.options.workers[0].link().speed;
+        assert!((0.5..3.0).contains(&speed), "{speed}");
     }
 
     #[test]

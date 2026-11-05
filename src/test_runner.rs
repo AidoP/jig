@@ -187,12 +187,14 @@ impl Workers {
         use std::os::unix::fs::PermissionsExt;
         let target = test.on_workers;
         let cache = self.cache.as_ref().ok_or("a test runs on a worker only with rig's cache, which is off")?;
+        // a statically linked harness runs on any Linux of its architecture, as it needs no loader
+        let linked_statically = test.inputs.first().is_some_and(|harness| linked_statically(&self.root.join(harness)));
         // each is asked what it is in turn, which a build asks once
         let mut hosts = Vec::new();
         let mut chosen = None;
         for (name, worker) in &self.named {
             match worker.capabilities() {
-                Ok(capabilities) if runs(&capabilities.host, target) => {
+                Ok(capabilities) if runs(&capabilities.host, target, linked_statically) => {
                     chosen = Some((name, worker));
                     break;
                 },
@@ -246,9 +248,59 @@ impl Workers {
     }
 }
 
-/// Whether a worker which runs on a host runs what is built for a target: its own.
-fn runs(host: &str, target: &str) -> bool {
-    host == target
+/// Whether a worker which runs on a host runs what is built for a target: its own, or, for what is linked statically
+/// for Linux, any Linux of the same architecture, such as a static binary of musl on a host of glibc.
+fn runs(host: &str, target: &str, linked_statically: bool) -> bool {
+    let arch = |triple: &str| triple.split('-').next().map(String::from);
+    let linux = |triple: &str| triple.split('-').any(|part| part == "linux");
+    host == target || (linked_statically && linux(host) && linux(target) && arch(host) == arch(target))
+}
+
+/// Whether a file is an ELF executable which is linked statically: one without an interpreter, the dynamic loader,
+/// which runs on any kernel of its architecture, as a static PIE does, though it is relocated by itself.
+fn linked_statically(path: &std::path::Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| elf_without_interpreter(&bytes))
+}
+
+/// Whether bytes are an ELF executable without a program header of its interpreter, `PT_INTERP`.
+fn elf_without_interpreter(bytes: &[u8]) -> bool {
+    const PT_INTERP: u32 = 3;
+    if bytes.get(..4) != Some(b"\x7fELF") {
+        return false;
+    }
+    let (wide, little) = (bytes.get(4) == Some(&2), bytes.get(5) == Some(&1));
+    let number = |at: usize, len: usize| -> Option<u64> {
+        let field = bytes.get(at..at.checked_add(len)?)?;
+        let mut value = [0; 8];
+        if little {
+            value[..len].copy_from_slice(field);
+            Some(u64::from_le_bytes(value))
+        } else {
+            value[8 - len..].copy_from_slice(field);
+            Some(u64::from_be_bytes(value))
+        }
+    };
+    // where the program headers are, and how many and how large they are, which differ in place for 32 and 64 bits
+    let headers = if wide {
+        (number(0x20, 8), number(0x36, 2), number(0x38, 2))
+    } else {
+        (number(0x1c, 4), number(0x2a, 2), number(0x2c, 2))
+    };
+    let (Some(offset), Some(size), Some(count)) = headers else {
+        return false;
+    };
+    let Ok(offset) = usize::try_from(offset) else {
+        return false;
+    };
+    // the table of program headers is whole, so that one which is cut short is not taken as static
+    let end = offset.checked_add((count as usize).saturating_mul(size as usize));
+    if count == 0 || end.is_none_or(|end| end > bytes.len()) {
+        return false;
+    }
+    (0..count as usize).all(|index| {
+        let at = offset.saturating_add(index.saturating_mul(size as usize));
+        number(at, 4).is_some_and(|kind| kind != u64::from(PT_INTERP))
+    })
 }
 
 /// Returns the output of a test indented below its result, without the blank lines around it.
@@ -291,5 +343,60 @@ impl Style {
     }
     fn dim(&self, text: &str) -> String {
         self.paint("\x1b[2m", text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns the bytes of an ELF executable of 64 or 32 bits, little-endian, with program headers of these kinds.
+    fn elf(wide: bool, kinds: &[u32]) -> Vec<u8> {
+        let (header, entry) = if wide { (64, 56) } else { (52, 32) };
+        let mut bytes = vec![0; header];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = if wide { 2 } else { 1 };
+        bytes[5] = 1;
+        let (offset, size, count) = if wide { (0x20, 0x36, 0x38) } else { (0x1c, 0x2a, 0x2c) };
+        let len = if wide { 8 } else { 4 };
+        bytes[offset..offset + len].copy_from_slice(&(header as u64).to_le_bytes()[..len]);
+        bytes[size..size + 2].copy_from_slice(&(entry as u16).to_le_bytes());
+        bytes[count..count + 2].copy_from_slice(&(kinds.len() as u16).to_le_bytes());
+        for &kind in kinds {
+            let mut program = vec![0; entry];
+            program[..4].copy_from_slice(&kind.to_le_bytes());
+            bytes.extend(program);
+        }
+        bytes
+    }
+
+    #[test]
+    fn finds_what_is_linked_statically() {
+        // a program header of the loadable segment, of the dynamic section, and of the interpreter
+        let (load, dynamic, interp) = (1, 2, 3);
+        for wide in [true, false] {
+            assert!(elf_without_interpreter(&elf(wide, &[load, load])));
+            // as a static PIE has a dynamic section, but no interpreter
+            assert!(elf_without_interpreter(&elf(wide, &[load, dynamic])));
+            assert!(!elf_without_interpreter(&elf(wide, &[load, interp, dynamic])));
+        }
+        // what is not ELF, or is cut short, is not
+        assert!(!elf_without_interpreter(b"#!/bin/sh\n"));
+        assert!(!elf_without_interpreter(&elf(true, &[load])[..70]));
+        // jig itself is linked as its target is
+        let jig = std::env::current_exe().unwrap();
+        let _ = linked_statically(&jig);
+    }
+
+    #[test]
+    fn finds_which_workers_run_a_target() {
+        let (gnu, musl) = ("riscv64gc-unknown-linux-gnu", "riscv64gc-unknown-linux-musl");
+        assert!(runs(gnu, gnu, false));
+        assert!(!runs(gnu, musl, false));
+        // what is linked statically runs on any Linux of its architecture, but no other
+        assert!(runs(gnu, musl, true));
+        assert!(runs("x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu", true));
+        assert!(!runs("aarch64-unknown-linux-gnu", musl, true));
+        assert!(!runs("riscv64gc-unknown-freebsd", musl, true));
     }
 }
