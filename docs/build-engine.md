@@ -1436,6 +1436,36 @@ implementation of that trait, so `generate.rs` doesn't change.
 4. **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
 5. **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
    so Windows can be added later.
+   - **What needs porting.** rig's Unix-only parts:
+     - process groups and signals, in `rig/sys.rs`, which become job objects and console control events;
+     - the jobserver's FIFO, which becomes a named semaphore, as make's is on Windows;
+     - file modes, which mark outputs executable;
+     - symbolic links;
+     - and `std::os::unix`, used in about a dozen places.
+   - **Iterating with Wine.** Development and tests run on Linux, with the target `x86_64-pc-windows-gnu`, linked by
+     MinGW (`x86_64-w64-mingw32-gcc`), and Wine (`wine64`) as the target's runner, so `jig test` runs the test harnesses
+     for Windows there:
+
+     ```
+     target x86_64-pc-windows-gnu
+         override
+         linker 'x86_64-w64-mingw32-gcc'
+         runner 'wine64'
+     ```
+
+     - Tried on Ubuntu 24.04 with Wine 9.0. A program and a libtest harness for Windows build and run, and a program
+       starts a child process (`cmd /C`), and writes a file.
+     - The first run takes about 7.5 s, as Wine makes its prefix. Each later run takes about 0.4 s.
+     - CI would add a Linux job which installs `wine64`, `gcc-mingw-w64-x86-64` and the target, and tests it.
+   - **Where Wine isn't enough.** Wine isn't Windows, and is least like it where rig's port is:
+     - console control events, as for Ctrl-C;
+     - job objects, which end a tree of processes;
+     - locking files;
+     - symbolic links, which need a privilege on Windows;
+     - and the details of paths, such as drive letters and long paths.
+
+     So a `windows-latest` runner in CI checks the port once rig builds for Windows, while Wine stays the loop for
+     developing it.
 
 ## Risks
 
