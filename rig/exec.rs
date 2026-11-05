@@ -18,7 +18,8 @@
 //! A cached edge whose inputs are known from when it last ran may run on a worker, one of [`Options::workers`], once
 //! the build's own jobs are full, if the worker has the edge's toolchain: its inputs, declared and discovered, are
 //! sent to the worker, as [`crate::worker`] describes, which runs it, and its outputs are fetched, and restored as from
-//! the cache. If it cannot, or the action fails there, it runs here, on the thread which waited for the worker.
+//! the cache. If it cannot, or the action fails there, it is given back to run here, in one of the build's own jobs,
+//! as any other edge does, once one is free.
 //!
 //! An edge goes to a worker only if sending its files and fetching its outputs is estimated to take less time than it
 //! would wait for one of the build's own jobs: the least time one of the edges which run here has left, by how long it
@@ -174,6 +175,8 @@ enum Message {
     /// The command of an edge has started, as the process with an id, which leads its process group.
     Spawned(usize, u32),
     Finished(Finished),
+    /// An edge which was sent to a worker, which did not run it, or failed it, given back to run here.
+    Returned(Box<Job>),
 }
 
 /// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and where its
@@ -187,6 +190,8 @@ struct Job {
     inherit: Option<Vec<String>>,
     /// The worker it runs on, if it is sent to one.
     dispatch: Option<Dispatch>,
+    /// The cache and first key it is marked to run here by if it succeeds, as it failed on a worker.
+    mark: Option<(Cache, Hash)>,
 }
 
 /// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
@@ -264,12 +269,10 @@ impl Dispatch {
         self.worker.measured(fetched.iter().map(size).sum(), fetching.elapsed());
         Restore { cache: &self.cache, entry: executed.entry }.apply(dir).map_err(|_| Sent::NotRun)
     }
-    /// Mark the edge to run here, once it failed on the worker and succeeded here, as it depends on what it does not
-    /// declare or discover, until its first key changes.
-    fn mark_local(&self) {
-        if let Some(key) = &self.key {
-            self.cache.mark_local(key);
-        }
+    /// Returns what marks the edge to run here, once it failed on the worker and succeeds here, as it depends on what
+    /// it does not declare or discover, until its first key changes.
+    fn mark(&self) -> Option<(Cache, Hash)> {
+        Some((self.cache.clone(), self.key?))
     }
 }
 
@@ -413,6 +416,7 @@ pub fn build(
         spawned: vec![false; options.workers.len()],
         local_only: HashSet::new(),
         stop: Arc::default(),
+        returned: std::collections::VecDeque::new(),
         started: HashMap::new(),
         on_workers: HashSet::new(),
     };
@@ -535,6 +539,8 @@ struct Run<'g, 's> {
     local_only: HashSet<usize>,
     /// Set once the build is interrupted, so that an edge which a worker was interrupted running does not run here.
     stop: Arc<AtomicBool>,
+    /// The edges which workers gave back, which run here once one of the build's jobs is free, in the order given.
+    returned: std::collections::VecDeque<Job>,
     /// When each running edge started.
     started: HashMap<usize, Instant>,
     /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
@@ -562,7 +568,7 @@ impl Run<'_, '_> {
             move || {
                 // the lock is held while waiting for a job, which the other threads wait for in turn
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
-                    let Job { index, action, console, lookup, inherit, dispatch } = job;
+                    let Job { index, action, console, lookup, inherit, dispatch, mark } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
@@ -578,9 +584,18 @@ impl Run<'_, '_> {
                         Sent::NotRun => (None, false),
                     };
                     let remote = ran.is_some();
+                    // an edge which the worker did not run is given back to run in one of the build's own jobs, unless
+                    // the worker was interrupted running it
+                    let given_back = !cached && !remote && !stop.load(Ordering::SeqCst);
+                    if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
+                        let mark = dispatch.mark().filter(|_| failed_there);
+                        let job = Job { index, action, console, lookup: None, inherit, dispatch: None, mark };
+                        let _ = sender.send(Message::Returned(Box::new(job)));
+                        continue;
+                    }
                     let (outcome, output) = if let Some(printed) = restored.or(ran) {
                         (Outcome::Succeeded, printed)
-                    } else if dispatch.is_some() && stop.load(Ordering::SeqCst) {
+                    } else if dispatch.is_some() {
                         // an edge which a worker was interrupted running does not run here
                         (Outcome::Interrupted, Vec::new())
                     } else {
@@ -590,8 +605,8 @@ impl Run<'_, '_> {
                         let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
                         run_command(&action, dir, console, &environment, &spawned)
                     };
-                    if failed_there && outcome.succeeded() && let Some(dispatch) = &dispatch {
-                        dispatch.mark_local();
+                    if outcome.succeeded() && let Some((cache, key)) = &mark {
+                        cache.mark_local(key);
                     }
                     let duration = clock.elapsed();
                     let finished = Finished { index, outcome, output, start, duration, cached, remote };
@@ -634,6 +649,32 @@ impl Run<'_, '_> {
                 }
                 // whether an edge is ready but waits for a token
                 let mut waiting_for_token = false;
+                // what a worker gave back takes the build's jobs first, as it has started, even once the build stops,
+                // unless it was interrupted
+                if self.report.interrupted {
+                    for job in std::mem::take(&mut self.returned) {
+                        let now = SystemTime::now();
+                        let outcome = Outcome::Interrupted;
+                        let finished = Finished { index: job.index, outcome, output: Vec::new(), start: now,
+                            duration: Duration::ZERO, cached: false, remote: false };
+                        self.finish(finished, observer);
+                    }
+                }
+                while self.local < self.options.jobs.max(1) && let Some(job) = self.returned.pop_front() {
+                    match &self.jobserver {
+                        Some(jobserver) if self.implicit.is_some() => {
+                            let Some(token) = jobserver.try_acquire() else {
+                                self.returned.push_front(job);
+                                waiting_for_token = true;
+                                break;
+                            };
+                            self.tokens.insert(job.index, token);
+                        },
+                        _ => self.implicit = Some(job.index),
+                    }
+                    self.local += 1;
+                    let _ = jobs.send(job);
+                }
                 while !self.stopping() {
                     // an edge runs here while the build's jobs are not full, and otherwise on a worker, if one can,
                     // while one which waits for a worker only runs on one
@@ -689,7 +730,7 @@ impl Run<'_, '_> {
                         None => self.local += 1,
                     }
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch });
+                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark: None });
                 }
                 // the build goes on while an edge waits for a worker which is connecting
                 if self.progress.running == 0 && !self.waiting_for_workers() {
@@ -706,6 +747,15 @@ impl Run<'_, '_> {
                                 sys::signal_group(pid, sys::SIGINT);
                             }
                         }
+                    },
+                    Ok(Message::Returned(job)) => {
+                        let job = *job;
+                        // the worker's job is free, and the edge is not sent to one again
+                        if let Some(worker) = self.sent.remove(&job.index) {
+                            self.on_worker[worker] -= 1;
+                        }
+                        self.local_only.insert(job.index);
+                        self.returned.push_back(job);
                     },
                     Ok(Message::Finished(finished)) => {
                         self.processes.remove(&finished.index);
@@ -1666,7 +1716,7 @@ mod tests {
             |identity: &&str| crate::worker::Toolchain { identity: (*identity).into(), ..Default::default() };
         let toolchains = identities.iter().map(toolchain).collect();
         let capabilities = crate::worker::Capabilities { toolchains, ..Default::default() };
-        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 2, move || capabilities.clone());
+        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 3, move || capabilities.clone());
         Arc::new(crate::remote::served_worker(cache.0.clone(), executor))
     }
 
@@ -1689,7 +1739,7 @@ mod tests {
         let second = TempCache::new("workers-second");
         build.options.cache = Some(second.0.clone());
         // which is connected to first, and reports what it has, as the build does not wait for it
-        assert_eq!(build.options.workers[0].jobs(), 2);
+        assert_eq!(build.options.workers[0].jobs(), 3);
         assert!(build.options.workers[0].capabilities().is_ok());
         let (report, finished) = build.build(&[]);
         assert!(report.succeeded(), "{finished:?}");
@@ -1887,6 +1937,40 @@ mod tests {
         assert!(report.interrupted && report.remote == 0, "{report:?} {finished:?}");
         assert_eq!((build.read("a.o"), build.read("b.o")), ("0\n".into(), "0\n".into()));
         assert!(store.0.has_blob(&crate::blake3::hash(b"10\n")));
+    }
+
+    #[test]
+    fn runs_what_fails_on_workers_in_its_own_jobs() {
+        // the slow edge, and the edge which reads what it is not sent, take the same lock as they run here, which is
+        // free only if they do not run at once, as the build has one job
+        let slow = "mkdir running && sleep 0.3 && rmdir running && touch $out";
+        let hidden = "mkdir running && cat $in hidden > $out && rmdir running && echo \"$out: $in\" > $out.d";
+        let graph = graph()
+            .rule("slow", &[("command", slow)])
+            .edge("slow", &["slow"], &[])
+            .cached("toolchain")
+            .rule("hidden", &[("command", hidden), ("depfile", "$out.d")])
+            .edge("hidden", &["c.o"], &["c.c"])
+            .finish();
+        let mut build = Build::new("own-jobs", graph, &[("c.c", "c\n"), ("hidden", "hidden\n")]);
+        let first = TempCache::new("own-jobs-first");
+        build.options.cache = Some(first.0.clone());
+        build.options.jobs = 1;
+        build.ran(&[]);
+        // it fails on the worker at once, while the slow edge holds the job, which it then waits for
+        let store = TempCache::new("own-jobs-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        assert!(build.options.workers[0].capabilities().is_ok());
+        remove(&build, &["slow", "c.o"]);
+        let second = TempCache::new("own-jobs-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.remote), (2, 0), "{finished:?}");
+        assert_eq!(build.read("c.o"), "c\nhidden\n");
+        assert!(store.0.has_blob(&crate::blake3::hash(b"c\n")));
+        // and it is marked to run here, as it failed there and succeeded here
+        assert_eq!(std::fs::read_dir(second.0.dir().join("local")).map_or(0, Iterator::count), 1);
     }
 
     #[test]

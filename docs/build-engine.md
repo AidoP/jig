@@ -1194,12 +1194,20 @@ implementation of that trait, so `generate.rs` doesn't change.
        - The second build sends the worker their inputs. The libraries it writes are the same, byte for byte, as those
          written here, and the diagnostics are shown.
        - A worker which can't be run builds nothing, and the build goes on.
-   - **Not done yet:**
-     - An interrupted build doesn't stop what runs on a worker.
-     - An edge which runs here after its worker failed it runs beyond the build's jobs.
-     - A worker must have the identical toolchain, of the same host, so it's of the client's platform; step 3 relaxes
-       that.
-     - A worker must have the same components as the client; step 2 relaxes that.
+   - **Not done at first, since done:**
+     - An interrupted build didn't stop what runs on a worker; step 4 passes interrupts on.
+     - A worker had to have the identical toolchain, of the same host; step 3 relaxes that.
+     - A worker had to have the same components as the client; step 2 relaxes that.
+     - An edge which ran here after its worker failed it ran beyond the build's jobs, on the thread which waited for
+       the worker. That thread now gives it back to the build, as `Message::Returned`, which runs it here once one of
+       its own jobs is free.
+       - It takes a jobserver token, as any edge here does.
+       - It runs before the edges ready after it, as it has started, even once too many have failed.
+       - It isn't sent to a worker again in the build, and is marked to run here if it succeeds, by its first key, as
+         it failed there.
+       - It doesn't run once the build is interrupted.
+       - Tested by a slow edge holding the one job, and an edge which fails on a worker, which each take a lock
+         directory as they run here, so they fail if they run at once, as they did before.
 2. **Done:** capability reports, and installing toolchains (protocol version 6).
    - **`GET_CAPABILITIES`.** A worker replies with its `Capabilities`: its host, the tags it was given, and each
      toolchain's identity, rustup name, release, host and the targets it has standard libraries for, found from the
