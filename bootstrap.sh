@@ -1,8 +1,7 @@
 #!/bin/sh
 # Bootstrap jig with rustc alone: build rig, then jig, into build/bootstrap, then configure the project with it, which
-# writes build/build.ninja and rig's graph. From then on, the project is built with build/bootstrap/jig build.
-#
-# bootstrap.ninja does the same with ninja.
+# writes rig's graph, build/graph, or with JIG_ENGINE=ninja, build/build.ninja. From then on, the project is built with
+# build/bootstrap/jig build.
 set -eu
 cd "$(dirname "$0")"
 mkdir -p build/bootstrap build/tmp/rig build/tmp/jig

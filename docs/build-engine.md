@@ -629,6 +629,15 @@ implementation of that trait, so `generate.rs` doesn't change.
        `JIG_ENGINE=ninja`. That includes the differential and comparison tests.
    - **Checked.** Every test passes with no working ninja on `PATH`, and with `JIG_ENGINE=ninja` after bootstrapping
      with ninja.
+   - **Since:** only the engine's own file is generated, and `bootstrap.ninja` is gone.
+     - `jig generate` reads `JIG_ENGINE`: with rig it writes `build/graph` and its depfile `graph.d`, without
+       `build.ninja`, and the generator edge's output is `graph`, shown as `CONFIGURE graph`. With ninja it writes
+       `build.ninja` and `build.ninja.d`, without rig's graph.
+     - A project configured for one engine is configured again for the other, as its file is missing, once it is built
+       with it.
+     - `bootstrap.sh` configures for the engine `JIG_ENGINE` chooses, so the `ninja` job bootstraps with it, with
+       `JIG_ENGINE=ninja`, and the release bootstraps with it, without ninja.
+     - The integration tests generate `build.ninja` too, with `JIG_ENGINE=ninja`, where they read what is built from it.
 2. **Done, apart from line breaks:** argument vectors.
    - **`rig::Action::Exec`.** It holds a program, its arguments, environment variables, an optional working directory
      relative to the build directory, and an optional file for stderr. rig runs it directly, without a shell.

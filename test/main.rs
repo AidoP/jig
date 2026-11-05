@@ -1,7 +1,8 @@
 //! Integration tests for `jig`, the configure tool.
 //!
 //! Each test writes a project to a temporary directory, runs `jig` on its `Jig` file from that directory, and checks
-//! the diagnostics and the generated `build/build.ninja`.
+//! the diagnostics and the generated `build/build.ninja`, which is generated for the tests with `JIG_ENGINE=ninja`
+//! beside rig's graph, as rig's is generated without it.
 //!
 //! The `jig` binary is found with the `CONFIGURE` environment variable, or as the `jig` crate's output, in the target
 //! directory which contains the directory of this test harness.
@@ -50,6 +51,19 @@ impl Project {
             .current_dir(&self.dir)
             .output()
             .unwrap_or_else(|error| panic!("failed to run {configure:?}: {error}"));
+        // rig's graph is configured without `build.ninja`, which is configured too, so that what is built can be read
+        // from it, once rig's graph is, which it does not change
+        if rig_engine() && !env.iter().any(|&(name, _)| name == "JIG_ENGINE") {
+            let mut ninja = jig_command();
+            if env.iter().any(|&(name, _)| name == "HOME")
+                && std::env::var_os("RUSTUP_HOME").is_none()
+                && let Some(home) = std::env::var_os("HOME")
+            {
+                ninja.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
+            }
+            ninja.args(["generate", "Jig"]).envs(env.iter().copied()).env("JIG_ENGINE", "ninja");
+            let _ = ninja.current_dir(&self.dir).output();
+        }
         Output {
             success: output.status.success(),
             stderr: String::from_utf8(output.stderr).unwrap(),
@@ -143,6 +157,16 @@ fn with_test_cache(mut command: Command) -> Command {
     command.env("JIG_CACHE", std::env::temp_dir().join("jig-test-cache")).env("JIG_CACHE_SIZE", "256M");
     command.env("JIG_CONFIG", "off");
     command
+}
+
+/// Returns how the build shows the graph being generated again: rig's `graph`, or with ninja, `build.ninja`.
+fn configuring() -> &'static str {
+    if rig_engine() { "CONFIGURE graph" } else { "CONFIGURE build.ninja" }
+}
+
+/// Returns the file of the graph in the build directory, which is generated for the engine which builds it.
+fn graph_file() -> &'static str {
+    if rig_engine() { "graph" } else { "build.ninja" }
 }
 
 /// Whether `jig` builds with rig, as it does unless `JIG_ENGINE=ninja`.
@@ -1415,7 +1439,7 @@ fn environment_variables_reconfigure() {
     build(Some("one"));
     assert!(!build(Some("one")).contains("CONFIGURE"));
     let output = build(Some("two"));
-    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, configuring());
     assert_contains(&output, "note: value is two");
     assert!(!build(Some("two")).contains("CONFIGURE"));
     assert_contains(&build(None), "note: value is unset");
@@ -1430,7 +1454,7 @@ fn environment_variables_reconfigure() {
     let path = std::env::var("PATH").unwrap();
     build(&path);
     assert!(!build(&path).contains("CONFIGURE"));
-    assert_contains(&build(&format!("{path}:/nonexistent")), "CONFIGURE build.ninja");
+    assert_contains(&build(&format!("{path}:/nonexistent")), configuring());
     // a directory which is searched and is missing is not out of date each time, as ninja would find it
     let missing = project.dir.join("missing");
     let path = format!("{}:{path}", missing.display());
@@ -1438,7 +1462,7 @@ fn environment_variables_reconfigure() {
     assert!(!build(&path).contains("CONFIGURE"));
     // but configures the project again once it exists
     std::fs::create_dir(&missing).unwrap();
-    assert_contains(&build(&path), "CONFIGURE build.ninja");
+    assert_contains(&build(&path), configuring());
     assert!(!build(&path).contains("CONFIGURE"));
 }
 
@@ -1492,7 +1516,7 @@ fn rig_fetches_from_the_cache() {
     // and turning it off configures the project again, without the cache
     let mut command = jig_command();
     let output = command.arg("build").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
-    assert_contains(&String::from_utf8(output.stdout).unwrap(), "CONFIGURE build.ninja");
+    assert_contains(&String::from_utf8(output.stdout).unwrap(), configuring());
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -1727,7 +1751,8 @@ fn user_configuration() {
     let (ok, output) = jig(&project.dir, &["generate"]);
     assert!(ok, "{output}");
     assert_contains(&output, "note: true");
-    assert_contains(&std::fs::read_to_string(project.dir.join("build/build.ninja.d")).unwrap(), "/config ");
+    let depfile = project.dir.join(format!("build/{}.d", graph_file()));
+    assert_contains(&std::fs::read_to_string(depfile).unwrap(), "/config ");
     let (ok, output) = jig(&project.dir, &["build"]);
     assert!(ok && !output.contains("warning"), "{output}");
     // pushed to the remote cache
@@ -1737,7 +1762,7 @@ fn user_configuration() {
     std::fs::write(&config, settings.replace("set cache/push true", "set cache/push false")).unwrap();
     let (ok, output) = jig(&project.dir, &["build"]);
     assert!(ok, "{output}");
-    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, configuring());
     assert_contains(&output, "note: false");
     // an error in it is reported with where it is
     std::fs::write(&config, "set cache/push 'sometimes'\n").unwrap();
@@ -1751,7 +1776,7 @@ fn user_configuration() {
     std::fs::write(&config, "set cache/dir 'off'\n").unwrap();
     let (ok, output) = jig(&project.dir, &["build"]);
     assert!(ok, "{output}");
-    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, configuring());
     let (ok, output) = jig(&dir, &["cache", "stats"]);
     assert!(!ok);
     assert_contains(&output, "the cache is off");
@@ -2138,7 +2163,7 @@ fn cached_commands_run_the_chosen_toolchain() {
     let other = other.filter(|toolchain| !toolchain.is_empty() && !toolchain.starts_with("nightly"));
     let other = other.unwrap_or_else(|| "stable".into());
     let check = format!("check/app@{}", project.host());
-    assert_contains(&jig(&["build", &check], &other), "CONFIGURE build.ninja");
+    assert_contains(&jig(&["build", &check], &other), configuring());
     let _ = std::fs::remove_dir_all(&cache);
 }
 
@@ -2201,7 +2226,7 @@ custom plain
     assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\n");
     // a program which changes configures the project again, and runs
     std::fs::write(&tool, "#!/bin/sh\necho copy >> runs.txt && cat \"$1\" \"$1\" > \"$2\"\n").unwrap();
-    assert_contains(&build(&other), "CONFIGURE build.ninja");
+    assert_contains(&build(&other), configuring());
     assert_eq!(runs(&other, "copy"), 1);
     assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\nin\n");
     // and a test cannot be cached, as it runs to be seen to pass
@@ -2325,7 +2350,7 @@ log note 'data read'
     assert!(!build().contains("CONFIGURE"));
     std::fs::write(project.dir.join("extra"), "").unwrap();
     let output = build();
-    assert_contains(&output, "CONFIGURE build.ninja");
+    assert_contains(&output, configuring());
     assert_contains(&output, "note: extra exists");
     // the engine keeps the dependencies in its log, rather than the depfile
     let extra = "../extra";
@@ -3545,6 +3570,30 @@ custom image
 }
 
 #[test]
+fn generates_only_the_engines_graph() {
+    // with rig, `jig generate` writes rig's graph and its depfile, without `build.ninja`, and with ninja, the reverse
+    let project = Project::new("engines-graph", &[("Jig", "crate app 'app.rs'\n"), ("app.rs", "")]);
+    let generate = |engine: &str| {
+        let output = jig_command().args(["generate"]).env("JIG_ENGINE", engine).current_dir(&project.dir).output();
+        assert!(output.unwrap().status.success());
+    };
+    let exists = |file: &str| project.dir.join("build").join(file).exists();
+    generate("rig");
+    assert!(exists("graph") && exists("graph.d"));
+    assert!(!exists("build.ninja") && !exists("build.ninja.d"));
+    let depfile = std::fs::read_to_string(project.dir.join("build/graph.d")).unwrap();
+    assert!(depfile.starts_with("graph: ../Jig "), "{depfile}");
+    let _ = std::fs::remove_dir_all(project.dir.join("build"));
+    generate("ninja");
+    assert!(exists("build.ninja") && exists("build.ninja.d"));
+    assert!(!exists("graph") && !exists("graph.d"));
+    // and building with the other engine generates its graph first
+    let output = jig_command().args(["build"]).env("JIG_ENGINE", "rig").current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(exists("graph"));
+}
+
+#[test]
 fn regenerates_itself() {
     // `build.ninja` regenerates itself with the configure tool which made it, and again when the tool changes
     let project = Project::new("regenerate", &[("Jig", "crate app 'app.rs'\n"), ("app.rs", "")]);
@@ -3584,7 +3633,9 @@ fn rebased_paths() {
     let tool = project.dir.join("build/jig");
     std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
     make_executable(&configure_path(), &tool);
-    let output = with_test_cache(Command::new(&tool)).args(["generate", "Jig"]).current_dir(&project.dir).output().unwrap();
+    let mut command = with_test_cache(Command::new(&tool));
+    let output = command.args(["generate", "Jig"]).env("JIG_ENGINE", "ninja").current_dir(&project.dir).output();
+    let output = output.unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let ninja = project.raw_ninja();
     assert_contains(&ninja, &format!("\nrule configure\n    command = cd '{dir}' && '{dir}/build/jig' generate 'Jig'\n"));
@@ -5538,6 +5589,15 @@ test passes
     std::fs::write(project.dir.join("Jig"), format!("set build-dir 'out'\n{config}")).unwrap();
     jig(&["build", "custom/data"]);
     assert!(project.dir.join("out/data").is_file());
+    // with only the graph of the engine which builds it
+    assert!(project.dir.join("out").join(graph_file()).is_file());
+    if rig_engine() {
+        assert!(!project.dir.join("out/build.ninja").exists());
+        std::fs::write(project.dir.join("Jig"), config).unwrap();
+        jig(&["test"]);
+        assert!(project.dir.join("build/graph").is_file());
+        return;
+    }
     assert_contains(&std::fs::read_to_string(project.dir.join("out/build.ninja")).unwrap(), "\nbuild custom/data: phony data\n");
     // the previous build directory has a stub, which is up to date for ninja
     let stub = std::fs::read_to_string(project.dir.join("build/build.ninja")).unwrap();
@@ -5792,7 +5852,14 @@ custom version
     let (success, output) = jig(&["+nightly", "generate"]);
     assert!(success, "{output}");
     assert_contains(&output, "note: toolchain: nightly\n");
-    let ninja = project.ninja();
+    // as `build.ninja` has it, which is generated to be read
+    let generate_ninja = |args: &[&str]| {
+        let mut generate = jig_command();
+        let generated = generate.args(args).arg("generate").env("JIG_ENGINE", "ninja").current_dir(&project.dir);
+        assert!(generated.output().unwrap().status.success());
+        project.ninja()
+    };
+    let ninja = generate_ninja(&["+nightly"]);
     assert_contains(&ninja, "' '+nightly' generate 'Jig'\n");
     assert_contains(&ninja, "\n    command = RUSTUP_TOOLCHAIN='nightly' $crate-env rustc ");
     assert_contains(&ninja, " && RUSTUP_TOOLCHAIN='nightly' $command-line\n");
@@ -5804,7 +5871,7 @@ custom version
     let (success, output) = jig(&["generate"]);
     assert!(success, "{output}");
     assert_contains(&output, "note: toolchain: \n");
-    assert!(!project.ninja().contains("RUSTUP_TOOLCHAIN"));
+    assert!(!generate_ninja(&[]).contains("RUSTUP_TOOLCHAIN"));
     // or another command is given one, which configures it again
     let (success, output) = jig(&["+nightly", "build"]);
     assert!(success, "{output}");

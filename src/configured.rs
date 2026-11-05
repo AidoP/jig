@@ -37,6 +37,14 @@ pub enum Engine {
     Rig,
 }
 impl Engine {
+    /// Returns the file in the build directory which `jig generate` writes the graph to for the engine, which the
+    /// graph's generator edge regenerates: `build.ninja` for ninja, and `graph` for rig.
+    pub fn file(self) -> &'static str {
+        match self {
+            Self::Ninja => ninja::FILE,
+            Self::Rig => rig_graph::FILE,
+        }
+    }
     /// Returns the engine `JIG_ENGINE` names, which is rig by default.
     pub fn from_env() -> Result<Self, Error> {
         match std::env::var("JIG_ENGINE").as_deref() {
@@ -222,7 +230,8 @@ pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     let (input, configured, current) = match &database {
         Some(database) => {
             let build_dir = root.join(database.build_dir);
-            let built = build_dir.join(ninja::FILE).is_file() && build_dir.join(rig_graph::FILE).is_file();
+            // the graph for the engine which builds it, which is generated again for another
+            let built = build_dir.join(Engine::from_env()?.file()).is_file();
             let configured = (!database.toolchain.is_empty()).then(|| database.toolchain.to_string());
             let current = built && toolchain.is_none_or(|toolchain| toolchain == database.toolchain);
             (database.input.to_string(), configured, current)

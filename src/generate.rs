@@ -1,6 +1,7 @@
-//! Generation of the files which build a project: the specifications of its custom targets, `build.ninja`, its depfile
-//! and rig's graph in the build directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`,
-//! `jig test` and `jig install`, at the project root.
+//! Generation of the files which build a project: the specifications of its custom targets, and the graph of the
+//! engine which builds it, rig's `graph`, or with `JIG_ENGINE=ninja`, `build.ninja`, with its depfile, in the build
+//! directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`, `jig test` and
+//! `jig install`, at the project root.
 //!
 //! Ninja runs in the build directory, so the paths in `build.ninja` are relative to it, while the project's paths are
 //! relative to the project root.
@@ -9,11 +10,12 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::graph::{Edge, Graph, Rule, Tee};
+use crate::configured::Engine;
+use crate::graph::{Edge, Graph, Rule};
 use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
-use crate::rig_graph::{self, RigGraph};
+use crate::rig_graph::RigGraph;
 use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -25,20 +27,23 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
         return Err(Error::Create(build_dir, error));
     }
     let at = Rebase::new(&build_dir);
+    // only the graph of the engine which builds it is written, which it regenerates
+    let engine = Engine::from_env()?;
     write_reconfigure_stamp(&build_dir)?;
     write_target_specs(&project.targets, &build_dir, project.toolchain.as_deref())?;
     write_generated_files(&project.generated)?;
-    write_depfile(&project, &at, &build_dir)?;
+    write_depfile(&project, &at, &build_dir, engine.file())?;
 
     let installed = project.installed();
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     let units = units(&project, &crates, sysroot, &build_dir);
-    // `build.ninja` and rig's graph are written from the same description, `build.ninja` first, as rig records the
-    // edge which generates it once the graph is written
-    let mut ninja_file = NinjaFile::new(build_dir.join(ninja::FILE))?;
-    let mut rig_graph = RigGraph::new(build_dir.join(rig_graph::FILE));
-    write_graph(&mut Tee(&mut ninja_file, &mut rig_graph), &project, &crates, &units, &installed, input, &at)?;
+    let path = build_dir.join(engine.file());
+    let mut graph: Box<dyn Graph> = match engine {
+        Engine::Ninja => Box::new(NinjaFile::new(path)?),
+        Engine::Rig => Box::new(RigGraph::new(path)),
+    };
+    write_graph(graph.as_mut(), &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
     retire_build_dir(&build_dir)?;
     write_database(&project, &units, &installed, input, &at, &build_dir)
@@ -294,12 +299,12 @@ pub fn env_hash(hash: u64) -> String {
     format!("{hash:016x}")
 }
 
-/// The file in the build directory which `build.ninja` depends on, which is touched to regenerate it, such as when a path
+/// The file in the build directory which the graph depends on, which is touched to regenerate it, such as when a path
 /// the configuration found was missing is created.
 pub const RECONFIGURE_STAMP: &str = "reconfigure.stamp";
 
-/// Create the stamp which regenerates `build.ninja` when it is touched, unless it exists, as it must not be newer than
-/// `build.ninja`.
+/// Create the stamp which regenerates the graph when it is touched, unless it exists, as it must not be newer than the
+/// graph.
 fn write_reconfigure_stamp(build_dir: &Path) -> Result<(), Error> {
     let path = build_dir.join(RECONFIGURE_STAMP);
     match std::fs::File::create_new(&path) {
@@ -308,10 +313,10 @@ fn write_reconfigure_stamp(build_dir: &Path) -> Result<(), Error> {
     }
 }
 
-/// Write the depfile of `build.ninja`, which is regenerated when a file the configuration read changes, or the
-/// reconfigure stamp is touched.
-fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(), Error> {
-    let path = build_dir.join(format!("{}.d", ninja::FILE));
+/// Write the depfile of the graph, `<graph>.d`, which is regenerated when a file the configuration read changes, or
+/// the reconfigure stamp is touched.
+fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path, graph: &str) -> Result<(), Error> {
+    let path = build_dir.join(format!("{graph}.d"));
     // a line break cannot be escaped in a depfile, as in `build.ninja`
     let files = project.files.iter().map(|file| &file.path);
     if let Some(broken) = files.chain(&project.dependencies).find(|path| has_line_break(&path.to_string_lossy())) {
@@ -321,14 +326,20 @@ fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(),
         Ok(file) => file,
         Err(error) => return Err(Error::Create(path, error)),
     };
-    if let Err(error) = write_dependencies(&mut file, project, at, &build_dir.join(RECONFIGURE_STAMP)) {
+    if let Err(error) = write_dependencies(&mut file, graph, project, at, &build_dir.join(RECONFIGURE_STAMP)) {
         return Err(Error::Write(path, error));
     }
     Ok(())
 }
 
-fn write_dependencies(w: &mut dyn std::io::Write, project: &Project, at: &Rebase, stamp: &Path) -> Result<(), std::io::Error> {
-    write!(w, "{}:", ninja::FILE)?;
+fn write_dependencies(
+    w: &mut dyn std::io::Write,
+    graph: &str,
+    project: &Project,
+    at: &Rebase,
+    stamp: &Path,
+) -> Result<(), std::io::Error> {
+    write!(w, "{graph}:")?;
     let stamp = stamp.to_path_buf();
     // builtin files change with jig, which the configuration already depends on, and a file processed again is listed
     // once
@@ -392,6 +403,8 @@ fn write_graph(
     input: &Path,
     at: &Rebase,
 ) -> Result<(), Error> {
+    // the file which the graph is written to, for the engine which builds it, which its generator edge regenerates
+    let generated = Engine::from_env()?.file();
     // the specifications of custom targets are found in the build directory, and rebased
     let build_dir = &at.build_dir;
     // whether rig stamps the files of an edge by their contents
@@ -406,8 +419,8 @@ fn write_graph(
     // the configure tool and custom commands run from the project root, as their arguments are relative to it
     let cd = format!("cd {} &&", ninja_quote(&at.root.display().to_string()));
 
-    // `build.ninja` regenerates itself with the configure tool which generated it, and again when the tool changes, so
-    // a project which builds the tool, such as its own, has ninja build it first
+    // the graph regenerates itself with the configure tool which generated it, and again when the tool changes, so a
+    // project which builds the tool, such as its own, has it built first
     let exe = std::env::current_exe().ok();
     let configure = exe.clone().unwrap_or_else(|| "jig".into());
     // with the toolchain it was configured with
@@ -434,7 +447,7 @@ fn write_graph(
     let exec = program(&configure.display().to_string(), args, Some(&at.root), Vec::new());
     graph.edge(&Edge {
         rule: "configure",
-        outputs: &[Path::new(ninja::FILE)],
+        outputs: &[Path::new(generated)],
         inputs: &[&at.path(input)],
         implicit: &as_paths(&exe),
         exec: Some(&exec),

@@ -89,7 +89,9 @@ pub trait Graph {
 }
 
 /// Writes a graph to two others, each call to the first and then the second.
+#[cfg(test)]
 pub struct Tee<'a>(pub &'a mut dyn Graph, pub &'a mut dyn Graph);
+#[cfg(test)]
 impl Graph for Tee<'_> {
     fn variable(&mut self, name: &str, value: &str) -> Result<(), Error> {
         self.0.variable(name, value)?;

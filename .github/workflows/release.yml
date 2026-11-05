@@ -41,15 +41,6 @@ jobs:
           rustup toolchain install stable nightly --profile minimal
           rustup target add --toolchain stable ${{ matrix.target }}
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
-      - name: Install ninja
-        run: |
-          if ! command -v ninja >/dev/null; then
-            if [ "$RUNNER_OS" = macOS ]; then
-              brew install ninja
-            else
-              sudo apt-get update && sudo apt-get install -y ninja-build
-            fi
-          fi
       - name: Configure the release
         # `Jig` uses `Jig.local` if it exists, which makes the target the one which is built by default, installed and
         # run by the integration tests, where a musl target is statically linked, so that it runs on any Linux
@@ -59,7 +50,7 @@ jobs:
           set codegen/strip 'symbols'
           EOF
       - name: Bootstrap
-        run: ninja -f bootstrap.ninja
+        run: sh bootstrap.sh
       - name: Build
         run: build/bootstrap/jig build
       - name: Test

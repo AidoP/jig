@@ -61,8 +61,7 @@ jobs:
           JIG_PERF_SCALE: ${{ matrix.os == 'ubuntu-24.04-riscv' && '10' || '4' }}
 
   ninja:
-    # the suite with ninja as the engine, bootstrapped with it, which also compares rig with ninja, in the
-    # differential and performance tests
+    # the suite with ninja as the engine, which also compares rig with ninja, in the differential and performance tests
     name: test with ninja
     runs-on: ubuntu-latest
     steps:
@@ -74,7 +73,10 @@ jobs:
       - name: Install ninja
         run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: Bootstrap
-        run: ninja -f bootstrap.ninja
+        # which configures the project for ninja, as `JIG_ENGINE` chooses, so that it writes `build.ninja`
+        run: sh bootstrap.sh
+        env:
+          JIG_ENGINE: ninja
       - name: Test
         timeout-minutes: 30
         run: |
