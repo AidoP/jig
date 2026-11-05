@@ -62,6 +62,8 @@ pub struct Edge<'a> {
     /// The environment variables the edge's command reads from those it inherits, which rig tracks, and passes on when
     /// it runs it in a hermetic environment, while ninja passes on every one.
     pub pass_env: &'a [String],
+    /// Which workers rig may send the edge to, if it is cached.
+    pub placement: rig::Placement,
 }
 
 /// What a build graph is written to.

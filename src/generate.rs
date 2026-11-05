@@ -167,6 +167,8 @@ pub struct Unit {
     pub env: Vec<(String, String)>,
     /// The environment variables rustc inherits for the crate.
     pub pass_env: Vec<String>,
+    /// The tags a worker must have for rig to send it the crate's commands.
+    pub worker_tags: Vec<String>,
     /// The directory of the outputs for the target.
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
@@ -368,6 +370,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             cfg: c.cfg.clone(),
             env: c.env.clone(),
             pass_env: c.pass_env.clone(),
+            worker_tags: c.worker_tags.clone(),
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
             default: c.default,
@@ -608,6 +611,7 @@ fn write_graph(
         let crate_flags = if linked { &linked_flags } else { &flags };
         let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
         let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &output), crate_flags, None);
+        let placement = placement(unit, units, project, linked);
         graph.edge(&Edge {
             rule: "rustc",
             outputs: &[&output],
@@ -625,6 +629,7 @@ fn write_graph(
             hashed,
             pass_env: rust.pass_env,
             cache,
+            placement: placement.clone(),
             ..Default::default()
         })?;
         everything.push(output.clone());
@@ -652,6 +657,8 @@ fn write_graph(
                 hashed,
                 pass_env: rust.pass_env,
                 cache,
+                // the test harness links, as a binary does
+                placement: self::placement(unit, units, project, true),
                 ..Default::default()
             })?;
         }
@@ -708,6 +715,8 @@ fn write_graph(
         let crate_env = crate_env(&unit.env);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
         let rust = Rust { crate_type, name, input: &root, env, pass_env: &unit.pass_env, toolchain };
+        // a check writes metadata, rather than linking
+        let placement = placement(unit, units, project, false);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
         // the documentation is of the crate as it is built, rather than its tests, with the metadata of the crates it
@@ -776,6 +785,7 @@ fn write_graph(
                 hashed,
                 pass_env: rust.pass_env,
                 cache,
+                placement: placement.clone(),
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
@@ -802,6 +812,7 @@ fn write_graph(
             hashed,
             pass_env: rust.pass_env,
             cache,
+            placement,
             ..Default::default()
         })?;
         graph.alias(&Path::new("check").join(&unit.label), &[&output])?;
@@ -937,8 +948,9 @@ fn write_database(
         push: settings.push,
         token_file: &token_file,
         workers: settings.workers.iter().map(String::as_str).collect(),
-        toolchain_identity: settings.installable.as_ref().map_or("", |(identity, _)| identity),
-        toolchain_install: settings.installable.as_ref().map_or("", |(_, name)| name),
+        toolchain_identity: settings.release.as_ref().map_or("", |(identity, _)| identity),
+        toolchain_release: settings.release.as_ref().map_or("", |(_, release)| &release.identity),
+        toolchain_install: settings.release.as_ref().map_or("", |(_, release)| &release.install),
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {
@@ -1207,6 +1219,23 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Returns which workers rig may send a crate's commands to, beside those with its toolchain: those of the same release
+/// on another host, unless what it writes depends on the host, and those with the standard library of its target, if
+/// the target is builtin, which have the tags the crate gives.
+///
+/// What a crate writes depends on the host if it is a procedural macro, which is linked for the host, if it uses one,
+/// which rustc loads, as it is of the host which built it, or if it is linked, as `linked` says, by the linker of the
+/// host, rather than `rust-lld`, which rustc has on every host.
+fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> rig::Placement {
+    let uses_proc_macro = unit.deps.iter().any(|&dep| units[dep].kind == Kind::ProcMacro);
+    let lld = unit.codegen.iter().filter_map(|option| option.strip_prefix("linker=")).any(|linker| {
+        Path::new(linker).file_name().is_some_and(|name| name == "rust-lld")
+    });
+    let any_host = unit.kind != Kind::ProcMacro && !uses_proc_macro && (!linked || lld);
+    let builtin = project.target(&unit.target).is_some_and(|target| !target.is_custom());
+    rig::Placement { any_host, target: builtin.then(|| unit.target.clone()), tags: unit.worker_tags.clone() }
+}
+
 /// Returns the codegen options of a crate, followed by the linker of its target, unless the crate sets its own linker or
 /// linker flavor, as the two go together.
 fn codegen(c: &Crate, project: &Project) -> Vec<String> {
@@ -1336,5 +1365,40 @@ mod benches {
             std::hint::black_box(normalize(path));
         });
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bench::{HOST, configure};
+
+    /// Returns the placement of each crate's command which builds it, by its name, with whether it links.
+    fn placements(source: &str) -> HashMap<String, rig::Placement> {
+        let mut project = configure(source);
+        assert!(!project.fatal);
+        let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
+        crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
+        let units = units(&project, &crates, "/sysroot", Path::new("build"));
+        let placed = |unit: &Unit| (unit.name.clone(), placement(unit, &units, &project, unit.kind != Kind::Lib));
+        units.iter().map(placed).collect()
+    }
+
+    #[test]
+    fn places_what_does_not_depend_on_the_host_anywhere() {
+        let placed = placements(
+            "crate lib 'lib.rs'\n    worker-tag 'fast'\ncrate derive 'derive.rs'\n    crate-type 'proc-macro'\n\
+             crate derived 'derived.rs'\n    use derive\ncrate app 'app.rs'\n    crate-type 'bin'\n    use lib\n\
+             set codegen/linker 'rust-lld'\ncrate linked 'linked.rs'\n    crate-type 'bin'\n",
+        );
+        let any_host = |name: &str| placed[name].any_host;
+        // a library may be built on any host, but for one which is or uses a procedural macro, or one which is linked
+        // by the host's linker rather than rust-lld
+        assert!(any_host("lib") && any_host("linked"));
+        assert!(!any_host("derive") && !any_host("derived") && !any_host("app"));
+        assert_eq!(placed["lib"].tags, ["fast"]);
+        assert_eq!(placed["app"].tags, Vec::<String>::new());
+        // each needs the standard library of its target, which is builtin
+        assert_eq!(placed["app"].target.as_deref(), Some(HOST));
     }
 }

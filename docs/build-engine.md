@@ -1231,10 +1231,58 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Integration: `jig workers` shows the worker's host, jobs and tag, and the release which built here.
    - **Not done yet:** a toolchain is installed with its host's standard library alone, and the targets an edge needs
      aren't known to rig, so step 3 adds them to the platform an edge needs.
-3. Platform constraints on edges: `any`, `host == <triple>` or tags, matched against what workers report.
-   - Proc-macro crates and edges linked with a system linker need the platform they were built on. Edges which link
-     with `rust-lld` can run on any platform.
-   - An edge which failed remotely because a file was missing is marked local-only until its inputs change.
+3. **Done:** platform constraints on edges (graph format version 6, protocol version 7).
+   - **`Placement`.** Each edge has one in the graph:
+     - `any_host`: whether a toolchain of the same release on another host may run it, as what it writes doesn't
+       depend on the host;
+     - `target`: the target whose standard library it needs, if it needs the toolchain's;
+     - `tags`: the tags a worker must have.
+   - **The release's identity.** It's the toolchain's identity without the host in `rustc -vV`, as the channel's
+     manifest is the same on every host. Configuring finds it, and records it in `.jig` (version 23) with the name
+     rustup installs the release by. rig takes both as `Options::releases`, by the toolchain's identity.
+   - **Choosing a worker.** A build asks each worker for its capabilities as it connects, and sends a worker nothing
+     until they have come.
+     - An edge goes to a worker which has every tag it needs, and a toolchain which runs it. That toolchain is of its
+       identity, or of its release if it may run on any host, and has the target's standard library, if it needs one.
+     - A worker which installs toolchains also qualifies, if the edge's toolchain has a name to install it by.
+     - The worker runs the toolchain of the identity if it has it, and otherwise one of the release. The toolchain's
+       variables, such as `RUSTUP_TOOLCHAIN`, take the place of any the action gives, so it runs the toolchain it was
+       matched by rather than another of the same name.
+     - `jig worker --install` installs the target with the toolchain, with `--target`, which adds it to one which is
+       installed already. Each name and target is tried once.
+   - **Marked to run here.** An edge which fails on a worker and succeeds here depends on what it doesn't declare or
+     discover. It's marked by its first key, in `<cache>/local`, and runs here until the key changes, as its action or
+     declared inputs do. `gc` removes a mark after a month, so the edge is tried there again.
+   - **Reporting at once.** As a build sends a worker nothing until it reports what it has, `jig worker` finds its
+     capabilities as soon as it starts, rather than when it is first asked, and asks rustc what its startup needs all
+     at once. It keeps what identifies each toolchain in `<cache>/toolchains`, by its sysroot, with the size and time
+     of the file its identity is of, so it runs rustc only for a toolchain which is new or updated. With them known, it
+     reports in about 0.2 s, of which most is starting up.
+   - **jig's placements.**
+     - A crate's commands may run on any host, but for a procedural macro, which is linked for the host, a crate which
+       uses one, as rustc loads it, and what is linked by the host's linker rather than `rust-lld`. That includes
+       binaries and tests by default.
+     - A builtin target needs its standard library, while a custom target doesn't, as its library is built.
+     - The crate attribute `worker-tag` gives its tags.
+   - **Tests.**
+     - rig, graph: placements saved and loaded.
+     - rig, worker:
+       - A toolchain runs an action of its identity, or of its release when that's allowed, with the target it needs.
+       - A worker may run an edge with its tags, or by installing.
+       - The toolchain of the identity is preferred to one of the release, and its variables replace the action's.
+       - A toolchain is installed with the target, which is tried once.
+     - rig, exec:
+       - A slow uncached edge holds the one job here. Of an edge which may run on any host, one for a target the
+         worker lacks, and one needing a tag it doesn't have, only the first is sent to a worker of another host's
+         toolchain of the same release, and the worker is sent only its inputs.
+       - An edge which reads what it isn't sent is marked, and isn't sent again while the other is. A mark is kept by
+         `gc`, and removed once it's a month old.
+     - jig: a library, a binary linked by `rust-lld`, a procedural macro, a crate using one, and a binary are placed as
+       above, with their tags and targets.
+     - jig: a release's identity is the same with another host.
+   - **Not done yet:**
+     - That what rustc writes doesn't depend on the host is assumed, rather than tested, as the tests have one host.
+     - A worker's capabilities are asked for once per build, so a toolchain it installs is used by the next build.
 4. Scheduling by the estimated time to transfer an edge's inputs and outputs against its wait here, from the durations
    in the log. Interrupts are passed on to workers.
 5. Tests run on workers whose host is the test's target.

@@ -21,7 +21,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -75,6 +75,19 @@ impl Graph {
             w.len(edge.pass_env().len());
             for name in edge.pass_env() {
                 w.str(name);
+            }
+            let placement = edge.placement();
+            w.u32(u32::from(placement.any_host));
+            match &placement.target {
+                None => w.u32(0),
+                Some(target) => {
+                    w.u32(1);
+                    w.str(target);
+                },
+            }
+            w.len(placement.tags.len());
+            for tag in &placement.tags {
+                w.str(tag);
             }
             for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
                 w.nodes(list);
@@ -141,6 +154,18 @@ impl Graph {
                 _ => return Err(Error::Format("invalid cache")),
             };
             let pass_env = (0..r.u32()?).map(|_| r.str().map(String::from)).collect::<Result<Vec<_>, _>>()?;
+            let any_host = match r.u32()? {
+                0 => false,
+                1 => true,
+                _ => return Err(Error::Format("invalid placement")),
+            };
+            let target = match r.u32()? {
+                0 => None,
+                1 => Some(r.str()?.into()),
+                _ => return Err(Error::Format("invalid target")),
+            };
+            let tags = (0..r.u32()?).map(|_| r.str().map(String::from)).collect::<Result<Vec<_>, _>>()?;
+            let placement = crate::Placement { any_host, target, tags };
             let edge = Edge {
                 kind,
                 description,
@@ -156,6 +181,7 @@ impl Graph {
                 hashed: flags & HASHED != 0,
                 cache,
                 pass_env,
+                placement,
             };
             graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
@@ -309,6 +335,11 @@ mod tests {
                 hashed: true,
                 cache: Some("toolchain".into()),
                 pass_env: vec!["CC".into(), "CFLAGS".into()],
+                placement: crate::Placement {
+                    any_host: true,
+                    target: Some("riscv64gc".into()),
+                    tags: vec!["fast".into()],
+                },
                 ..Edge::default()
             })
             .unwrap();

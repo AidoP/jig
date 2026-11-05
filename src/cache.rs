@@ -87,9 +87,9 @@ pub struct Settings {
     pub token_file: Option<PathBuf>,
     /// The workers, as `workers` gives them.
     pub workers: Vec<String>,
-    /// The identity of the project's toolchain, and the name rustup installs it by, which a worker which does not have
-    /// it, and installs toolchains, installs it by, if it is known, which configuring finds.
-    pub installable: Option<(String, String)>,
+    /// The identity of the project's toolchain, and its release: what identifies it on any host, and the name rustup
+    /// installs it by, if it is known, which configuring finds.
+    pub release: Option<(String, rig::worker::Release)>,
 }
 
 impl Settings {
@@ -125,7 +125,7 @@ impl Settings {
         if let Some(worker) = workers.iter().find(|worker| worker_transport(worker).is_none()) {
             return Err(Error::InvalidWorker(worker.clone()));
         }
-        Ok(Self { dir, size, remote, push, token_file, workers, installable: None })
+        Ok(Self { dir, size, remote, push, token_file, workers, release: None })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -324,17 +324,35 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
     }
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let jobs = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
+    let known = cache.dir().join("toolchains");
     let mut executor = rig::worker::Executor::new(cache.dir().join("work"), jobs, move || {
-        crate::toolchain::capabilities(tags.clone())
+        crate::toolchain::capabilities(tags.clone(), &known)
     });
     if install {
         executor = executor.installing(crate::toolchain::install);
     }
+    let executor = &executor;
+    // what the worker has is found while the client connects, which asks for it next
+    std::thread::scope(|scope| {
+        scope.spawn(|| executor.capabilities());
+        serve_worker(&cache, executor, stdio, listen, token_file, settings)
+    })
+}
+
+/// Serve a worker on stdin and stdout, or over TCP at an address, to clients with the token in a file.
+fn serve_worker(
+    cache: &rig::cache::Cache,
+    executor: &rig::worker::Executor,
+    stdio: bool,
+    listen: Option<String>,
+    token_file: Option<PathBuf>,
+    settings: &Settings,
+) -> Result<(), Error> {
     match (stdio, listen) {
         (true, None) => {
-            let server = rig::remote::Server { cache: &cache, push: false, token: None, executor: Some(&executor) };
+            let server = rig::remote::Server { cache, push: false, token: None, executor: Some(executor) };
             let worked = server.serve(std::io::stdin().lock(), std::io::stdout());
-            settings.collect_if_due(&cache);
+            settings.collect_if_due(cache);
             worked.map_err(Error::Serve)
         },
         (false, Some(address)) => {
@@ -344,8 +362,8 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
             let bound = listener.local_addr().map_err(Error::Serve)?;
             eprintln!("running actions with {} toolchains on {bound}", executor.capabilities().toolchains.len());
             let token = Some(token.as_slice());
-            let server = rig::remote::Server { cache: &cache, push: false, token, executor: Some(&executor) };
-            let after = || settings.collect_if_due(&cache);
+            let server = rig::remote::Server { cache, push: false, token, executor: Some(executor) };
+            let after = || settings.collect_if_due(cache);
             server.listen(&listener, &after).map_err(Error::Serve)
         },
         (true, Some(_)) => Err(Error::ExtraArg("--listen".into())),
@@ -510,7 +528,7 @@ mod tests {
             push: true,
             token_file: Some("/t".into()),
             workers: vec!["ssh://worker".into()],
-            installable: None,
+            release: None,
         };
         assert_eq!(settings, expected);
         let overridden = env(&[
@@ -528,7 +546,7 @@ mod tests {
             push: false,
             token_file: Some("/t".into()),
             workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
-            installable: None,
+            release: None,
         };
         assert_eq!(settings, expected);
         // and turns it off, or has no remote cache

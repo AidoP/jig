@@ -139,6 +139,8 @@ pub struct Build<'a> {
     pub cache: Option<String>,
     /// The environment variables the edge's action reads from those it inherits, whose values are its inputs.
     pub pass_env: Vec<String>,
+    /// Which workers the edge may run on, if it is cached.
+    pub placement: crate::Placement,
 }
 
 impl Manifest {
@@ -235,6 +237,7 @@ impl Manifest {
             edge.hashed = build.hashed;
             edge.cache.clone_from(&build.cache);
             edge.pass_env.clone_from(&build.pass_env);
+            edge.placement.clone_from(&build.placement);
         }
         self.graph.add_edge(edge)?;
         Ok(())

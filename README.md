@@ -191,7 +191,15 @@ not have with rustup, by the release's version, such as `1.97.0`, or its channel
 with its minimal profile, trying each once. As the paths rustc is given and writes are relative, what it writes there is
 what it would write here, which is fetched into the cache, and pushed to the remote cache as what is built here is. A
 command which fails there, or reads a file it was not sent, runs here again, as do those of a toolchain the worker does
-not have. A worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+not have. One which fails there and succeeds here runs here for a month, or until it or its declared inputs change. A
+worker runs whatever it is sent, so it must only be reachable by those who are trusted.
+
+A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
+the toolchain, with `--install`. A crate's commands are sent only to workers with every tag its `worker-tag` attribute
+gives. Where what rustc writes does not depend on the host, as for a library, or a binary linked by `rust-lld`, a
+worker on another host with the same release of the toolchain builds it, such as an x86-64 Linux machine for an ARM
+Mac. What depends on the host stays on workers with the same host: a procedural macro, a crate which uses one, as
+rustc loads it, and what is linked by the host's linker, as binaries and tests are by default.
 
 ```
 # ~/.config/jig/config
@@ -626,6 +634,8 @@ A `crate` statement may be followed by indented attributes:
   it is when a variable `env!` reads changes, and a crate which is cached, when the cache is on, inherits only
   these and those which locate tools: `PATH`, `HOME`, `TMPDIR`, `RUSTUP_HOME` and `CARGO_HOME`. So a cached crate
   whose `env!` reads any other variable from the environment fails to compile, rather than being cached without it
+- `worker-tag <tags>`: the tags a worker must have, as `jig worker --tag` gives them, for rig to send it the crate's
+  commands, as a tag or a list of them, such as `worker-tag 'fpga'`. It can be repeated
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated

@@ -1831,18 +1831,24 @@ fn workers() {
     let store = dir.join("store").display().to_string();
     let jig = configure_path().display().to_string();
     let worker = format!("/usr/bin/env JIG_CACHE={store} {jig} worker --stdio --jobs 4 --tag fast");
+    let mut many = String::new();
+    for i in 0..2000 {
+        let _ = std::fmt::Write::write_fmt(&mut many, format_args!("pub fn f{i}(x: u64) -> u64 {{ x ^ {i} }}\n"));
+    }
     let project = Project::new("workers", &[
         (
             "Jig",
             "crate a 'a.rs'\ncrate b 'b.rs'\ncrate c 'c.rs'\ncrate d 'd.rs'\ncrate e 'e.rs'\ncrate app 'app.rs'\n    \
              crate-type 'bin'\n    use a\n    use b\n    use c\n    use d\n    use e\n",
         ),
-        ("a.rs", "mod inner;\npub fn value() -> u32 { inner::VALUE }\n"),
+        ("a.rs", "mod inner;\nmod many;\npub fn value() -> u32 { inner::VALUE }\n"),
         ("inner.rs", "pub const VALUE: u32 = 38;\n"),
-        ("b.rs", "pub fn value() -> u32 { let unused = 1; 1 }\n"),
-        ("c.rs", "pub fn value() -> u32 { 1 }\n"),
-        ("d.rs", "pub fn value() -> u32 { 1 }\n"),
-        ("e.rs", "pub fn value() -> u32 { 1 }\n"),
+        ("b.rs", "mod many;\npub fn value() -> u32 { let unused = 1; 1 }\n"),
+        ("c.rs", "mod many;\npub fn value() -> u32 { 1 }\n"),
+        ("d.rs", "mod many;\npub fn value() -> u32 { 1 }\n"),
+        ("e.rs", "mod many;\npub fn value() -> u32 { 1 }\n"),
+        // which each take long enough to compile that the worker has connected before the build is done
+        ("many.rs", &many),
         ("app.rs", "fn main() { print!(\"{}\", a::value() + b::value() + c::value() + d::value() + e::value()); }\n"),
     ]);
     let build = |local: &str| {
@@ -1867,6 +1873,15 @@ fn workers() {
     build(&first);
     assert_contains(&stats(&store), "and 0 blobs");
     let local: Vec<Vec<u8>> = libraries.iter().map(|name| read(name)).collect();
+    // `jig workers` shows the worker's host, jobs and tags, and its toolchains, among them the one which built here,
+    // which the worker keeps what identifies, as one which has run before does, so that it reports them at once
+    let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();
+    let shown = String::from_utf8(shown.stdout).unwrap();
+    assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast\n"));
+    let release = Command::new("rustc").arg("-vV").output().unwrap();
+    let release = String::from_utf8(release.stdout).unwrap();
+    let release = release.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
+    assert_contains(&shown, &format!(": {release} for "));
     // once they are known, and their outputs are gone, those which do not fit in the one job run on the worker, which
     // is sent their sources, and writes what they write here, with what they print
     std::fs::remove_dir_all(&outputs).unwrap();
@@ -1880,14 +1895,6 @@ fn workers() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
     // and are added to the build's cache, as what runs here is
     assert!(!stats(&second).contains("\n0 results"), "{}", stats(&second));
-    // `jig workers` shows the worker's host, jobs and tags, and its toolchains, among them the one which built here
-    let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();
-    let shown = String::from_utf8(shown.stdout).unwrap();
-    assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast\n"));
-    let release = Command::new("rustc").arg("-vV").output().unwrap();
-    let release = String::from_utf8(release.stdout).unwrap();
-    let release = release.lines().find_map(|line| line.strip_prefix("release: ")).unwrap().to_string();
-    assert_contains(&shown, &format!(": {release} for "));
     // a worker which cannot be run builds nothing, and the build goes on without it
     std::fs::remove_dir_all(&outputs).unwrap();
     let mut command = jig_command();
