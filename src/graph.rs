@@ -64,6 +64,9 @@ pub struct Edge<'a> {
     pub pass_env: &'a [String],
     /// Which workers rig may send the edge to, if it is cached.
     pub placement: rig::Placement,
+    /// What writes the edge's depfile without running it, by which rig finds what an edge which has not run reads, to
+    /// send it to a worker, which ninja does not need.
+    pub discover: Option<rig::Exec>,
 }
 
 /// What a build graph is written to.

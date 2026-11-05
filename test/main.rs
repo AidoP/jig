@@ -1839,7 +1839,7 @@ fn workers() {
     for i in 0..2000 {
         let _ = std::fmt::Write::write_fmt(&mut many, format_args!("pub fn f{i}(x: u64) -> u64 {{ x ^ {i} }}\n"));
     }
-    let project = Project::new("workers", &[
+    let files = [
         (
             "Jig",
             "crate a 'a.rs'\ncrate b 'b.rs'\ncrate c 'c.rs'\ncrate d 'd.rs'\ncrate e 'e.rs'\ncrate app 'app.rs'\n    \
@@ -1854,16 +1854,8 @@ fn workers() {
         // which each take long enough to compile that the worker has connected before the build is done
         ("many.rs", &many),
         ("app.rs", "fn main() { print!(\"{}\", a::value() + b::value() + c::value() + d::value() + e::value()); }\n"),
-    ]);
-    let build = |local: &str| {
-        let mut command = jig_command();
-        command.args(["build", "-j", "1"]).env("JIG_CACHE", local).env("JIG_WORKERS", &worker);
-        command.current_dir(&project.dir);
-        let output = command.output().unwrap();
-        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
-        assert!(output.status.success(), "{text}");
-        text
-    };
+    ];
+    let project = Project::new("workers", &files);
     let stats = |cache: &str| {
         let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", cache).output().unwrap();
         String::from_utf8(stats.stdout).unwrap()
@@ -1872,11 +1864,28 @@ fn workers() {
     let outputs = project.dir.join("build").join(&host);
     let libraries = ["liba.rlib", "libb.rlib", "libc.rlib", "libd.rlib", "libe.rlib"];
     let read = |name: &str| std::fs::read(outputs.join(name)).unwrap();
-    // the first build runs every edge here, as it has not run them before
+    // the first build runs every edge here, without workers
     let first = dir.join("first").display().to_string();
-    build(&first);
+    let mut command = jig_command();
+    command.args(["build", "-j", "1"]).env("JIG_CACHE", &first).env("JIG_WORKERS", "").current_dir(&project.dir);
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_contains(&stats(&store), "and 0 blobs");
     let local: Vec<Vec<u8>> = libraries.iter().map(|name| read(name)).collect();
+    // while a fresh checkout's first build, only for workers, sends the worker every command, as rustc finds what each
+    // reads, such as `inner.rs`, without compiling it, here first, and the worker writes what is written here
+    let fresh = Project::new("workers-fresh", &files);
+    let mut command = jig_command();
+    command.args(["build", "-j", "8"]).env("JIG_CACHE", dir.join("fresh")).env("JIG_WORKERS", &worker);
+    let output = command.env("JIG_WORKERS_ONLY", "1").current_dir(&fresh.dir).output().unwrap();
+    let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{shown}");
+    assert_contains(&shown, "6 of 6 commands ran on workers");
+    assert_contains(&shown, "unused variable");
+    for (name, local) in libraries.iter().zip(&local) {
+        let there = std::fs::read(fresh.dir.join("build").join(&host).join(name)).unwrap();
+        assert!(there == *local, "{name} differs from what was built here");
+    }
     // `jig workers` shows the worker's host, jobs and tags, and its toolchains, among them the one which built here,
     // which the worker keeps what identifies, as one which has run before does, so that it reports them at once
     let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();

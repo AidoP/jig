@@ -15,7 +15,8 @@
 //! command printed is shown, rather than running it. Otherwise its outputs, depfile and what it printed are added to the
 //! cache once it has run and succeeded. A cache which cannot be read or written is a miss, rather than a failure.
 //!
-//! A cached edge whose inputs are known from when it last ran may run on a worker, one of [`Options::workers`], once
+//! A cached edge whose inputs are known from when it last ran, or which has an action which discovers them without
+//! running it, may run on a worker, one of [`Options::workers`], once
 //! the build's own jobs are full, if the worker has the edge's toolchain: its inputs, declared and discovered, are
 //! sent to the worker, as [`crate::worker`] describes, which runs it, and its outputs are fetched, and restored as from
 //! the cache. If it cannot, or the action fails there, it is given back to run here, in one of the build's own jobs,
@@ -31,7 +32,8 @@
 //!
 //! With [`Options::workers_only`], an edge which a worker may run does not run here, but waits for a worker, whatever
 //! its jobs, as long as a worker is connecting, or has reported that it runs the edge. What no worker runs, and an
-//! edge which has not run before, still runs here, as does one which fails on a worker, or which it cannot be sent.
+//! edge which has not run before, and has no action which discovers its inputs, still runs here, as does one which
+//! fails on a worker, or which it cannot be sent.
 //!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
@@ -217,6 +219,9 @@ struct Dispatch {
     outputs: Vec<String>,
     /// A file stderr is written to, if it writes one, which it need not.
     stderr: Option<String>,
+    /// For an edge which has not run, the action which writes its depfile without running it, which runs here first,
+    /// and the depfile, whose inputs are sent too.
+    discovery: Option<(Action, String)>,
 }
 /// What became of an edge sent to a worker.
 enum Sent {
@@ -238,8 +243,24 @@ impl Dispatch {
     }
     fn try_run(&self, dir: &Path) -> Result<Vec<u8>, Sent> {
         use std::os::unix::fs::PermissionsExt;
+        let mut paths = self.inputs.clone();
+        // an edge which has not run discovers its inputs here first, as it runs here otherwise, which shows why
+        if let Some((action, depfile)) = &self.discovery {
+            let environment = Environment { makeflags: None, env: &self.env, inherit: Some(&self.locating) };
+            let (outcome, _) = run_command(action, dir, false, &environment, &|_| ());
+            if !outcome.succeeded() {
+                return Err(Sent::NotRun);
+            }
+            let found = read_depfile(&dir.join(depfile)).map_err(|_| Sent::NotRun)?;
+            if !found.inputs.iter().all(|path| crate::worker::ups(path).is_some()) {
+                return Err(Sent::NotRun);
+            }
+            paths.extend(found.inputs);
+            paths.sort_unstable();
+            paths.dedup();
+        }
         let mut inputs = Vec::new();
-        for path in &self.inputs {
+        for path in &paths {
             let full = dir.join(path);
             // an input which is not a file is not sent, which an action which reads it fails without
             let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
@@ -916,11 +937,17 @@ impl Run<'_, '_> {
         if edge.pool() == Pool::Console || !edge.hermetic() || self.options.cache.is_none() {
             return None;
         }
-        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
-        let recorded = previous.inputs.iter().chain(&previous.discovered).map(|(path, _)| path.as_str());
         let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
-        let mut paths = recorded.chain(outputs).chain(edge.depfile());
-        paths.all(|path| crate::worker::ups(path).is_some()).then_some(identity)
+        let outputs: Vec<&str> = outputs.chain(edge.depfile()).collect();
+        let leads = |path: &str| crate::worker::ups(path).is_some();
+        // an edge which has not run finds its inputs by its action which discovers them, if it has one
+        let Some(previous) = self.state.get(&plan::first_output(self.graph, self.edges[index])) else {
+            let declared = edge.inputs().iter().chain(edge.implicit()).map(|&node| self.graph.path(node));
+            let discovers = edge.discover().is_some() && edge.depfile().is_some();
+            return (discovers && declared.chain(outputs).all(leads)).then_some(identity);
+        };
+        let recorded = previous.inputs.iter().chain(&previous.discovered).map(|(path, _)| path.as_str());
+        recorded.chain(outputs).all(leads).then_some(identity)
     }
     /// Returns how a started edge runs on a worker: with the inputs it declares now, and those it discovered when it
     /// last ran, or `None` if one does not lead from the build's directory, or it is marked to run here, when it runs
@@ -933,9 +960,14 @@ impl Run<'_, '_> {
             self.local_only.insert(index);
             return None;
         }
-        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
+        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        // one which has not run discovers its inputs first, as it is sent
+        let discovery = match previous {
+            Some(_) => None,
+            None => Some((edge.discover()?.clone(), edge.depfile()?.to_string())),
+        };
         let declared = self.inputs.get(&index)?.iter().map(|(path, _)| path);
-        let discovered = previous.discovered.iter().map(|(path, _)| path);
+        let discovered = previous.into_iter().flat_map(|previous| previous.discovered.iter().map(|(path, _)| path));
         let mut inputs: Vec<String> = declared.chain(discovered).cloned().collect();
         inputs.sort_unstable();
         inputs.dedup();
@@ -975,6 +1007,7 @@ impl Run<'_, '_> {
             inputs,
             outputs,
             stderr,
+            discovery,
         })
     }
     fn make_ready(&mut self, index: usize) {
@@ -1980,6 +2013,37 @@ mod tests {
         assert!(report.succeeded() && report.remote > 0, "{report:?} {finished:?}");
         let speed = build.options.workers[0].link().speed;
         assert!((0.5..3.0).contains(&speed), "{speed}");
+    }
+
+    #[test]
+    fn sends_what_has_not_run_once_it_discovers_its_inputs() {
+        // edges which read `extra.h`, which they do not declare, and which have not run, one of which finds it by
+        // its rule's action which discovers its inputs, and one of which fails to
+        let cc = "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d";
+        let graph = graph()
+            .cached("toolchain")
+            .rule("cc", &[("command", cc), ("depfile", "$out.d"), ("discover", "echo \"$out: $in extra.h\" > $out.d")])
+            .rule("lost", &[("command", cc), ("depfile", "$out.d"), ("discover", "false")])
+            .edge("cc", &["a.o"], &["a.c"])
+            .edge("lost", &["b.o"], &["b.c"])
+            .finish();
+        let mut build = Build::new("discovers", graph, &[("a.c", "a\n"), ("b.c", "b\n"), ("extra.h", "h\n")]);
+        let cache = TempCache::new("discovers-cache");
+        build.options.cache = Some(cache.0.clone());
+        build.options.workers_only = true;
+        let store = TempCache::new("discovers-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        // the first build sends the one which found what it reads with it, while the other runs here
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.remote), (2, 1), "{finished:?}");
+        assert_eq!(build.read("a.o"), "a\nh\n");
+        assert_eq!(build.read("a.o.d"), "a.o: a.c extra.h\n");
+        assert!(store.0.has_blob(&crate::blake3::hash(b"h\n")) && !store.0.has_blob(&crate::blake3::hash(b"b\n")));
+        // what it found is recorded, as if it had run here
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
+        build.write("extra.h", "changed\n");
+        assert_eq!(build.ran(&[]).len(), 2);
     }
 
     #[test]

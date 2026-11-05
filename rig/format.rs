@@ -21,7 +21,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -88,6 +88,17 @@ impl Graph {
             w.len(placement.tags.len());
             for tag in &placement.tags {
                 w.str(tag);
+            }
+            match edge.discover() {
+                None => w.u32(0),
+                Some(Action::Shell(command)) => {
+                    w.u32(1);
+                    w.str(command);
+                },
+                Some(Action::Exec(exec)) => {
+                    w.u32(2);
+                    w.exec(exec);
+                },
             }
             for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
                 w.nodes(list);
@@ -166,6 +177,12 @@ impl Graph {
             };
             let tags = (0..r.u32()?).map(|_| r.str().map(String::from)).collect::<Result<Vec<_>, _>>()?;
             let placement = crate::Placement { any_host, target, tags };
+            let discover = match r.u32()? {
+                0 => None,
+                1 => Some(Action::Shell(r.str()?.into())),
+                2 => Some(Action::Exec(r.exec()?)),
+                _ => return Err(Error::Format("unknown kind of discovery")),
+            };
             let edge = Edge {
                 kind,
                 description,
@@ -182,6 +199,7 @@ impl Graph {
                 cache,
                 pass_env,
                 placement,
+                discover,
             };
             graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
@@ -335,6 +353,7 @@ mod tests {
                 hashed: true,
                 cache: Some("toolchain".into()),
                 pass_env: vec!["CC".into(), "CFLAGS".into()],
+                discover: Some(Action::Shell("cc -M a.c > a.o.d".into())),
                 placement: crate::Placement {
                     any_host: true,
                     target: Some("riscv64gc".into()),

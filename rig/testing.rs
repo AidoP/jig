@@ -76,6 +76,7 @@ impl Graphs {
             cache: self.2.clone(),
             pass_env: Vec::new(),
             placement: self.3.clone(),
+            discover: None,
         };
         self.0.build(&build)
     }
