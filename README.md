@@ -79,6 +79,9 @@ rustc and clippy are run in colour, as their output is captured, and with rig, a
 where the build's output is not a terminal, so that what is built does not depend on where its output goes. `jig
 --color <when>`, before the command, chooses otherwise, as `auto`, `always` or `never`, for the build with rig, `jig
 lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. ninja chooses for itself.
+`jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
+program and running tests took, each in total, and with rig, the ten commands of the build which took longest, from
+when each started until it finished, such as `jig --timings test`.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so running another one reports the `other-jig` warning, which names both, until `jig generate` configures
 the project with the one which is running. Its severity is that of `diagnostic/other-jig`

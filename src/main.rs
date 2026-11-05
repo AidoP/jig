@@ -22,12 +22,18 @@ mod run;
 mod rust_analyzer;
 mod target_spec;
 mod test_runner;
+mod timings;
 mod toolchain;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os();
     let program = args.next().unwrap_or("jig".into());
-    match run(args) {
+    let ran = run(args);
+    // what took how long is shown last, whether the command succeeded or not
+    if let Some(report) = timings::report() {
+        eprint!("{report}");
+    }
+    match ran {
         Ok(code) => code,
         Err(error) => {
             eprintln!("{}: {error}", program.display());
@@ -41,10 +47,12 @@ fn main() -> std::process::ExitCode {
 /// The internal commands are left out: `check <label>`, which rust-analyzer runs as its flycheck, and
 /// `build --proxy <prefix> <wrapper>`, which the wrappers installed by `install --proxy` run.
 const USAGE: &str = "\
-usage: jig [+<toolchain>] [--color <when>] <command> [<argument> ...]
+usage: jig [+<toolchain>] [--color <when>] [--timings] <command> [<argument> ...]
 
 A rustup toolchain given with `+` configures the project with it, and is used until it is configured with another.
-`--color` is `auto`, by default, to show colour where the output is a terminal, or `always` or `never`.
+`--color` is `auto`, by default, to show colour where the output is a terminal, or `always` or `never`. `--timings`
+shows on stderr, once the command has finished, how long configuring, building, running and testing took, and the
+commands of the build which took longest.
 
 commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
@@ -88,8 +96,18 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     use std::process::ExitCode;
     let mut args = args.peekable();
     let toolchain = toolchain::parse(&mut args)?;
-    let when = parse_colour(&mut args)?;
-    let _ = COLOUR.set(when);
+    // the options before the command, in either order
+    let mut when = None;
+    loop {
+        if args.next_if(|arg| arg == "--timings").is_some() {
+            timings::enable();
+        } else if when.is_none() && args.peek().is_some_and(|arg| arg.to_string_lossy().starts_with("--color")) {
+            when = Some(parse_colour(&mut args)?);
+        } else {
+            break;
+        }
+    }
+    let _ = COLOUR.set(when.unwrap_or(Colour::Auto));
     let Some(command) = args.next() else {
         return Err(Error::MissingArg("command"));
     };
@@ -104,7 +122,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             if let Some(extra) = args.next() {
                 return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
             }
-            generate(input, toolchain.as_deref()).map(|()| ExitCode::SUCCESS)
+            timings::step("configure", || generate(input, toolchain.as_deref())).map(|()| ExitCode::SUCCESS)
         },
         "build" => {
             let mut args = args.peekable();

@@ -3356,6 +3356,42 @@ log note clippy/nope
 }
 
 #[test]
+fn shows_timings() {
+    let project = Project::new("timings", &[
+        ("Jig", "crate lib 'lib.rs'\ncrate hello 'hello.rs'\n    crate-type 'bin'\n    use lib\n"),
+        ("lib.rs", "pub fn name() -> &'static str { \"world\" }\n"),
+        ("hello.rs", "fn main() { println!(\"hello {}\", lib::name()); }\n"),
+    ]);
+    let jig = |args: &[&str]| {
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{stderr}");
+        (String::from_utf8(output.stdout).unwrap(), stderr)
+    };
+    // each step is shown once it has been taken, with the slowest commands of the build
+    let (_, stderr) = jig(&["--timings", "build"]);
+    let timings = &stderr[stderr.find("\ntimings:\n").unwrap_or_else(|| panic!("{stderr}"))..];
+    for step in ["  configure ", "  build ", "  total "] {
+        assert_contains(timings, step);
+    }
+    assert!(!timings.contains("  run "), "{timings}");
+    if rig_engine() {
+        let host = project.host();
+        assert_contains(timings, "slowest 2 of 2 commands:\n");
+        assert_contains(timings, &format!("s  RUSTC {host}/hello\n"));
+        assert_contains(timings, &format!("s  RUSTC {host}/liblib.rlib\n"));
+    }
+    // and before or after `--color`, with running a program, after what it printed
+    let (stdout, stderr) = jig(&["--color", "never", "--timings", "run"]);
+    assert_eq!(stdout, "hello world\n");
+    assert_contains(&stderr, "\ntimings:\n");
+    assert_contains(&stderr, "  run ");
+    // while without it nothing is timed
+    let (_, stderr) = jig(&["build"]);
+    assert!(!stderr.contains("timings:"), "{stderr}");
+}
+
+#[test]
 fn run_programs() {
     let hello = "\
 fn main() {
@@ -3449,7 +3485,7 @@ fn commands() {
     assert_contains(&stderr, "note: generated");
     let (success, stdout, _) = run(&["help"]);
     assert!(success);
-    assert_contains(&stdout, "usage: jig [+<toolchain>] [--color <when>] <command>");
+    assert_contains(&stdout, "usage: jig [+<toolchain>] [--color <when>] [--timings] <command>");
     // a mistaken command is shown with the usage
     for (args, error) in [
         (&[][..], "missing required argument `command`"),
@@ -3460,7 +3496,7 @@ fn commands() {
         let (success, _, stderr) = run(args);
         assert!(!success, "{args:?}");
         assert_contains(&stderr, error);
-        assert_contains(&stderr, "usage: jig [+<toolchain>] [--color <when>] <command>");
+        assert_contains(&stderr, "usage: jig [+<toolchain>] [--color <when>] [--timings] <command>");
     }
 }
 
