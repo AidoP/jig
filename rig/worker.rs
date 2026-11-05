@@ -420,6 +420,9 @@ impl Executor {
             error(format!("failed to {what} {path:?}: {failure}"))
         };
         std::fs::create_dir_all(&build).map_err(|failure| failed("create", &build, failure))?;
+        // the directory is as the commands find it, once symbolic links are followed, as on macOS, where `/var` is one,
+        // so that the remapping of the build's directory, which the marker gives, matches the paths rustc writes
+        let build = std::fs::canonicalize(&build).map_err(|failure| failed("find", &build, failure))?;
         for input in &request.inputs {
             let path = build.join(&input.path);
             if let Some(parent) = path.parent() {
@@ -705,6 +708,33 @@ mod tests {
         let executed = executor.execute(&cache, &failing).unwrap();
         assert!(!executed.succeeded);
         assert_eq!(cache.read_blob(&executed.entry.printed).unwrap(), b"no\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gives_the_build_directory_as_the_commands_find_it() {
+        // the root is reached through a symbolic link, as a directory in `/var` is on macOS
+        let dir = dir("linked");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let cache = Cache::open(&dir.join("cache")).unwrap();
+        let toolchain = Toolchain { identity: "toolchain".into(), ..Toolchain::default() };
+        let capabilities = Capabilities { toolchains: vec![toolchain], ..Capabilities::default() };
+        let executor = Executor::new(dir.join("link").join("work"), 1, move || capabilities.clone());
+        let line = format!("test \"$(pwd -P)\" = {} && echo same", crate::plan::BUILD_DIR);
+        let request = Request {
+            identity: "toolchain".into(),
+            release: String::new(),
+            install: String::new(),
+            target: String::new(),
+            action: Action::Shell(line),
+            env: Vec::new(),
+            locating: vec!["PATH".into()],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let executed = executor.execute(&cache, &request).unwrap();
+        assert!(executed.succeeded, "{}", String::from_utf8_lossy(&cache.read_blob(&executed.entry.printed).unwrap()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

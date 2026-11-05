@@ -1828,6 +1828,10 @@ fn workers() {
     // what they write is what they write here
     let dir = std::env::temp_dir().join(format!("jig-test-{}-workers", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    // the worker's store is reached through a symbolic link, as a directory in `/var` is on macOS, so that what it
+    // writes is what is written here only if its directory is given as the commands find it
+    std::fs::create_dir_all(dir.join("real-store")).unwrap();
+    std::os::unix::fs::symlink(dir.join("real-store"), dir.join("store")).unwrap();
     let store = dir.join("store").display().to_string();
     let jig = configure_path().display().to_string();
     let worker = format!("/usr/bin/env JIG_CACHE={store} {jig} worker --stdio --jobs 4 --tag fast");
