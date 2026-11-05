@@ -15,9 +15,12 @@
 //! client fetches, and restores, as it does a result from a remote cache. The directory is removed once the action has
 //! finished.
 //!
-//! An action reads only what is sent, beside the toolchain, which the worker has, by its identity: one it does not
-//! have is refused, with `NOT_FOUND`, unless the worker installs toolchains, and installs it by the name the request
-//! gives, which it tries once. An action which needs a file that was not sent fails, as do those whose paths are
+//! An action reads only what is sent, beside the toolchain, which the worker has, by its identity, or by the identity
+//! of its release on any host, for an action which may run on another host, with the standard library of the target
+//! the action needs, if it needs one. One it does not have is refused, with `NOT_FOUND`, unless the worker installs
+//! toolchains, and installs it, with the target, by the name the request gives, which it tries once. The toolchain's
+//! variables, such as `RUSTUP_TOOLCHAIN`, take the place of those the action gives, so that it runs the toolchain it
+//! was matched by. An action which needs a file that was not sent fails, as do those whose paths are
 //! absolute, or do not lead from the build's directory as given, which are refused, and the client runs it itself.
 //!
 //! `GET_CAPABILITIES` is replied to with the worker's [`Capabilities`]: its host, its tags, and its toolchains, with
@@ -43,25 +46,69 @@ pub struct Toolchain {
     pub host: String,
     /// The targets whose standard libraries it has.
     pub targets: Vec<String>,
+    /// What identifies its release on any host, as its identity does but for the host it runs on.
+    pub release_identity: String,
     pub env: Vec<(String, String)>,
 }
 
-/// What a worker reports of itself: the target it runs on, the tags it was given, and its toolchains.
+impl Toolchain {
+    /// Whether it runs an action of a toolchain by its identity, or of its release on any host, if that is given,
+    /// with the standard library of a target, if one is given.
+    #[must_use]
+    pub fn runs(&self, identity: &str, release: &str, target: &str) -> bool {
+        let same = self.identity == identity || (!release.is_empty() && self.release_identity == release);
+        same && (target.is_empty() || self.targets.iter().any(|installed| installed == target))
+    }
+}
+
+/// The release of a toolchain, by which a worker may run an action of it: what identifies the release on any host, and
+/// the name rustup installs it by, either of which may be empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Release {
+    pub identity: String,
+    pub install: String,
+}
+
+/// What an edge needs of a worker: its toolchain, by its identity, and by the identity of its release on any host if it
+/// may run on another host, the name rustup installs the toolchain by, the target whose standard library it needs, and
+/// the tags it needs, any of which but the identity may be empty.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Needs<'a> {
+    pub identity: &'a str,
+    pub release: &'a str,
+    pub install: &'a str,
+    pub target: &'a str,
+    pub tags: &'a [String],
+}
+
+/// What a worker reports of itself: the target it runs on, the tags it was given, its toolchains, and whether it
+/// installs those it does not have.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     pub host: String,
     pub tags: Vec<String>,
     pub toolchains: Vec<Toolchain>,
+    pub installs: bool,
 }
 
 impl Capabilities {
+    /// Whether a worker with them may run an edge: it has every tag the edge needs, and one of its toolchains runs it,
+    /// or it installs toolchains, and the edge's is known by name.
+    #[must_use]
+    pub fn may_run(&self, needs: &Needs) -> bool {
+        let tagged = needs.tags.iter().all(|tag| self.tags.contains(tag));
+        let has = self.toolchains.iter().any(|toolchain| toolchain.runs(needs.identity, needs.release, needs.target));
+        tagged && (has || (self.installs && !needs.install.is_empty()))
+    }
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         push_str(&mut bytes, &self.host);
         push_strs(&mut bytes, &self.tags);
+        bytes.push(u8::from(self.installs));
         bytes.extend_from_slice(&(self.toolchains.len() as u32).to_le_bytes());
         for toolchain in &self.toolchains {
-            for field in [&toolchain.identity, &toolchain.name, &toolchain.release, &toolchain.host] {
+            let fields = [&toolchain.identity, &toolchain.release_identity, &toolchain.name, &toolchain.release];
+            for field in fields.into_iter().chain([&toolchain.host]) {
                 push_str(&mut bytes, field);
             }
             push_strs(&mut bytes, &toolchain.targets);
@@ -71,17 +118,24 @@ impl Capabilities {
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut p = Payload(bytes);
         let (host, tags) = (p.str()?, p.strs()?);
+        let installs = match p.take(1)?[0] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
         let toolchains = (0..p.u32()?).map(|_| {
-            let (identity, name, release, host, targets) = (p.str()?, p.str()?, p.str()?, p.str()?, p.strs()?);
-            Some(Toolchain { identity, name, release, host, targets, env: Vec::new() })
+            let (identity, release_identity, name, release) = (p.str()?, p.str()?, p.str()?, p.str()?);
+            let (host, targets) = (p.str()?, p.strs()?);
+            Some(Toolchain { identity, name, release, host, targets, release_identity, env: Vec::new() })
         });
         let toolchains = toolchains.collect::<Option<Vec<_>>>()?;
-        p.0.is_empty().then_some(Self { host, tags, toolchains })
+        p.0.is_empty().then_some(Self { host, tags, toolchains, installs })
     }
 }
 
-/// Installs a toolchain by the name a request gives, returning whether it did.
-type Install = Box<dyn Fn(&str) -> bool + Send + Sync>;
+/// Installs a toolchain by the name a request gives, with the standard library of a target, if one is given, returning
+/// whether it did.
+type Install = Box<dyn Fn(&str, Option<&str>) -> bool + Send + Sync>;
 
 /// What a worker runs actions with: the directory of the directories they run in, which is on the same file system as
 /// its cache, so that their inputs are linked from it, the number which run at once, and its capabilities, which are
@@ -93,9 +147,9 @@ pub struct Executor {
     found: std::sync::Mutex<Option<std::sync::Arc<Capabilities>>>,
     find: Box<dyn Fn() -> Capabilities + Send + Sync>,
     install: Option<Install>,
-    /// The names of the toolchains which have been installed, or tried to be, each of which is tried once. Installs
-    /// hold it, so that they take turns.
-    installed: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The names of the toolchains which have been installed, or tried to be, with the targets they were installed
+    /// with, each of which is tried once. Installs hold it, so that they take turns.
+    installed: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 /// An input of an action which is sent to a worker: its path relative to the build's directory, its blob, and whether
@@ -112,9 +166,13 @@ pub struct Input {
 pub struct Request {
     /// The identity of the toolchain it runs with.
     pub identity: String,
+    /// The identity of the toolchain's release on any host, if the action may run on another host, or empty.
+    pub release: String,
     /// The name rustup installs the toolchain by, such as `1.97.0` or `nightly-2026-11-03`, for a worker which does not
     /// have it, or empty if it is not known.
     pub install: String,
+    /// The target whose standard library the action needs, or empty if it needs none.
+    pub target: String,
     /// The action, with the build's directory replaced by a marker, as [`crate::plan::relocated_action_bytes`] does.
     pub action: Action,
     /// The variables it is given, beside those of its toolchain and its action.
@@ -146,8 +204,9 @@ pub enum Refused {
 impl Request {
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        push_str(&mut bytes, &self.identity);
-        push_str(&mut bytes, &self.install);
+        for field in [&self.identity, &self.release, &self.install, &self.target] {
+            push_str(&mut bytes, field);
+        }
         match &self.action {
             Action::Shell(line) => {
                 bytes.push(0);
@@ -176,7 +235,7 @@ impl Request {
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut p = Payload(bytes);
-        let (identity, install) = (p.str()?, p.str()?);
+        let (identity, release, install, target) = (p.str()?, p.str()?, p.str()?, p.str()?);
         let action = match p.take(1)?[0] {
             0 => Action::Shell(p.str()?),
             1 => {
@@ -199,7 +258,8 @@ impl Request {
         });
         let inputs = inputs.collect::<Option<Vec<_>>>()?;
         let outputs = p.strs()?;
-        p.0.is_empty().then_some(Self { identity, install, action, env, locating, inputs, outputs })
+        let request = Self { identity, release, install, target, action, env, locating, inputs, outputs };
+        p.0.is_empty().then_some(request)
     }
     /// The blobs of its inputs, each once.
     #[must_use]
@@ -273,32 +333,44 @@ impl Executor {
         let (found, installed) = (std::sync::Mutex::default(), std::sync::Mutex::default());
         Self { root, jobs, found, find: Box::new(find), install: None, installed }
     }
-    /// Install the toolchains requests need which the worker does not have, by the names they give, with `install`,
-    /// which returns whether it did.
+    /// Install the toolchains requests need which the worker does not have, by the names they give, with the targets
+    /// they need, with `install`, which returns whether it did.
     #[must_use]
-    pub fn installing(mut self, install: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+    pub fn installing(mut self, install: impl Fn(&str, Option<&str>) -> bool + Send + Sync + 'static) -> Self {
         self.install = Some(Box::new(install));
+        // what was found says it does not install them
+        *self.found.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self
     }
     /// Returns the capabilities, finding them if they have not been.
     pub fn capabilities(&self) -> std::sync::Arc<Capabilities> {
         let mut found = self.found.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::sync::Arc::clone(found.get_or_insert_with(|| std::sync::Arc::new((self.find)())))
+        let capabilities = found.get_or_insert_with(|| {
+            std::sync::Arc::new(Capabilities { installs: self.install.is_some(), ..(self.find)() })
+        });
+        std::sync::Arc::clone(capabilities)
     }
-    /// Returns the toolchain of an identity, installing it by its name if the worker does not have it and installs
-    /// toolchains, unless it has tried to.
-    fn toolchain(&self, identity: &str, install: &str) -> Option<Toolchain> {
-        let find = || self.capabilities().toolchains.iter().find(|toolchain| toolchain.identity == identity).cloned();
+    /// Returns the toolchain which runs a request: one of its identity, or else of its release, with the target it
+    /// needs, installing it by its name if the worker does not have one and installs toolchains, unless it has tried.
+    fn toolchain(&self, request: &Request) -> Option<Toolchain> {
+        let find = || {
+            let capabilities = self.capabilities();
+            let (identity, target) = (&request.identity, &request.target);
+            let toolchains = &capabilities.toolchains;
+            let runs = |release: &str| toolchains.iter().find(|toolchain| toolchain.runs(identity, release, target));
+            runs("").or_else(|| runs(&request.release)).cloned()
+        };
         if let Some(toolchain) = find() {
             return Some(toolchain);
         }
-        let installer = self.install.as_ref().filter(|_| !install.is_empty())?;
+        let installer = self.install.as_ref().filter(|_| !request.install.is_empty())?;
         let mut tried = self.installed.lock().ok()?;
         // another action may have installed it while this one waited
         if let Some(toolchain) = find() {
             return Some(toolchain);
         }
-        if !tried.insert(install.to_string()) || !installer(install) {
+        let target = (!request.target.is_empty()).then_some(request.target.as_str());
+        if !tried.insert((request.install.clone(), request.target.clone())) || !installer(&request.install, target) {
             return None;
         }
         *self.found.lock().ok()? = None;
@@ -312,7 +384,7 @@ impl Executor {
     /// in the cache, or the directory to run it in cannot be made.
     pub fn execute(&self, cache: &Cache, request: &Request) -> Result<Executed, Refused> {
         use std::os::unix::fs::PermissionsExt;
-        let toolchain = self.toolchain(&request.identity, &request.install).ok_or(Refused::Toolchain)?;
+        let toolchain = self.toolchain(request).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
         let mut paths: Vec<&str> = inputs.chain(request.outputs.iter().map(String::as_str)).collect();
@@ -345,8 +417,11 @@ impl Executor {
                 std::fs::create_dir_all(parent).map_err(|failure| failed("create", parent, failure))?;
             }
         }
-        let action = located(&request.action, &build.display().to_string());
-        let mut env = request.env.clone();
+        // the toolchain's variables choose the toolchain it was matched by, in place of any the action gives
+        let chosen: Vec<&str> = toolchain.env.iter().map(|(name, _)| name.as_str()).collect();
+        let action = located(&request.action, &build.display().to_string(), &chosen);
+        let given = request.env.iter().filter(|(name, _)| !chosen.contains(&name.as_str()));
+        let mut env: Vec<_> = given.cloned().collect();
         env.extend(toolchain.env.iter().cloned());
         let environment = crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating) };
         let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, &|_| ());
@@ -367,15 +442,21 @@ impl Executor {
     }
 }
 
-/// Returns an action with the marker of the build's directory replaced by a directory.
-fn located(action: &Action, dir: &str) -> Action {
+/// Returns an action with the marker of the build's directory replaced by a directory, without the variables of its
+/// own which are chosen otherwise.
+fn located(action: &Action, dir: &str, chosen: &[&str]) -> Action {
     let locate = |string: &str| string.replace(crate::plan::BUILD_DIR, dir);
     match action {
         Action::Shell(line) => Action::Shell(locate(line)),
         Action::Exec(exec) => Action::Exec(Exec {
             program: locate(&exec.program),
             args: exec.args.iter().map(|arg| locate(arg)).collect(),
-            env: exec.env.iter().map(|(name, value)| (name.clone(), locate(value))).collect(),
+            env: exec
+                .env
+                .iter()
+                .filter(|(name, _)| !chosen.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), locate(value)))
+                .collect(),
             dir: exec.dir.as_deref().map(locate),
             stderr: exec.stderr.as_deref().map(locate),
         }),
@@ -415,7 +496,9 @@ mod tests {
         let blob = crate::blake3::hash(b"input");
         let request = Request {
             identity: "toolchain".into(),
+            release: String::new(),
             install: String::new(),
+            target: String::new(),
             action: Action::Exec(exec),
             env: vec![("B".into(), "2".into())],
             locating: vec!["PATH".into()],
@@ -439,10 +522,11 @@ mod tests {
             release: "1.97.0".into(),
             host: "x86_64-unknown-linux-gnu".into(),
             targets: vec!["x86_64-unknown-linux-gnu".into(), "riscv64gc-unknown-linux-gnu".into()],
+            release_identity: "release identity".into(),
             env: Vec::new(),
         };
         let (host, tags) = ("x86_64-unknown-linux-gnu".into(), vec!["fast".into()]);
-        let capabilities = Capabilities { host, tags, toolchains: vec![toolchain] };
+        let capabilities = Capabilities { host, tags, toolchains: vec![toolchain], installs: true };
         assert_eq!(Capabilities::decode(&capabilities.encode()), Some(capabilities.clone()));
         let encoded = capabilities.encode();
         assert_eq!(Capabilities::decode(&encoded[..encoded.len() - 1]), None);
@@ -451,22 +535,26 @@ mod tests {
     #[test]
     fn installs_toolchains_it_does_not_have() {
         use std::sync::{Arc, Mutex};
+        type Installed = Vec<(String, Option<String>)>;
         let dir = dir("installs");
         let cache = Cache::open(&dir.join("cache")).unwrap();
-        // a toolchain installed by name is found again, by its identity
-        let installed: Arc<Mutex<Vec<String>>> = Arc::default();
+        // a toolchain installed by name is found again, by its identity, with the target it was installed with
+        let installed: Arc<Mutex<Installed>> = Arc::default();
         let (finding, installing) = (Arc::clone(&installed), Arc::clone(&installed));
         let executor = Executor::new(dir.join("work"), 1, move || {
             let names = finding.lock().unwrap().clone();
-            let toolchain = |name: String| {
-                Toolchain { identity: format!("{name} identity"), name, ..Toolchain::default() }
+            let toolchain = |(name, target): (String, Option<String>)| {
+                let targets = target.into_iter().collect();
+                Toolchain { identity: format!("{name} identity"), name, targets, ..Toolchain::default() }
             };
             let toolchains = names.into_iter().map(toolchain);
             Capabilities { toolchains: toolchains.collect(), ..Capabilities::default() }
         });
         let request = Request {
             identity: "1.97.0 identity".into(),
+            release: String::new(),
             install: String::new(),
+            target: String::new(),
             action: Action::Shell("echo ran".into()),
             env: Vec::new(),
             locating: vec!["PATH".into()],
@@ -475,20 +563,84 @@ mod tests {
         };
         // without an installer, or a name, it is refused
         assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
-        let executor = executor.installing(move |name| {
+        let executor = executor.installing(move |name, target| {
             // a toolchain of another identity is installed by the name `other`
-            installing.lock().unwrap().push(if name == "other" { "unexpected".into() } else { name.into() });
+            let name = if name == "other" { "unexpected".into() } else { name.into() };
+            installing.lock().unwrap().push((name, target.map(String::from)));
             true
         });
+        assert!(executor.capabilities().installs);
         assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
-        let request = Request { install: "1.97.0".into(), ..request };
+        let request = Request { install: "1.97.0".into(), target: "riscv".into(), ..request };
         assert!(executor.execute(&cache, &request).unwrap().succeeded);
         assert_eq!(executor.capabilities().toolchains.len(), 1);
         // one which is installed and is not of the identity is not installed again
         let other = Request { identity: "other identity".into(), install: "other".into(), ..request.clone() };
         assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
         assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
-        assert_eq!(*installed.lock().unwrap(), ["1.97.0", "unexpected"]);
+        let tried = installed.lock().unwrap().clone();
+        let riscv = Some("riscv".to_string());
+        assert_eq!(tried, [("1.97.0".into(), riscv.clone()), ("unexpected".into(), riscv)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn runs_with_the_toolchain_it_matches() {
+        let toolchain = |identity: &str, release: &str, targets: &[&str]| Toolchain {
+            identity: identity.into(),
+            release_identity: release.into(),
+            targets: targets.iter().map(|&target| target.into()).collect(),
+            env: vec![("RUSTUP_TOOLCHAIN".into(), identity.into())],
+            ..Toolchain::default()
+        };
+        // a toolchain runs an action of its identity, or of its release if that is given, with the target it needs
+        let here = toolchain("here", "release", &["host"]);
+        assert!(here.runs("here", "", "") && here.runs("here", "", "host"));
+        assert!(!here.runs("here", "", "riscv") && !here.runs("elsewhere", "", ""));
+        assert!(here.runs("elsewhere", "release", "host") && !here.runs("elsewhere", "other release", ""));
+        let fast = vec!["fast".to_string()];
+        let capabilities = Capabilities { tags: fast.clone(), toolchains: vec![here], ..Capabilities::default() };
+        let needs = Needs { identity: "here", ..Needs::default() };
+        assert!(capabilities.may_run(&needs) && capabilities.may_run(&Needs { tags: &fast, ..needs }));
+        let slow = vec!["slow".to_string()];
+        assert!(!capabilities.may_run(&Needs { tags: &slow, ..needs }));
+        let elsewhere = Needs { identity: "elsewhere", install: "1.97.0", ..needs };
+        assert!(!capabilities.may_run(&elsewhere));
+        assert!(Capabilities { installs: true, ..capabilities.clone() }.may_run(&elsewhere));
+        // the worker runs the toolchain of the identity, if it has it, rather than one of the release, and its
+        // variables take the place of the action's
+        let dir = dir("matches");
+        let cache = Cache::open(&dir.join("cache")).unwrap();
+        let toolchains = vec![toolchain("same release", "release", &[]), toolchain("here", "release", &[])];
+        let reported = Capabilities { toolchains, ..Capabilities::default() };
+        let executor = Executor::new(dir.join("work"), 1, move || reported.clone());
+        let exec = Exec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "echo $RUSTUP_TOOLCHAIN".into()],
+            env: vec![("RUSTUP_TOOLCHAIN".into(), "given".into())],
+            dir: None,
+            stderr: None,
+        };
+        let request = Request {
+            identity: "here".into(),
+            release: "release".into(),
+            install: String::new(),
+            target: String::new(),
+            action: Action::Exec(exec),
+            env: vec![("RUSTUP_TOOLCHAIN".into(), "given too".into())],
+            locating: vec!["PATH".into()],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let printed = |request: &Request| {
+            let executed = executor.execute(&cache, request).unwrap();
+            String::from_utf8(cache.read_blob(&executed.entry.printed).unwrap()).unwrap()
+        };
+        assert_eq!(printed(&request), "here\n");
+        let elsewhere = Request { identity: "elsewhere".into(), ..request.clone() };
+        assert_eq!(printed(&elsewhere), "same release\n");
+        let not_any_host = Request { release: String::new(), ..elsewhere };
+        assert_eq!(executor.execute(&cache, &not_any_host), Err(Refused::Toolchain));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -515,7 +667,9 @@ mod tests {
         );
         let request = Request {
             identity: "toolchain".into(),
+            release: String::new(),
             install: String::new(),
+            target: String::new(),
             action: Action::Shell(line),
             env: vec![("GIVEN".into(), "given".into())],
             locating: vec!["PATH".into()],
@@ -546,7 +700,9 @@ mod tests {
         let executor = executor(&dir);
         let request = Request {
             identity: "toolchain".into(),
+            release: String::new(),
             install: String::new(),
+            target: String::new(),
             action: Action::Shell("true".into()),
             env: Vec::new(),
             locating: Vec::new(),

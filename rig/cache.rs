@@ -56,6 +56,9 @@ const MANIFEST_MAX: usize = 16;
 /// refers to it, or writing it.
 const GRACE: std::time::Duration = std::time::Duration::from_hours(1);
 
+/// How long an edge which failed on a worker, and not here, is marked to run here.
+const LOCAL_FOR: std::time::Duration = std::time::Duration::from_hours(24 * 30);
+
 /// The file whose modification time is when the cache was last collected, by [`Cache::gc_if_due`].
 const COLLECTED: &str = "collected";
 
@@ -480,6 +483,15 @@ impl Cache {
         std::fs::write(&tmp, bytes)?;
         Self::place(&tmp, path)
     }
+    /// Mark an edge, by its first key, to run here rather than on a worker, as it failed there and succeeded here.
+    pub fn mark_local(&self, first: &Hash) {
+        let _ = self.write_bytes(&self.keyed("local", first), &[]);
+    }
+    /// Whether an edge, by its first key, is marked to run here rather than on a worker.
+    #[must_use]
+    pub fn is_local(&self, first: &Hash) -> bool {
+        self.keyed("local", first).is_file()
+    }
     /// Push the result of an edge, by its keys, and the inputs it discovered, to the remote cache, if it takes pushes,
     /// in the background, returning whether it is to be pushed. [`Self::wait_for_pushes`] waits for it.
     #[must_use]
@@ -718,6 +730,11 @@ impl Cache {
             }
         }
         for file in stored(&self.dir.join("tmp")).iter().filter(|file| old(file)) {
+            let _ = std::fs::remove_file(&file.path);
+        }
+        // an edge is marked to run here for a while, after which it is tried on a worker again
+        let marked_long_ago = |file: &Stored| now.duration_since(file.modified).is_ok_and(|age| age >= LOCAL_FOR);
+        for file in stored(&self.dir.join("local")).iter().filter(|file| marked_long_ago(file)) {
             let _ = std::fs::remove_file(&file.path);
         }
         collected.removed.results += corrupted;

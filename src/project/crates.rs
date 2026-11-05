@@ -59,6 +59,7 @@ impl Project {
         let mut test = false;
         let mut doc = false;
         let mut tags = Vec::new();
+        let mut worker_tags = Vec::new();
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
@@ -95,6 +96,11 @@ impl Project {
                 "tag" => {
                     if let Some(new) = self.tags(&attribute.operand()) {
                         tags.extend(new);
+                    }
+                },
+                "worker-tag" => {
+                    if let Some(new) = self.tags(&attribute.operand()) {
+                        worker_tags.extend(new);
                     }
                 },
                 "crate-type" => {
@@ -249,6 +255,7 @@ impl Project {
                         lints: lints.clone(),
                         link_script: link_script.clone(),
                         install: install.clone(),
+                        worker_tags: worker_tags.clone(),
                     });
                     declared.push(c.target.clone());
                     // the test is forward declared, so that it can be referred to, and completed once the target is known

@@ -74,6 +74,13 @@ pub fn identity(verbose_version: &str, sysroot: &Path) -> (String, Option<PathBu
     (rig::cache::hex(&key.finish()), hash.map(|_| sysroot.join(file)))
 }
 
+/// Returns what identifies a toolchain's release on any host, as [`identity`] does but for the host in rustc's
+/// version, by which a worker on another host may run what does not depend on the host.
+pub fn release_identity(verbose_version: &str, sysroot: &Path) -> String {
+    let verbose_version: String = verbose_version.lines().filter(|line| !line.starts_with("host:")).collect();
+    identity(&verbose_version, sysroot).0
+}
+
 /// Returns the name rustup installs a toolchain by, from the manifest of its channel in its sysroot: the version of a
 /// stable release, such as `1.97.0`, or the channel and date of a nightly or beta, such as `nightly-2026-11-03`, or
 /// `None` without the manifest, as for a toolchain which rustup did not install.
@@ -99,57 +106,136 @@ pub fn install_name(sysroot: &Path) -> Option<String> {
 
 /// Returns what a worker has, with its tags: the host of the `rustc` which is run without a toolchain, each toolchain
 /// rustup has, which is run with `RUSTUP_TOOLCHAIN`, and that `rustc`, which is the only one without rustup.
-pub fn capabilities(tags: Vec<String>) -> rig::worker::Capabilities {
+///
+/// What identifies each toolchain is kept in a file, `known`, by its sysroot, with the size and time of the file its
+/// identity is of, so that rustc is run only for a toolchain which is new, or has been updated.
+pub fn capabilities(tags: Vec<String>, known: &Path) -> rig::worker::Capabilities {
+    let mut identified = Known::read(known);
     let mut rustup = Command::new("rustup");
-    rustup.args(["toolchain", "list"]);
+    rustup.args(["toolchain", "list", "-v"]);
     let listed = rustup.output().ok().filter(|output| output.status.success());
     let listed = listed.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default();
-    let names = listed.lines().filter_map(|line| line.split_whitespace().next()).filter(|name| !name.is_empty());
-    let mut toolchains: Vec<rig::worker::Toolchain> = names.filter_map(|name| identify(Some(name))).collect();
-    let default = identify(None);
+    // each line is the name, what is active or the default, and the sysroot, which is last
+    let listed = listed.lines().filter_map(|line| {
+        let mut words = line.split_whitespace();
+        Some((words.next()?, words.next_back()?))
+    });
+    let mut toolchains: Vec<rig::worker::Toolchain> = listed
+        .filter_map(|(name, sysroot)| identified.toolchain(Some(name), Path::new(sysroot)))
+        .collect();
+    let default = rustc_output(None, "--print=sysroot");
+    let default = default.and_then(|sysroot| identified.toolchain(None, Path::new(&sysroot)));
     let host = default.as_ref().map(|toolchain| toolchain.host.clone()).unwrap_or_default();
     if let Some(default) = default
         && !toolchains.iter().any(|toolchain| toolchain.identity == default.identity)
     {
         toolchains.push(default);
     }
-    rig::worker::Capabilities { host, tags, toolchains }
+    identified.write(known);
+    rig::worker::Capabilities { host, tags, toolchains, installs: false }
 }
 
-/// Returns the toolchain `rustc` runs, with a toolchain if one is given, if it can be run.
-fn identify(toolchain: Option<&str>) -> Option<rig::worker::Toolchain> {
-    let output = |argument: &str| {
-        let mut rustc = Command::new("rustc");
-        rustc.arg(argument);
-        apply(&mut rustc, toolchain);
-        let output = rustc.output().ok().filter(|output| output.status.success())?;
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    };
-    let (verbose_version, sysroot) = (output("-vV")?, output("--print=sysroot")?);
-    let field = |name: &str| verbose_version.lines().find_map(|line| line.strip_prefix(name)).map(str::trim);
-    let field = |name: &str| field(name).unwrap_or_default();
-    let sysroot = Path::new(&sysroot);
-    // the targets whose standard libraries are installed have their libraries in the sysroot
-    let targets = std::fs::read_dir(sysroot.join("lib/rustlib")).into_iter().flatten().flatten();
-    let mut targets: Vec<String> = targets
-        .filter(|entry| entry.path().join("lib").is_dir())
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    targets.sort();
-    Some(rig::worker::Toolchain {
-        identity: identity(&verbose_version, sysroot).0,
-        name: toolchain.unwrap_or_default().into(),
-        release: field("release:").into(),
-        host: field("host:").into(),
-        targets,
-        env: toolchain.map(|name| (VARIABLE.into(), name.into())).into_iter().collect(),
-    })
+/// Returns the trimmed output of rustc with an argument, with a toolchain if one is given, if it succeeds.
+fn rustc_output(toolchain: Option<&str>, argument: &str) -> Option<String> {
+    let mut rustc = Command::new("rustc");
+    rustc.arg(argument);
+    apply(&mut rustc, toolchain);
+    let output = rustc.output().ok().filter(|output| output.status.success())?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Install a toolchain with rustup, by its name, with its minimal profile, returning whether it was.
-pub fn install(name: &str) -> bool {
+/// What identifies each toolchain a worker has found, by its sysroot: the size and time of the file its identity is
+/// of, its identity, the identity of its release, its release and its host.
+#[derive(Default)]
+struct Known {
+    toolchains: std::collections::BTreeMap<String, [String; 5]>,
+    changed: bool,
+}
+
+impl Known {
+    /// Read what is known, from lines of tab-separated fields, of which those which are not valid are left out.
+    fn read(path: &Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let toolchains = text.lines().filter_map(|line| {
+            let mut fields = line.split('\t').map(String::from);
+            let sysroot = fields.next()?;
+            let fields: [String; 5] = fields.collect::<Vec<_>>().try_into().ok()?;
+            Some((sysroot, fields))
+        });
+        Self { toolchains: toolchains.collect(), changed: false }
+    }
+    /// Write what is known, if it changed, replacing the file once it is written.
+    fn write(&self, path: &Path) {
+        if !self.changed {
+            return;
+        }
+        let lines = self.toolchains.iter().map(|(sysroot, fields)| format!("{sysroot}\t{}\n", fields.join("\t")));
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, lines.collect::<String>()).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
+    }
+    /// Returns the toolchain of a sysroot, run with a toolchain if one is given, identifying it with rustc unless it
+    /// is known, with the targets whose standard libraries it has now.
+    fn toolchain(&mut self, toolchain: Option<&str>, sysroot: &Path) -> Option<rig::worker::Toolchain> {
+        use std::os::unix::fs::MetadataExt;
+        let file = if sysroot.join(MANIFEST).is_file() { sysroot.join(MANIFEST) } else { sysroot.join("bin/rustc") };
+        let metadata = std::fs::metadata(&file).ok()?;
+        let stamp = format!("{}-{}.{}", metadata.len(), metadata.mtime(), metadata.mtime_nsec());
+        let key = sysroot.display().to_string();
+        let found = self.toolchains.get(&key).filter(|fields| fields[0] == stamp).cloned();
+        let [_, identity, release_identity, release, host] = if let Some(fields) = found {
+            fields
+        } else {
+            let verbose_version = rustc_output(toolchain, "-vV")?;
+            let lines = || verbose_version.lines();
+            let field = |name: &str| lines().find_map(|line| line.strip_prefix(name)).map(str::trim);
+            let field = |name: &str| field(name).unwrap_or_default().to_string();
+            let fields = [
+                stamp,
+                identity(&verbose_version, sysroot).0,
+                release_identity(&verbose_version, sysroot),
+                field("release:"),
+                field("host:"),
+            ];
+            // a sysroot which cannot be written as a field is identified each time
+            if !key.contains(['\t', '\n']) {
+                self.toolchains.insert(key, fields.clone());
+                self.changed = true;
+            }
+            fields
+        };
+        // the targets whose standard libraries are installed have their libraries in the sysroot
+        let targets = std::fs::read_dir(sysroot.join("lib/rustlib")).into_iter().flatten().flatten();
+        let mut targets: Vec<String> = targets
+            .filter(|entry| entry.path().join("lib").is_dir())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        targets.sort();
+        Some(rig::worker::Toolchain {
+            identity,
+            name: toolchain.unwrap_or_default().into(),
+            release,
+            host,
+            targets,
+            release_identity,
+            env: toolchain.map(|name| (VARIABLE.into(), name.into())).into_iter().collect(),
+        })
+    }
+}
+
+/// Install a toolchain with rustup, by its name, with its minimal profile, and the standard library of a target, if one
+/// is given, which is added to it if it is installed, returning whether it was.
+pub fn install(name: &str, target: Option<&str>) -> bool {
     let mut rustup = Command::new("rustup");
     rustup.args(["toolchain", "install", name, "--profile", "minimal", "--no-self-update"]);
+    // a target is given to rustup as an argument, so it has only what targets have
+    if let Some(target) = target {
+        if !target.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')) {
+            return false;
+        }
+        rustup.args(["--target", target]);
+    }
     // what rustup prints goes to stderr, which a client keeps to tell why the worker failed
     rustup.stdout(std::process::Stdio::null());
     rustup.status().is_ok_and(|status| status.success())
@@ -184,6 +270,11 @@ mod tests {
         assert_eq!(file, Some(dir.join(MANIFEST)));
         assert_eq!(super::identity("rustc 1.101.0-nightly", &elsewhere).0, identity);
         assert_ne!(super::identity("rustc 1.100.0-nightly", &elsewhere).0, identity);
+        // its release's identity is the same on another host
+        let on = |host: &str| format!("rustc 1.101.0-nightly\nhost: {host}\nrelease: 1.101.0-nightly");
+        assert_ne!(super::identity(&on("x86_64"), &dir).0, super::identity(&on("aarch64"), &dir).0);
+        assert_eq!(release_identity(&on("x86_64"), &dir), release_identity(&on("aarch64"), &elsewhere));
+        assert_ne!(release_identity(&on("x86_64"), &dir), super::identity(&on("x86_64"), &dir).0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -31,7 +31,7 @@ mod sys;
 mod testing;
 pub mod worker;
 
-pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Exec, Graph, NodeId, Pool};
+pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Exec, Graph, NodeId, Placement, Pool};
 pub use stamp::{Stamp, Stamps, stamps_of};
 pub use state::fnv1a;
 

@@ -70,7 +70,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 6;
+const VERSION: u32 = 7;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -425,6 +425,8 @@ pub struct Remote {
     http: Option<Arc<Http>>,
     /// The identities of the toolchains which the server, as a worker, does not have.
     refused: Mutex<std::collections::HashSet<String>>,
+    /// What the server, as a worker, last reported of itself.
+    reported: Mutex<Option<Arc<crate::worker::Capabilities>>>,
 }
 
 /// A server of files over HTTP, and why it failed, once it has, after which it is not used.
@@ -440,8 +442,10 @@ impl std::fmt::Debug for Remote {
 
 impl Remote {
     fn with_state(transport: Transport, push: bool, state: State) -> Self {
-        let (manifests, pusher, refused) = (Mutex::default(), Mutex::default(), Mutex::default());
-        Self { transport, token: None, push, state: Mutex::new(state), manifests, pusher, http: None, refused }
+        let (manifests, pusher) = (Mutex::default(), Mutex::default());
+        let (refused, reported) = (Mutex::default(), Mutex::default());
+        let state = Mutex::new(state);
+        Self { transport, token: None, push, state, manifests, pusher, http: None, refused, reported }
     }
     /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
     /// results are pushed to with `push`, if it takes them.
@@ -743,6 +747,8 @@ impl Remote {
     }
     /// Returns the number of actions the server runs at once, as a worker, if it has been connected to, without waiting
     /// for a connection which is being made, or `0`.
+    ///
+    /// A build sends a worker nothing until it has also reported what it has.
     #[must_use]
     pub fn connected_jobs(&self) -> usize {
         match self.state.try_lock().as_deref() {
@@ -763,11 +769,21 @@ impl Remote {
         }
         match connection.send(GET_CAPABILITIES, &[]).and_then(|receiver| receiver.recv().ok()) {
             Some((FOUND, payload)) => {
-                crate::worker::Capabilities::decode(&payload).ok_or_else(|| "an invalid reply from the worker".into())
+                let capabilities = crate::worker::Capabilities::decode(&payload);
+                let capabilities = capabilities.ok_or_else(|| String::from("an invalid reply from the worker"))?;
+                if let Ok(mut reported) = self.reported.lock() {
+                    *reported = Some(Arc::new(capabilities.clone()));
+                }
+                Ok(capabilities)
             },
             Some((ERROR, message)) => Err(String::from_utf8_lossy(&message).into_owned()),
             _ => Err(failed()),
         }
+    }
+    /// Returns what the server, as a worker, last reported of itself, if it has been asked, without asking it.
+    #[must_use]
+    pub fn reported(&self) -> Option<Arc<crate::worker::Capabilities>> {
+        self.reported.try_lock().ok()?.clone()
     }
     /// Whether the server, as a worker, may have a toolchain: whether it has not refused an action of it.
     #[must_use]
@@ -1465,7 +1481,9 @@ mod tests {
         let blob = crate::blake3::hash(b"input\n");
         let request = Request {
             identity: "toolchain".into(),
+            release: String::new(),
             install: String::new(),
+            target: String::new(),
             action: crate::Action::Shell("cp in out && echo copied".into()),
             env: Vec::new(),
             locating: vec!["PATH".into()],
@@ -1482,12 +1500,15 @@ mod tests {
         // a worker is sent the input, runs the action, and keeps its output for the client to fetch
         let store = cache("worker-store");
         let toolchain = Toolchain { identity: "toolchain".into(), release: "1.97.0".into(), ..Toolchain::default() };
-        let capabilities = Capabilities { host: "host".into(), tags: vec!["fast".into()], toolchains: vec![toolchain] };
+        let (host, tags) = ("host".into(), vec!["fast".into()]);
+        let capabilities = Capabilities { host, tags, toolchains: vec![toolchain], installs: false };
         let reported = capabilities.clone();
         let executor = Executor::new(store.dir().join("work"), 3, move || reported.clone());
         let worker = served_worker(store.clone(), executor);
         assert_eq!(worker.jobs(), 3);
-        assert_eq!(worker.capabilities(), Ok(capabilities));
+        assert_eq!(worker.reported(), None);
+        assert_eq!(worker.capabilities(), Ok(capabilities.clone()));
+        assert_eq!(worker.reported().as_deref(), Some(&capabilities));
         let executed = worker.execute(&dir.join("build"), &request).unwrap();
         assert!(executed.succeeded);
         assert!(store.has_blob(&blob));

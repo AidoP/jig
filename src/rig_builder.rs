@@ -79,7 +79,7 @@ impl Rig<'_> {
         // workers run cached edges, whose outputs are fetched into the cache
         if options.cache.is_some() {
             options.workers = self.cache.workers()?;
-            options.installable.extend(self.cache.installable.clone());
+            options.releases.extend(self.cache.release.clone());
         }
         Ok(options)
     }

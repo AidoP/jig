@@ -6,12 +6,12 @@ use crate::ninja::{Build, Manifest};
 
 /// Returns a graph to build, with its statements added in turn.
 pub(crate) fn graph() -> Graphs {
-    Graphs(Manifest::new(), false, None)
+    Graphs(Manifest::new(), false, None, crate::Placement::default())
 }
 
-/// The statements of a graph, whether the edges added are hashed, and what identifies them in a cache if they are
-/// cached.
-pub(crate) struct Graphs(Manifest, bool, Option<String>);
+/// The statements of a graph, whether the edges added are hashed, what identifies them in a cache if they are cached,
+/// and which workers they may run on.
+pub(crate) struct Graphs(Manifest, bool, Option<String>, crate::Placement);
 
 impl Graphs {
     pub(crate) fn variable(mut self, name: &str, value: &str) -> Self {
@@ -26,6 +26,11 @@ impl Graphs {
     /// Cache the results of the edges added from now on, identified by `key` beside their actions and inputs.
     pub(crate) fn cached(mut self, key: &str) -> Self {
         self.2 = Some(key.into());
+        self
+    }
+    /// Place the edges added from now on, which workers they may run on.
+    pub(crate) fn placed(mut self, placement: crate::Placement) -> Self {
+        self.3 = placement;
         self
     }
     pub(crate) fn rule(mut self, name: &str, bindings: &[(&str, &str)]) -> Self {
@@ -70,6 +75,7 @@ impl Graphs {
             hashed: self.1,
             cache: self.2.clone(),
             pass_env: Vec::new(),
+            placement: self.3.clone(),
         };
         self.0.build(&build)
     }

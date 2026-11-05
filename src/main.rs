@@ -219,10 +219,13 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let mut settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
     if settings.dir.is_some() {
         let identity = toolchain_identity(&mut project, &verbose_version, &sysroot);
-        // a worker which does not have the toolchain may install it by its name
-        if let Some(name) = toolchain::install_name(Path::new(&sysroot)) {
-            settings.installable = Some((identity.clone(), name));
-        }
+        // a worker may run what does not depend on the host with the same release on another, and install it by its
+        // name, if it does not have it
+        let release = rig::worker::Release {
+            identity: toolchain::release_identity(&verbose_version, Path::new(&sysroot)),
+            install: toolchain::install_name(Path::new(&sysroot)).unwrap_or_default(),
+        };
+        settings.release = Some((identity.clone(), release));
         project.cache = Some(identity);
         project.identify_cached_customs();
     }
@@ -237,9 +240,15 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 /// a cache.
 fn user_settings(toolchain: Option<&str>) -> Result<cache::Settings, Error> {
     let print = |request| rustc_print(request, toolchain).unwrap_or_default();
-    let (sysroot, host) = (print("sysroot"), print("host-tuple"));
-    let targets: Vec<String> = print("target-list").lines().map(String::from).collect();
-    let version = rustc_output("-vV", toolchain).and_then(|output| rustc_version(&output)).unwrap_or_default();
+    // rustc is asked each at once, as a worker, which runs this, answers once it has
+    let (sysroot, host, targets, version) = std::thread::scope(|scope| {
+        let (sysroot, host) = (scope.spawn(|| print("sysroot")), scope.spawn(|| print("host-tuple")));
+        let targets = scope.spawn(|| print("target-list"));
+        let version = rustc_output("-vV", toolchain).and_then(|output| rustc_version(&output)).unwrap_or_default();
+        let joined = |printed: std::thread::ScopedJoinHandle<String>| printed.join().unwrap_or_default();
+        (joined(sysroot), joined(host), joined(targets), version)
+    });
+    let targets: Vec<String> = targets.lines().map(String::from).collect();
     let mut project = project::Project::new(std::env::current_dir().unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
     declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);

@@ -53,6 +53,7 @@ impl Graph for RigGraph {
                 hashed: edge.hashed,
                 cache: edge.cache.map(String::from),
                 pass_env: edge.pass_env.to_vec(),
+                placement: edge.placement.clone(),
             })
             .map_err(Error::Rig)
     }

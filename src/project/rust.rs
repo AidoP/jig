@@ -38,6 +38,8 @@ pub struct Crate {
     pub link_script: Option<PathBuf>,
     /// Where `jig install` installs the output, if it does.
     pub install: Install,
+    /// The tags a worker must have for rig to send it the crate's commands.
+    pub worker_tags: Vec<String>,
 }
 
 /// A crate used by another, from a `use` attribute.

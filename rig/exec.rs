@@ -63,9 +63,9 @@ pub struct Options {
     pub locating: Vec<String>,
     /// The workers which cached edges may run on, once the build's own jobs are full.
     pub workers: Vec<Arc<Remote>>,
-    /// The names rustup installs toolchains by, by their identities, which a worker which does not have one, and
-    /// installs toolchains, installs it by.
-    pub installable: HashMap<String, String>,
+    /// The releases of toolchains, by their identities, by which a worker may run an edge which may run on another
+    /// host with the same release on its own, and which a worker which installs toolchains installs one by.
+    pub releases: HashMap<String, crate::worker::Release>,
 }
 impl Options {
     /// Options for a build in a directory, which stops at the first failure, with as many jobs as ninja runs by
@@ -83,7 +83,7 @@ impl Options {
             cache: None,
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
             workers: Vec::new(),
-            installable: HashMap::new(),
+            releases: HashMap::new(),
         }
     }
 }
@@ -181,8 +181,12 @@ struct Job {
 struct Dispatch {
     worker: Arc<Remote>,
     cache: Cache,
+    /// The edge's first key, by which an edge which fails there, but not here, is marked to run here.
+    key: Option<Hash>,
     identity: String,
+    release: String,
     install: String,
+    target: String,
     action: Action,
     env: Vec<(String, String)>,
     locating: Vec<String>,
@@ -192,10 +196,25 @@ struct Dispatch {
     /// A file stderr is written to, if it writes one, which it need not.
     stderr: Option<String>,
 }
+/// What became of an edge sent to a worker.
+enum Sent {
+    /// It ran there, and printed this, once its outputs were restored.
+    Ran(Vec<u8>),
+    /// It ran there, and failed, or did not write every output.
+    Failed,
+    /// It was not run there.
+    NotRun,
+}
+
 impl Dispatch {
-    /// Run the edge on the worker, returning what it printed once its outputs are restored, or `None` if it did not
-    /// run there, or failed, or did not write every output.
-    fn run(&self, dir: &Path) -> Option<Vec<u8>> {
+    /// Run the edge on the worker, restoring its outputs.
+    fn run(&self, dir: &Path) -> Sent {
+        match self.try_run(dir) {
+            Ok(printed) => Sent::Ran(printed),
+            Err(sent) => sent,
+        }
+    }
+    fn try_run(&self, dir: &Path) -> Result<Vec<u8>, Sent> {
         use std::os::unix::fs::PermissionsExt;
         let mut inputs = Vec::new();
         for path in &self.inputs {
@@ -204,28 +223,37 @@ impl Dispatch {
             let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
                 continue;
             };
-            let blob = crate::blake3::hash_file(&full).ok()?;
+            let blob = crate::blake3::hash_file(&full).map_err(|_| Sent::NotRun)?;
             let executable = metadata.permissions().mode() & 0o111 != 0;
             inputs.push(crate::worker::Input { path: path.clone(), blob, executable });
         }
         let request = crate::worker::Request {
             identity: self.identity.clone(),
+            release: self.release.clone(),
             install: self.install.clone(),
+            target: self.target.clone(),
             action: self.action.clone(),
             env: self.env.clone(),
             locating: self.locating.clone(),
             inputs,
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
         };
-        let executed = self.worker.execute(dir, &request).ok().filter(|executed| executed.succeeded)?;
+        let executed = self.worker.execute(dir, &request).map_err(|_| Sent::NotRun)?;
         let written = |path: &String| executed.entry.outputs.iter().any(|output| output.path == *path);
-        if !self.outputs.iter().all(written) {
-            return None;
+        if !executed.succeeded || !self.outputs.iter().all(written) {
+            return Err(Sent::Failed);
         }
         let blobs = cache::entry_blobs(&executed.entry);
         let missing: Vec<Hash> = blobs.filter(|blob| !self.cache.has_blob(blob)).copied().collect();
         self.worker.fetch_blobs(&self.cache, &missing);
-        Restore { cache: &self.cache, entry: executed.entry }.apply(dir).ok()
+        Restore { cache: &self.cache, entry: executed.entry }.apply(dir).map_err(|_| Sent::NotRun)
+    }
+    /// Mark the edge to run here, once it failed on the worker and succeeded here, as it depends on what it does not
+    /// declare or discover, until its first key changes.
+    fn mark_local(&self) {
+        if let Some(key) = &self.key {
+            self.cache.mark_local(key);
+        }
     }
 }
 
@@ -513,7 +541,15 @@ impl Run<'_, '_> {
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
                     let restored = lookup.and_then(|lookup| lookup.restore(dir));
                     let cached = restored.is_some();
-                    let ran = if cached { None } else { dispatch.and_then(|dispatch| dispatch.run(dir)) };
+                    let sent = match &dispatch {
+                        Some(dispatch) if !cached => dispatch.run(dir),
+                        _ => Sent::NotRun,
+                    };
+                    let (ran, failed_there) = match sent {
+                        Sent::Ran(printed) => (Some(printed), false),
+                        Sent::Failed => (None, true),
+                        Sent::NotRun => (None, false),
+                    };
                     let remote = ran.is_some();
                     let (outcome, output) = if let Some(printed) = restored.or(ran) {
                         (Outcome::Succeeded, printed)
@@ -524,6 +560,9 @@ impl Run<'_, '_> {
                         let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
                         run_command(&action, dir, console, &environment, &spawned)
                     };
+                    if failed_there && outcome.succeeded() && let Some(dispatch) = &dispatch {
+                        dispatch.mark_local();
+                    }
                     let duration = clock.elapsed();
                     let finished = Finished { index, outcome, output, start, duration, cached, remote };
                     let _ = sender.send(Message::Finished(finished));
@@ -537,7 +576,7 @@ impl Run<'_, '_> {
             // the workers are connected to at once, if an edge may run on one
             if (0..self.edges.len()).any(|index| self.remote_identity(index).is_some()) {
                 for worker in &self.options.workers {
-                    scope.spawn(|| worker.jobs());
+                    scope.spawn(|| worker.capabilities());
                 }
             }
             loop {
@@ -677,7 +716,7 @@ impl Run<'_, '_> {
         Some(entry.1)
     }
     /// Returns the edge of the highest priority which is ready to run and may run on a worker, with a worker which
-    /// has a free job and may have its toolchain, if there is one.
+    /// has a free job, and may run it, by what it reported of itself, if there is one.
     fn next_for_worker(&mut self) -> Option<(usize, usize)> {
         // a worker is connected to on a thread of its own, so that the build does not wait for it
         let free = |run: &Self, worker: usize| run.on_worker[worker] < run.options.workers[worker].connected_jobs();
@@ -694,8 +733,19 @@ impl Run<'_, '_> {
                 self.local_only.insert(index);
                 continue;
             };
+            let placement = self.graph.edge(self.edges[index]).placement();
+            let release = self.options.releases.get(identity).cloned().unwrap_or_default();
+            let needs = crate::worker::Needs {
+                identity,
+                release: if placement.any_host { &release.identity } else { "" },
+                install: &release.install,
+                target: placement.target.as_deref().unwrap_or_default(),
+                tags: &placement.tags,
+            };
             let worker = (0..self.options.workers.len()).find(|&worker| {
-                free(self, worker) && self.options.workers[worker].may_have(identity)
+                let worker_runs = |capabilities: Arc<crate::worker::Capabilities>| capabilities.may_run(&needs);
+                let remote = &self.options.workers[worker];
+                free(self, worker) && remote.may_have(identity) && remote.reported().is_some_and(worker_runs)
             });
             if let Some(worker) = worker {
                 self.ready.remove(&entry);
@@ -720,9 +770,16 @@ impl Run<'_, '_> {
         paths.all(|path| crate::worker::ups(path).is_some()).then_some(identity)
     }
     /// Returns how a started edge runs on a worker: with the inputs it declares now, and those it discovered when it
-    /// last ran, or `None` if one does not lead from the build's directory, when it runs here.
+    /// last ran, or `None` if one does not lead from the build's directory, or it is marked to run here, when it runs
+    /// here.
     fn dispatch(&mut self, index: usize, worker: usize) -> Option<Dispatch> {
         let edge = self.graph.edge(self.edges[index]);
+        let cache = self.options.cache.as_ref()?.without_remote();
+        let key = self.keys.get(&index).copied();
+        if key.is_some_and(|key| cache.is_local(&key)) {
+            self.local_only.insert(index);
+            return None;
+        }
         let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
         let declared = self.inputs.get(&index)?.iter().map(|(path, _)| path);
         let discovered = previous.discovered.iter().map(|(path, _)| path);
@@ -745,11 +802,17 @@ impl Run<'_, '_> {
                 env.push((name.clone(), value.to_string_lossy().into_owned()));
             }
         }
+        let identity = edge.cache()?;
+        let release = self.options.releases.get(identity).cloned().unwrap_or_default();
+        let placement = edge.placement();
         Some(Dispatch {
             worker: Arc::clone(&self.options.workers[worker]),
-            cache: self.options.cache.as_ref()?.without_remote(),
-            identity: edge.cache()?.to_string(),
-            install: self.options.installable.get(edge.cache()?).cloned().unwrap_or_default(),
+            cache,
+            key,
+            identity: identity.to_string(),
+            release: if placement.any_host { release.identity } else { String::new() },
+            install: release.install,
+            target: placement.target.clone().unwrap_or_default(),
             action: plan::relocated(self.action(index), &self.relocation),
             env,
             locating: self.options.locating.clone(),
@@ -1531,8 +1594,9 @@ mod tests {
         }
         let second = TempCache::new("workers-second");
         build.options.cache = Some(second.0.clone());
-        // which is connected to first, as the build does not wait for it
+        // which is connected to first, and reports what it has, as the build does not wait for it
         assert_eq!(build.options.workers[0].jobs(), 2);
+        assert!(build.options.workers[0].capabilities().is_ok());
         let (report, finished) = build.build(&[]);
         assert!(report.succeeded(), "{finished:?}");
         assert_eq!((report.ran, report.cached), (3, 0), "{finished:?}");
@@ -1547,7 +1611,7 @@ mod tests {
         // what ran on the worker is recorded, and added to the cache, as what ran here is
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         assert_eq!(second.0.stats().results, 3);
-        // a worker without the toolchain runs nothing, and is not asked again
+        // a worker without the toolchain is sent nothing
         for output in ["a.o", "b.o", "c.o"] {
             std::fs::remove_file(build.dir.join(output)).unwrap();
         }
@@ -1555,11 +1619,131 @@ mod tests {
         build.options.cache = Some(third.0.clone());
         let other = TempCache::new("workers-other");
         build.options.workers = vec![worker(&other, &["another toolchain"])];
-        assert_eq!(build.options.workers[0].jobs(), 2);
+        assert!(build.options.workers[0].capabilities().is_ok());
         let (report, finished) = build.build(&[]);
         assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
-        assert!(!build.options.workers[0].may_have("toolchain"));
+        assert_eq!(other.0.stats().blobs, 0);
         assert_eq!(build.read("b.o"), "b\nh\n");
+    }
+
+    /// The rule of an edge which is not cached, and takes long enough that it is the first to run, by how long it took
+    /// when it last ran, and holds the one job a build has, so that the others run on a worker, if they can.
+    const SLOW: &str = "sleep 0.3 && touch $out";
+
+    /// Remove outputs, so that their edges run again.
+    fn remove(build: &Build, outputs: &[&str]) {
+        for output in outputs {
+            std::fs::remove_file(build.dir.join(output)).unwrap();
+        }
+    }
+
+    #[test]
+    fn sends_edges_to_workers_which_can_run_them() {
+        use crate::worker::{Capabilities, Release, Toolchain};
+        // an edge which may run on another host, an edge for a target, and an edge which needs a tag
+        let any_host = crate::Placement { any_host: true, ..crate::Placement::default() };
+        let riscv = crate::Placement { target: Some("riscv".into()), ..crate::Placement::default() };
+        let gpu = crate::Placement { any_host: true, tags: vec!["gpu".into()], ..crate::Placement::default() };
+        let cc = "cat $in > $out && echo \"$out: $in\" > $out.d";
+        let graph = graph()
+            .rule("slow", &[("command", SLOW)])
+            .edge("slow", &["slow"], &[])
+            .cached("toolchain")
+            .rule("cc", &[("command", cc), ("depfile", "$out.d")])
+            .placed(any_host)
+            .edge("cc", &["portable.o"], &["portable.c"])
+            .placed(riscv)
+            .edge("cc", &["riscv.o"], &["riscv.c"])
+            .placed(gpu)
+            .edge("cc", &["gpu.o"], &["gpu.c"])
+            .finish();
+        let files = [("portable.c", "p\n"), ("riscv.c", "r\n"), ("gpu.c", "g\n")];
+        let mut build = Build::new("placed", graph, &files);
+        let first = TempCache::new("placed-first");
+        build.options.cache = Some(first.0.clone());
+        let release = Release { identity: "release".into(), install: String::new() };
+        build.options.releases.insert("toolchain".into(), release);
+        build.ran(&[]);
+        // a worker of another toolchain of the same release, as on another host, with no tags, and no standard
+        // library for the target, so that only the edge which may run on another host, and needs no tag, runs there
+        let (identity, release_identity) = ("elsewhere".into(), "release".into());
+        let elsewhere = Toolchain { identity, release_identity, ..Toolchain::default() };
+        let store = TempCache::new("placed-store");
+        let capabilities = Capabilities { toolchains: vec![elsewhere], ..Capabilities::default() };
+        let executor = crate::worker::Executor::new(store.0.dir().join("work"), 4, move || capabilities.clone());
+        let worker = Arc::new(crate::remote::served_worker(store.0.clone(), executor));
+        assert!(worker.capabilities().is_ok());
+        build.options.workers = vec![worker];
+        build.options.jobs = 1;
+        remove(&build, &["slow", "portable.o", "riscv.o", "gpu.o"]);
+        let second = TempCache::new("placed-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 1, "{finished:?}");
+        assert_eq!(build.read("portable.o"), "p\n");
+        let sent = |contents: &[u8]| store.0.has_blob(&crate::blake3::hash(contents));
+        assert!(sent(b"p\n") && !sent(b"r\n") && !sent(b"g\n"));
+    }
+
+    #[test]
+    fn marks_edges_which_fail_on_workers_to_run_here() {
+        let cc = "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d && echo compiled $out";
+        let hidden = "cat $in hidden > $out && echo \"$out: $in\" > $out.d";
+        let graph = graph()
+            .rule("slow", &[("command", SLOW)])
+            .edge("slow", &["slow"], &[])
+            .cached("toolchain")
+            .rule("cc", &[("command", cc), ("depfile", "$out.d")])
+            .rule("hidden", &[("command", hidden), ("depfile", "$out.d")])
+            .edge("cc", &["a.o"], &["a.c"])
+            .edge("hidden", &["c.o"], &["c.c"])
+            .finish();
+        let files = [("a.c", "a\n"), ("c.c", "c\n"), ("extra.h", "h\n"), ("hidden", "hidden\n")];
+        let mut build = Build::new("marks", graph, &files);
+        let first = TempCache::new("marks-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        build.options.jobs = 1;
+        // the edge which reads what it was not sent fails there, and runs here, so it is marked to run here
+        let store = TempCache::new("marks-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        assert!(build.options.workers[0].capabilities().is_ok());
+        remove(&build, &["slow", "a.o", "c.o"]);
+        let second = TempCache::new("marks-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 1, "{finished:?}");
+        assert_eq!(build.read("c.o"), "c\nhidden\n");
+        let marks = |cache: &TempCache| std::fs::read_dir(cache.0.dir().join("local")).map_or(0, Iterator::count);
+        assert_eq!(marks(&second), 1);
+        // so, with the mark, it is not sent again, while the other is, whose first key is not marked
+        let third = TempCache::new("marks-third");
+        std::fs::create_dir_all(third.0.dir().join("local")).unwrap();
+        for mark in std::fs::read_dir(second.0.dir().join("local")).unwrap().flatten() {
+            std::fs::copy(mark.path(), third.0.dir().join("local").join(mark.file_name())).unwrap();
+        }
+        let other = TempCache::new("marks-other");
+        build.options.workers = vec![worker(&other, &["toolchain"])];
+        assert!(build.options.workers[0].capabilities().is_ok());
+        remove(&build, &["slow", "a.o", "c.o"]);
+        build.options.cache = Some(third.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 1, "{finished:?}");
+        let sent = |contents: &[u8]| other.0.has_blob(&crate::blake3::hash(contents));
+        assert!(sent(b"a\n") && !sent(b"c\n"));
+        // and the cache's collection keeps a mark for a month, then removes it, so that the edge is tried there again
+        assert_eq!(marks(&third), 1);
+        let _ = third.0.gc(u64::MAX);
+        assert_eq!(marks(&third), 1);
+        let month = SystemTime::now() - Duration::from_hours(24 * 31);
+        for mark in std::fs::read_dir(third.0.dir().join("local")).unwrap().flatten() {
+            std::fs::File::options().write(true).open(mark.path()).unwrap().set_modified(month).unwrap();
+        }
+        let _ = third.0.gc(u64::MAX);
+        assert_eq!(marks(&third), 0);
     }
 
     #[test]

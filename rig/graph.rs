@@ -123,6 +123,18 @@ pub struct Edge {
     /// of the edge, so that it runs again when one changes. A cached edge, which runs in a hermetic environment,
     /// inherits only these and those which locate tools, as [`crate::exec::Options::locating`] lists.
     pub pass_env: Vec<String>,
+    /// Which workers a cached edge may run on.
+    pub placement: Placement,
+}
+
+/// Which workers a cached edge may run on, beside those whose toolchain has its identity: whether it may run with the
+/// same release of its toolchain on another host, as what it writes does not depend on the host, the target whose
+/// standard library it needs, if it needs the toolchain's, and the tags a worker must have.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Placement {
+    pub any_host: bool,
+    pub target: Option<String>,
+    pub tags: Vec<String>,
 }
 
 /// The lists of nodes of an edge, in the order they are stored.
@@ -143,6 +155,7 @@ struct EdgeData {
     hashed: bool,
     cache: Option<String>,
     pass_env: Vec<String>,
+    placement: Placement,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
 }
@@ -256,6 +269,7 @@ impl Graph {
             hashed: edge.hashed,
             cache: edge.cache,
             pass_env: edge.pass_env,
+            placement: edge.placement,
             lists,
         });
         Ok(id)
@@ -407,6 +421,11 @@ impl<'a> EdgeRef<'a> {
     pub fn cache(&self) -> Option<&'a str> {
         self.data.cache.as_deref()
     }
+    /// Which workers the edge may run on, if it is cached.
+    #[must_use]
+    pub fn placement(&self) -> &'a Placement {
+        &self.data.placement
+    }
     /// Returns the edge as it would be added to a graph.
     #[must_use]
     pub fn to_edge(&self) -> Edge {
@@ -425,6 +444,7 @@ impl<'a> EdgeRef<'a> {
             hashed: self.data.hashed,
             cache: self.data.cache.clone(),
             pass_env: self.data.pass_env.clone(),
+            placement: self.data.placement.clone(),
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {
