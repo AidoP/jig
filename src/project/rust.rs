@@ -91,6 +91,11 @@ impl Crate {
     }
     /// The library built again without `panic`, for the test harnesses and procedural macros which link it, which
     /// unwind.
+    /// The metadata of a library, which rustc writes beside it before it has compiled it, which the libraries which use
+    /// it are compiled against, so that they start once it is written.
+    pub fn metadata(&self) -> PathBuf {
+        self.dir.join(format!("lib{}.rmeta", self.name))
+    }
     pub fn unwind_output(&self) -> PathBuf {
         self.dir.join("unwind").join(format!("lib{}.rlib", self.name))
     }

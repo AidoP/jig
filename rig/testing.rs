@@ -6,12 +6,12 @@ use crate::ninja::{Build, Manifest};
 
 /// Returns a graph to build, with its statements added in turn.
 pub(crate) fn graph() -> Graphs {
-    Graphs(Manifest::new(), false, None, crate::Placement::default())
+    Graphs(Manifest::new(), false, None, crate::Placement::default(), Vec::new())
 }
 
 /// The statements of a graph, whether the edges added are hashed, what identifies them in a cache if they are cached,
-/// and which workers they may run on.
-pub(crate) struct Graphs(Manifest, bool, Option<String>, crate::Placement);
+/// which workers they may run on, and the outputs the next edge reports early.
+pub(crate) struct Graphs(Manifest, bool, Option<String>, crate::Placement, Vec<String>);
 
 impl Graphs {
     pub(crate) fn variable(mut self, name: &str, value: &str) -> Self {
@@ -31,6 +31,11 @@ impl Graphs {
     /// Place the edges added from now on, which workers they may run on.
     pub(crate) fn placed(mut self, placement: crate::Placement) -> Self {
         self.3 = placement;
+        self
+    }
+    /// Have the next edge report these of its outputs before it finishes, as rustc does.
+    pub(crate) fn early(mut self, outputs: &[&str]) -> Self {
+        self.4 = outputs.iter().map(|&output| output.into()).collect();
         self
     }
     pub(crate) fn rule(mut self, name: &str, bindings: &[(&str, &str)]) -> Self {
@@ -63,6 +68,8 @@ impl Graphs {
     ) -> Result<(), Error> {
         let [outputs, implicit_outputs, ..] = split(outputs);
         let [inputs, implicit, order_only] = split(inputs);
+        let early = std::mem::take(&mut self.4);
+        let early: Vec<&str> = early.iter().map(String::as_str).collect();
         let build = Build {
             rule,
             outputs: &outputs,
@@ -77,6 +84,7 @@ impl Graphs {
             pass_env: Vec::new(),
             placement: self.3.clone(),
             discover: None,
+            early: &early,
         };
         self.0.build(&build)
     }

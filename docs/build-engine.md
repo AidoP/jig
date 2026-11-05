@@ -1430,7 +1430,37 @@ implementation of that trait, so `generate.rs` doesn't change.
        `extra.h` changes.
      - Integration: a fresh checkout's first build only for workers runs all six commands there, `mod inner;` among
        what is found. Its libraries are the same, byte for byte, as another checkout's built here.
-2. **Pipelining.** Start dependents from `.rmeta`, using early outputs.
+2. **Done:** pipelining (graph format version 8).
+   - **`Edge::early`.** An edge may name some of its outputs as early: ones it writes, and reports, before it has
+     finished. rustc does so with `--json=artifacts`, writing a notice on stderr once a crate's metadata is written.
+     - A manifest for rig gives them in a build statement; ninja has no way to, so jig gives rig them instead.
+     - An early output must be one of the edge's outputs.
+   - **Releasing dependents.** A dependent which needs only an edge's early outputs, as each of its inputs that the
+     edge produces is one, and none is reached through an alias, starts once the edge has reported them all, rather
+     than once it has finished. Each is stamped afresh as it's reported. The edge's own completion is then not waited
+     for by that dependent, but still is by the build.
+   - **What rustc prints.** With `--error-format=json`, rustc writes its diagnostics as JSON, so the job reads its
+     stderr a line at a time, tells the build of each artifact, and keeps each diagnostic's `rendered` text, which is
+     what it would have printed. A line which isn't JSON, as from a linker, or a panic, is kept as it is. `rig/json.rs`
+     is a small parser for it, with no dependency.
+     - `--color` can't be given with `--json`, so the colours are asked for by `diagnostic-rendered-ansi`.
+   - **jig's crates.** A library is built with `--emit=metadata=lib<name>.rmeta` as an early output, and a library
+     which uses it is compiled against that, with `--extern name=lib<name>.rmeta`. What links, as a program, or a
+     test harness, uses the `.rlib`s, and depends on those of each library it reaches through others, as the linker
+     reads them all.
+     - A library which isn't tested doesn't depend on those `.rlib`s, so a chain of libraries is compiled as fast as
+       their metadata is written.
+   - **Not done yet:** an edge which runs on a worker reports its early outputs only once it has finished, since
+     the protocol sends what it printed at the end. Its dependents start then, as before.
+   - **Tests.**
+     - rig, json: values, escapes, and too deep nesting parsed; what rustc writes read as artifacts, diagnostics and
+       other lines.
+     - rig, graph: an edge's early outputs saved and loaded. ninja: an early output which isn't an output is an error.
+     - rig, exec: an edge which reports its early output, then sleeps, has its dependent finish before it does, while
+       one which needs all of its outputs waits.
+     - Integration: the expectations of what `build.ninja` holds now have libraries' externs as `.rmeta`, and a
+       program's as `.rlib`. A library whose code takes a while to generate has the library which uses it finish
+       before it, and the program after; the warning rustc gave is shown as it would have printed it, with no JSON.
 3. **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
    and what tests need.
 4. **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.

@@ -21,7 +21,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -100,6 +100,7 @@ impl Graph {
                     w.exec(exec);
                 },
             }
+            w.nodes(edge.early());
             for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
                 w.nodes(list);
             }
@@ -183,6 +184,7 @@ impl Graph {
                 2 => Some(Action::Exec(r.exec()?)),
                 _ => return Err(Error::Format("unknown kind of discovery")),
             };
+            let early = r.nodes(nodes)?;
             let edge = Edge {
                 kind,
                 description,
@@ -200,6 +202,7 @@ impl Graph {
                 pass_env,
                 placement,
                 discover,
+                early,
             };
             graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
@@ -354,6 +357,7 @@ mod tests {
                 cache: Some("toolchain".into()),
                 pass_env: vec!["CC".into(), "CFLAGS".into()],
                 discover: Some(Action::Shell("cc -M a.c > a.o.d".into())),
+                early: vec![c],
                 placement: crate::Placement {
                     any_host: true,
                     target: Some("riscv64gc".into()),

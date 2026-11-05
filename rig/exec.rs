@@ -35,6 +35,11 @@
 //! edge which has not run before, and has no action which discovers its inputs, still runs here, as does one which
 //! fails on a worker, or which it cannot be sent.
 //!
+//! An edge with early outputs, as rustc's metadata of a crate, reports them as it runs, as rustc does with
+//! `--json=artifacts`, and an edge which needs only them of its outputs starts once they are, rather than once it has
+//! finished. What such an edge writes is read as it is written, and what rustc would have printed is shown and kept,
+//! rather than its JSON, as for what it printed on a worker.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -181,6 +186,8 @@ enum Message {
     Finished(Finished),
     /// An edge which was sent to a worker, which did not run it, or failed it, given back to run here.
     Returned(Box<Job>),
+    /// An edge has written one of its early outputs, which it reported.
+    Early(usize, NodeId),
 }
 
 /// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and where its
@@ -196,6 +203,8 @@ struct Job {
     dispatch: Option<Dispatch>,
     /// The cache and first key it is marked to run here by if it succeeds, as it failed on a worker.
     mark: Option<(Cache, Hash)>,
+    /// The early outputs it reports, by their paths, if it has any, as it writes what rustc writes with JSON.
+    early: Option<Arc<Vec<(String, NodeId)>>>,
 }
 
 /// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
@@ -246,7 +255,8 @@ impl Dispatch {
         let mut paths = self.inputs.clone();
         // an edge which has not run discovers its inputs here first, as it runs here otherwise, which shows why
         if let Some((action, depfile)) = &self.discovery {
-            let environment = Environment { makeflags: None, env: &self.env, inherit: Some(&self.locating) };
+            let environment =
+                Environment { makeflags: None, env: &self.env, inherit: Some(&self.locating), reports: None };
             let (outcome, _) = run_command(action, dir, false, &environment, &|_| ());
             if !outcome.succeeded() {
                 return Err(Sent::NotRun);
@@ -445,11 +455,25 @@ pub fn build(
         local_only: HashSet::new(),
         stop: Arc::default(),
         returned: std::collections::VecDeque::new(),
+        early_deps: HashSet::new(),
+        reported: HashMap::new(),
+        released: HashSet::new(),
         started: HashMap::new(),
         on_workers: HashSet::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
+    }
+    // which dependents need only the early outputs of the edges they depend on
+    for (dependency, dependents) in run.dependents.iter().enumerate() {
+        if run.graph.edge(run.edges[dependency]).early().is_empty() {
+            continue;
+        }
+        for &dependent in dependents {
+            if early_only(run.graph, run.state, run.edges[dependent], run.edges[dependency]) {
+                run.early_deps.insert((dependent, dependency));
+            }
+        }
     }
     run.status = vec![Status::Waiting; run.edges.len()];
     run.progress.total = run.edges.len();
@@ -481,6 +505,37 @@ fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[
         priority[index] = duration.saturating_add(longest);
     }
     priority
+}
+
+/// Whether an edge needs only the early outputs of another of the edges it depends on: each of its inputs, declared
+/// and discovered, which the other produces is one of them, and none is the output of an alias, which may lead to the
+/// others.
+fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeId) -> bool {
+    let early = graph.edge(dependency).early();
+    let data = graph.edge(dependent);
+    let declared = data.inputs().iter().chain(data.implicit()).chain(data.order_only());
+    let mut nodes: Vec<NodeId> = declared.copied().collect();
+    nodes.extend(plan::discovered_nodes(graph, state, dependent));
+    let mut needs = false;
+    for node in nodes {
+        match graph.producer(node) {
+            Some(producer) if producer == dependency => {
+                if !early.contains(&node) {
+                    return false;
+                }
+                needs = true;
+            },
+            Some(producer) if *graph.edge(producer).kind() == EdgeKind::Alias => return false,
+            _ => (),
+        }
+    }
+    needs
+}
+
+/// Whether two paths relative to the build's directory are of the same file, with or without `./` before them.
+fn same_path(lhs: &str, rhs: &str) -> bool {
+    let trim = |path: &str| path.trim_start_matches("./").to_string();
+    trim(lhs) == trim(rhs)
 }
 
 /// Returns the edges in the plan which an edge depends on, through aliases, by its inputs, declared and discovered.
@@ -569,6 +624,13 @@ struct Run<'g, 's> {
     stop: Arc<AtomicBool>,
     /// The edges which workers gave back, which run here once one of the build's jobs is free, in the order given.
     returned: std::collections::VecDeque<Job>,
+    /// The dependents, and the edges they depend on, which need only the early outputs of those edges.
+    early_deps: HashSet<(usize, usize)>,
+    /// The early outputs each running edge has reported.
+    reported: HashMap<usize, HashSet<NodeId>>,
+    /// The dependents, and the edges they depend on, which no longer wait for them, as they reported their early
+    /// outputs.
+    released: HashSet<(usize, usize)>,
     /// When each running edge started.
     started: HashMap<usize, Instant>,
     /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
@@ -596,7 +658,7 @@ impl Run<'_, '_> {
             move || {
                 // the lock is held while waiting for a job, which the other threads wait for in turn
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
-                    let Job { index, action, console, lookup, inherit, dispatch, mark } = job;
+                    let Job { index, action, console, lookup, inherit, dispatch, mark, early } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
@@ -607,6 +669,10 @@ impl Run<'_, '_> {
                         _ => Sent::NotRun,
                     };
                     let (ran, failed_there) = match sent {
+                        // what a worker printed is what the edge wrote, which is rendered as it is here
+                        Sent::Ran(printed) if early.is_some() => {
+                            (Some(crate::json::rendered(&printed, &mut |_| ())), false)
+                        },
                         Sent::Ran(printed) => (Some(printed), false),
                         Sent::Failed => (None, true),
                         Sent::NotRun => (None, false),
@@ -617,7 +683,7 @@ impl Run<'_, '_> {
                     let given_back = !cached && !remote && !stop.load(Ordering::SeqCst);
                     if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
                         let mark = dispatch.mark().filter(|_| failed_there);
-                        let job = Job { index, action, console, lookup: None, inherit, dispatch: None, mark };
+                        let job = Job { index, action, console, lookup: None, inherit, dispatch: None, mark, early };
                         let _ = sender.send(Message::Returned(Box::new(job)));
                         continue;
                     }
@@ -630,7 +696,16 @@ impl Run<'_, '_> {
                         let spawned = |pid| {
                             let _ = sender.send(Message::Spawned(index, pid));
                         };
-                        let environment = Environment { makeflags, env, inherit: inherit.as_deref() };
+                        // each early output which is reported is told, as it is
+                        let reported = |path: &str| {
+                            let outputs = early.iter().flat_map(|early| early.iter());
+                            let reported = outputs.filter(|(output, _)| same_path(output, path));
+                            for &(_, node) in reported {
+                                let _ = sender.send(Message::Early(index, node));
+                            }
+                        };
+                        let reports: Option<&dyn Fn(&str)> = early.as_ref().map(|_| &reported as &dyn Fn(&str));
+                        let environment = Environment { makeflags, env, inherit: inherit.as_deref(), reports };
                         run_command(&action, dir, console, &environment, &spawned)
                     };
                     if outcome.succeeded() && let Some((cache, key)) = &mark {
@@ -758,7 +833,8 @@ impl Run<'_, '_> {
                         None => self.local += 1,
                     }
                     // a thread for each job takes it, as no more run than there are jobs
-                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark: None });
+                    let early = self.early_outputs(index);
+                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark: None, early });
                 }
                 // the build goes on while an edge waits for a worker which is connecting
                 if self.progress.running == 0 && !self.waiting_for_workers() {
@@ -776,6 +852,7 @@ impl Run<'_, '_> {
                             }
                         }
                     },
+                    Ok(Message::Early(index, node)) => self.early(index, node),
                     Ok(Message::Returned(job)) => {
                         let job = *job;
                         // the worker's job is free, and the edge is not sent to one again
@@ -1010,6 +1087,30 @@ impl Run<'_, '_> {
             discovery,
         })
     }
+    /// Returns the early outputs of an edge, by their paths, if it has any.
+    fn early_outputs(&self, index: usize) -> Option<Arc<Vec<(String, NodeId)>>> {
+        let early = self.graph.edge(self.edges[index]).early();
+        let paths = || early.iter().map(|&node| (self.graph.path(node).to_string(), node)).collect();
+        (!early.is_empty()).then(|| Arc::new(paths()))
+    }
+    /// An edge has written an early output, which is stamped afresh, and once it has written each, the edges which
+    /// need only them are no longer waiting for it.
+    fn early(&mut self, index: usize, node: NodeId) {
+        self.stamps.forget(node);
+        let reported = self.reported.entry(index).or_default();
+        reported.insert(node);
+        if reported.len() < self.graph.edge(self.edges[index]).early().len() {
+            return;
+        }
+        for dependent in self.dependents[index].clone() {
+            if self.early_deps.contains(&(dependent, index)) && self.released.insert((dependent, index)) {
+                self.waiting[dependent] -= 1;
+                if self.waiting[dependent] == 0 {
+                    self.make_ready(dependent);
+                }
+            }
+        }
+    }
     fn make_ready(&mut self, index: usize) {
         self.ready.insert((std::cmp::Reverse(self.priority[index]), index));
     }
@@ -1029,6 +1130,10 @@ impl Run<'_, '_> {
     /// A hashed edge is checked again whatever the edges it depends on did, as it compares the contents of its inputs,
     /// rather than whether they were built again.
     fn restat_clean(&mut self, index: usize) -> bool {
+        // what started before an edge it depends on finished does not know whether its outputs changed
+        if self.deps[index].iter().any(|&dep| !matches!(self.status[dep], Status::Done { .. })) {
+            return false;
+        }
         let unchanged = |dep: &usize| self.status[*dep] == Status::Done { changed: false };
         let hashed = self.graph.edge(self.edges[index]).hashed();
         let rebuilt = matches!(self.reasons[index], Reason::InputRebuilt(_));
@@ -1222,6 +1327,10 @@ impl Run<'_, '_> {
     fn done(&mut self, index: usize, changed: bool) {
         self.status[index] = Status::Done { changed };
         for dependent in self.dependents[index].clone() {
+            // one which started once the edge's early outputs were written does not wait for it
+            if self.released.contains(&(dependent, index)) {
+                continue;
+            }
             self.waiting[dependent] -= 1;
             if self.waiting[dependent] == 0 {
                 self.make_ready(dependent);
@@ -1269,6 +1378,9 @@ pub(crate) struct Environment<'a> {
     pub(crate) env: &'a [(String, String)],
     /// The variables rig is run with which a hermetic command inherits, or `None` if it inherits every one.
     pub(crate) inherit: Option<&'a [String]>,
+    /// For a command which writes what rustc writes with JSON, what is told the path of each artifact it reports, as it
+    /// is reported, while what it would have printed is kept.
+    pub(crate) reports: Option<&'a dyn Fn(&str)>,
 }
 
 /// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
@@ -1358,7 +1470,29 @@ pub(crate) fn run_command(
     };
     spawned(child.id());
     let mut output = Vec::new();
-    let read = reader.read_to_end(&mut output);
+    let read = match environment.reports {
+        None => reader.read_to_end(&mut output),
+        // each line is read as it is written, so that an artifact is told as soon as it is reported
+        Some(reports) => {
+            use std::io::BufRead;
+            let mut reader = std::io::BufReader::new(reader);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => break Ok(0),
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&line);
+                        match crate::json::message(text.trim_end_matches(['\n', '\r'])) {
+                            crate::json::Message::Artifact(path) => reports(&path),
+                            crate::json::Message::Printed(printed) => output.extend_from_slice(printed.as_bytes()),
+                        }
+                    },
+                    Err(error) => break Err(error),
+                }
+            }
+        },
+    };
     let outcome = match (child.wait(), read) {
         (Ok(status), Ok(_)) if status.success() => Outcome::Succeeded,
         (Ok(status), Ok(_)) => Outcome::Failed(status),
@@ -2044,6 +2178,42 @@ mod tests {
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         build.write("extra.h", "changed\n");
         assert_eq!(build.ran(&[]).len(), 2);
+    }
+
+    #[test]
+    fn starts_what_needs_early_outputs_once_they_are_written() {
+        // an edge which writes its metadata, reports it as rustc does, prints a diagnostic, and goes on for a while,
+        // before it writes the rest
+        // as a ninja file has it, with `$` escaped, and printed with `printf`, which `sh` does not take escapes in
+        let artifact = r#"{"$$message_type":"artifact","artifact":"a.meta","emit":"metadata"}"#;
+        let diagnostic = r#"{"$$message_type":"diagnostic","message":"unused","rendered":"warning: unused\n"}"#;
+        let report = |json: &str| format!("printf '%s\\n' '{json}' >&2");
+        let compile = format!(
+            "echo meta > a.meta && {} && {} && sleep 0.5 && echo all > a.out",
+            report(artifact),
+            report(diagnostic),
+        );
+        let graph = graph()
+            .rule("compile", &[("command", &compile)])
+            .early(&["a.meta"])
+            .edge("compile", &["a.out", "|", "a.meta"], &[])
+            .rule("cp", &[("command", "cp $in $out")])
+            .edge("cp", &["b.out"], &["a.meta"])
+            .edge("cp", &["c.out"], &["a.out"])
+            .finish();
+        let mut build = Build::new("early", graph, &[]);
+        build.options.jobs = 4;
+        let clock = Instant::now();
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        // what needs only the metadata finishes before what wrote it, while what needs the rest waits for it
+        let order: Vec<&str> = finished.iter().map(|(output, _)| output.as_str()).collect();
+        assert_eq!(order, ["b.out", "a.out", "c.out"], "{:?}", clock.elapsed());
+        assert_eq!(build.read("b.out"), "meta\n");
+        // what it would have printed is shown, rather than its JSON
+        assert_eq!(finished[1].1, "warning: unused\n");
+        // and once it is up to date, nothing runs
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
     }
 
     #[test]

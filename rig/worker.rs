@@ -441,7 +441,8 @@ impl Executor {
         let given = request.env.iter().filter(|(name, _)| !chosen.contains(&name.as_str()));
         let mut env: Vec<_> = given.cloned().collect();
         env.extend(toolchain.env.iter().cloned());
-        let environment = crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating) };
+        let environment =
+            crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating), reports: None };
         let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, spawned);
         let mut outputs = Vec::new();
         for path in &request.outputs {

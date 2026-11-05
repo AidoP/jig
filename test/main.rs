@@ -195,8 +195,9 @@ impl Output {
     /// Returns the `build` statement for an output, including its variables.
     #[track_caller]
     fn build(&self, output: &str) -> &str {
-        let prefix = format!("build {output}:");
-        let Some(start) = self.ninja.find(&prefix) else {
+        // a library has its metadata as an implicit output, after `|`
+        let found = |prefix: String| self.ninja.find(&prefix);
+        let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} |"))) else {
             panic!("no build statement for {output:?}:\n{}", self.ninja);
         };
         let rest = &self.ninja[start..];
@@ -204,7 +205,7 @@ impl Output {
     }
     /// Returns the outputs of the crates' `build` statements, rather than their checks.
     fn outputs(&self) -> Vec<&str> {
-        let outputs = self.ninja.lines().filter_map(|line| line.strip_prefix("build ")?.split(':').next());
+        let outputs = self.ninja.lines().filter_map(|line| line.strip_prefix("build ")?.split([':', ' ']).next());
         outputs.filter(|output| Path::new(output).extension().is_some_and(|extension| extension == "rlib")).collect()
     }
 }
@@ -348,17 +349,22 @@ crate kernel 'kernel.rs'
 ")]);
     let host = project.host();
     let output = project.configure().ok();
-    let core = format!("{host}/libcore.rlib");
+    // a library is compiled against the metadata of the libraries it uses
+    let (core, core_metadata) = (format!("{host}/libcore.rlib"), format!("{host}/libcore.rmeta"));
     let compiler_builtins = format!("{host}/libcompiler_builtins.rlib");
+    let compiler_builtins_metadata = format!("{host}/libcompiler_builtins.rmeta");
 
     let app = output.build(&format!("{host}/libapp.rlib"));
-    assert_contains(app, &format!("| {compiler_builtins} {core}\n"));
-    assert_contains(app, &format!("--extern compiler_builtins={compiler_builtins} --extern core={core}"));
+    assert_contains(app, &format!("| {compiler_builtins_metadata} {core_metadata}\n"));
+    assert_contains(
+        app,
+        &format!("--extern compiler_builtins={compiler_builtins_metadata} --extern core={core_metadata}"),
+    );
 
     // builtins only receive the crates they use
     let core_build = output.build(&core);
     assert!(!core_build.contains("--extern"), "{core_build}");
-    assert_contains(output.build(&compiler_builtins), &format!("--extern core={core}"));
+    assert_contains(output.build(&compiler_builtins), &format!("--extern core={core_metadata}"));
 
     // builtins are only passed to crates for the same target
     let kernel = output.build("riscv64gc-unknown-none-elf/libkernel.rlib");
@@ -368,15 +374,24 @@ crate kernel 'kernel.rs'
 #[test]
 fn use_adds_dependency() {
     let project = Project::new("use", &[
-        ("Jig", "declare name\n    default 'util'\ncrate app 'app.rs'\n    use {name}\nuse 'util'\n"),
+        (
+            "Jig",
+            "declare name\n    default 'util'\ncrate app 'app.rs'\n    use {name}\ncrate tool 'tool.rs'\n    \
+             crate-type 'bin'\n    use {name}\nuse 'util'\n",
+        ),
         ("util/Jig", "crate util\n"),
     ]);
     let host = project.host();
     let output = project.configure().ok();
-    let util = format!("{host}/libutil.rlib");
+    // a library is compiled against the metadata of the libraries it uses
+    let util = format!("{host}/libutil.rmeta");
     let app = output.build(&format!("{host}/libapp.rlib"));
     assert_contains(app, &format!("| {util}\n"));
     assert_contains(app, &format!("--extern util={util}"));
+    // while what links uses their libraries
+    let util = format!("{host}/libutil.rlib");
+    let tool = output.build(&format!("{host}/tool"));
+    assert_contains(tool, &format!("--extern util={util}"));
 }
 
 #[test]
@@ -1816,6 +1831,51 @@ fn remote_cache() {
     let output = build(&third, &local, &[("JIG_REMOTE_CACHE", "/usr/bin/env JIG_CACHE=off jig-no-such-server")]);
     assert_contains(&output, "warning: the remote cache failed, so the build went on without it");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pipelines_libraries() {
+    use std::fmt::Write as _;
+    if !rig_engine() {
+        return;
+    }
+    // a library whose code takes a while to generate, once its metadata is written, which another library uses, and a
+    // program which uses that one
+    let mut a = String::from("pub fn value() -> u64 { 42 }\n");
+    for i in 0..150 {
+        let _ = write!(a, "pub fn f{i}(mut x: u64) -> u64 {{ for _ in 0..x {{ ");
+        for j in 0..60 {
+            let _ = write!(a, "x = x.wrapping_mul({}).rotate_left({}) ^ (x >> {}); ", i + j, j % 7, j % 5);
+        }
+        let _ = writeln!(a, "}} x }}");
+    }
+    let project = Project::new("pipelines", &[
+        (
+            "Jig",
+            "set codegen/opt-level 3\ncrate a 'a.rs'\ncrate b 'b.rs'\n    use a\ncrate app 'app.rs'\n    crate-type 'bin'\n    \
+             use b\n",
+        ),
+        ("a.rs", &a),
+        ("b.rs", "pub fn value() -> u64 { let unused = 1; a::value() }\n"),
+        ("app.rs", "fn main() { print!(\"{}\", b::value()); }\n"),
+    ]);
+    let mut command = jig_command();
+    let output = command.args(["build", "-j", "4"]).env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+    let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+    assert!(output.status.success(), "{shown}");
+    // the library which uses the other is built once the other's metadata is written, before the other is, and the
+    // program, which links both, once both are
+    let host = project.host();
+    let finished = |path: &str| {
+        shown.find(&format!(" RUSTC {host}/{path}\n")).unwrap_or_else(|| panic!("{path}: {shown}"))
+    };
+    assert!(finished("libb.rlib") < finished("liba.rlib"), "{shown}");
+    assert!(finished("liba.rlib") < finished("app"), "{shown}");
+    // what rustc printed is shown as it would have printed it, rather than its JSON
+    assert_contains(&shown, "warning: unused variable: `unused`");
+    assert!(!shown.contains("$message_type"), "{shown}");
+    let ran = Command::new(project.dir.join(format!("build/{host}/app"))).output().unwrap();
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "42");
 }
 
 #[test]
@@ -3357,7 +3417,7 @@ custom image
     // everything which is built is in the build directory, with `build.ninja`, as ninja runs there
     assert!(!project.dir.join("build").exists());
     let ninja = project.ninja_in("out");
-    assert_contains(&ninja, &format!("\nbuild {host}/libkernel.rlib: rustc ../kernel.rs\n"));
+    assert_contains(&ninja, &format!("\nbuild {host}/libkernel.rlib | {host}/libkernel.rmeta: rustc ../kernel.rs\n"));
     assert_contains(&ninja, &format!("-L dependency={host}"));
     assert_contains(&ninja, &format!("\nbuild {host}/test/kernel: rustc ../kernel.rs\n"));
     assert_contains(&ninja, &format!("\nbuild {host}/check/libkernel.rmeta | {host}/check/kernel.json: rustc-check"));
@@ -3432,7 +3492,7 @@ fn rebased_paths() {
     assert_contains(&ninja, &format!("\nrule configure\n    command = cd '{dir}' && '{dir}/build/jig' generate 'Jig'\n"));
     assert_contains(&ninja, "\nbuild build.ninja: configure ../Jig | jig\n");
     assert_contains(&ninja, "\nbuild jig: custom ../app.rs\n");
-    assert_contains(&ninja, &format!("\nbuild {host}/libapp.rlib: rustc ../app.rs\n"));
+    assert_contains(&ninja, &format!("\nbuild {host}/libapp.rlib | {host}/libapp.rmeta: rustc ../app.rs\n"));
     // rustc writes its working directory as the project root, and the paths of sources relative to it, other than in
     // its dep-info, which ninja reads
     assert_contains(&ninja, &format!("flags = '--remap-path-prefix={dir}/build=.' '--remap-path-prefix=..=' --target="));
@@ -3503,7 +3563,7 @@ target my-kernel
     assert!(spec.ends_with(",\n  \"disable-redzone\": true,\n  \"os\": \"bluemetal\"\n}\n"), "{spec}");
     // crates for the target use its specification
     assert_contains(output.build("my-kernel/libkernel.rlib"), "\
-build my-kernel/libkernel.rlib: rustc ../kernel.rs | targets/my-kernel.json
+build my-kernel/libkernel.rlib | my-kernel/libkernel.rmeta: rustc ../kernel.rs | targets/my-kernel.json
     crate-name = kernel
     crate-type = lib
     flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel");
@@ -3629,7 +3689,7 @@ crate app 'app.rs'
     expected.sort();
     assert_eq!(outputs, expected);
     assert_contains(output.build(&format!("{host}/libutil.rlib")), &format!(
-        "--extern core={host}/libcore.rlib",
+        "--extern core={host}/libcore.rmeta",
     ));
 }
 
@@ -3789,7 +3849,7 @@ build my-kernel/kernel: rustc ../kernel.rs | targets/my-kernel.json ../kernel/li
     assert!(!spec.contains("link.x"), "{spec}");
     // a library is not linked, but its test harness is
     assert_contains(output.build("my-kernel/libutil.rlib"), "\
-build my-kernel/libutil.rlib: rustc ../util.rs | targets/my-kernel.json
+build my-kernel/libutil.rlib | my-kernel/libutil.rmeta: rustc ../util.rs | targets/my-kernel.json
     crate-name = util
     crate-type = lib
     flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel\n");
@@ -4587,7 +4647,8 @@ fn unwinds() { panic!(\"caught by the harness\"); }
     // the libraries abort, and the test harnesses and the procedural macro, which unwind, link copies of those which
     // abort, or depend on one which does, as `panic` changes the hash of a crate
     assert_contains(output.build(&format!("{host}/libbase.rlib")), "-C panic=abort");
-    assert_contains(output.build(&format!("{host}/libutil.rlib")), &format!("-C panic=abort --extern base={host}/libbase.rlib"));
+    let util = output.build(&format!("{host}/libutil.rlib"));
+    assert_contains(util, &format!("-C panic=abort --extern base={host}/libbase.rmeta"));
     let copies = format!("-L dependency={host}/unwind");
     let base = output.build(&format!("{host}/unwind/libbase.rlib"));
     assert!(!base.contains("panic") && !base.contains(&copies), "{base}");
@@ -5985,8 +6046,10 @@ log note '{kernel.use} | {other.use} | {third.use} | {len(none.use)}'
     // the crates of a list are used, which may be chosen by a property, or be references to crates already declared
     output.stderr("note: uart plic | virtio uart | plic | 0\n");
     let externs = |crate_name: &str| output.build(&format!("{host}/lib{crate_name}.rlib")).to_string();
-    assert_contains(&externs("kernel"), &format!("--extern plic={host}/libplic.rlib --extern uart={host}/libuart.rlib"));
-    assert_contains(&externs("other"), &format!("--extern uart={host}/libuart.rlib --extern virtio={host}/libvirtio.rlib"));
+    let kernel = format!("--extern plic={host}/libplic.rmeta --extern uart={host}/libuart.rmeta");
+    assert_contains(&externs("kernel"), &kernel);
+    let other = format!("--extern uart={host}/libuart.rmeta --extern virtio={host}/libvirtio.rmeta");
+    assert_contains(&externs("other"), &other);
     assert!(!externs("none").contains("--extern"), "{}", externs("none"));
     let project = Project::new("use-list-errors", &[("Jig", "crate app 'app.rs'\n    use [1]\n")]);
     project.configure().failed().stderr("error[invalid-operand]: list value used where list of crate names is required");
