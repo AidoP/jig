@@ -20,6 +20,12 @@
 //! sent to the worker, as [`crate::worker`] describes, which runs it, and its outputs are fetched, and restored as from
 //! the cache. If it cannot, or the action fails there, it runs here, on the thread which waited for the worker.
 //!
+//! An edge goes to a worker only if sending its files and fetching its outputs is estimated to take less time than it
+//! would wait for one of the build's own jobs: the least time one of the edges which run here has left, by how long it
+//! took when it last ran. Sending is estimated by the size of its files when it last ran, but for those the worker has
+//! from this build, as it wrote or was sent them, and the link's latency and bandwidth, as they are measured. An
+//! interrupted build has its workers interrupt what they run for it, which does not then run here.
+//!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
 //! from, then read the graph again if that ran, as ninja does.
 
@@ -245,7 +251,10 @@ impl Dispatch {
         }
         let blobs = cache::entry_blobs(&executed.entry);
         let missing: Vec<Hash> = blobs.filter(|blob| !self.cache.has_blob(blob)).copied().collect();
-        self.worker.fetch_blobs(&self.cache, &missing);
+        let fetching = Instant::now();
+        let fetched = self.worker.fetch_blobs(&self.cache, &missing);
+        let size = |blob: &Hash| std::fs::metadata(self.cache.blob_path(blob)).map_or(0, |metadata| metadata.len());
+        self.worker.measured(fetched.iter().map(size).sum(), fetching.elapsed());
         Restore { cache: &self.cache, entry: executed.entry }.apply(dir).map_err(|_| Sent::NotRun)
     }
     /// Mark the edge to run here, once it failed on the worker and succeeded here, as it depends on what it does not
@@ -396,6 +405,9 @@ pub fn build(
         sent: HashMap::new(),
         spawned: vec![false; options.workers.len()],
         local_only: HashSet::new(),
+        stop: Arc::default(),
+        started: HashMap::new(),
+        on_workers: HashSet::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -514,6 +526,12 @@ struct Run<'g, 's> {
     spawned: Vec<bool>,
     /// The edges which cannot run on a worker.
     local_only: HashSet<usize>,
+    /// Set once the build is interrupted, so that an edge which a worker was interrupted running does not run here.
+    stop: Arc<AtomicBool>,
+    /// When each running edge started.
+    started: HashMap<usize, Instant>,
+    /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
+    on_workers: HashSet<String>,
 }
 
 impl Run<'_, '_> {
@@ -530,6 +548,8 @@ impl Run<'_, '_> {
         let (work, dir, env, makeflags) = (&work, &dir, &env, makeflags.as_deref());
         // a thread which takes jobs, of which there is one for each of the build's jobs, and of each worker's, once it
         // is first sent an edge
+        let stop = Arc::clone(&self.stop);
+        let stop = &stop;
         let job_thread = || {
             let sender = sender.clone();
             move || {
@@ -553,6 +573,9 @@ impl Run<'_, '_> {
                     let remote = ran.is_some();
                     let (outcome, output) = if let Some(printed) = restored.or(ran) {
                         (Outcome::Succeeded, printed)
+                    } else if dispatch.is_some() && stop.load(Ordering::SeqCst) {
+                        // an edge which a worker was interrupted running does not run here
+                        (Outcome::Interrupted, Vec::new())
                     } else {
                         let spawned = |pid| {
                             let _ = sender.send(Message::Spawned(index, pid));
@@ -584,9 +607,15 @@ impl Run<'_, '_> {
                 let interrupted = interrupts.interrupted().or(cancelled);
                 if let Some(signal) = interrupted && !self.report.interrupted {
                     self.report.interrupted = true;
+                    self.stop.store(true, Ordering::SeqCst);
                     interrupted_at = Some(Instant::now());
                     for &group in self.processes.values() {
                         sys::signal_group(group, signal);
+                    }
+                    for (worker, &running) in self.options.workers.iter().zip(&self.on_worker) {
+                        if running > 0 {
+                            worker.cancel();
+                        }
                     }
                 }
                 // a process which ignores the signal, as a shell's background job ignores `SIGINT`, is killed
@@ -742,10 +771,13 @@ impl Run<'_, '_> {
                 target: placement.target.as_deref().unwrap_or_default(),
                 tags: &placement.tags,
             };
+            let wait = self.local_wait();
             let worker = (0..self.options.workers.len()).find(|&worker| {
                 let worker_runs = |capabilities: Arc<crate::worker::Capabilities>| capabilities.may_run(&needs);
                 let remote = &self.options.workers[worker];
-                free(self, worker) && remote.may_have(identity) && remote.reported().is_some_and(worker_runs)
+                // it waits for a job here if that is sooner than it would be sent
+                let sooner = wait.is_none_or(|wait| self.sending(index, remote.link()) < wait);
+                free(self, worker) && remote.may_have(identity) && remote.reported().is_some_and(worker_runs) && sooner
             });
             if let Some(worker) = worker {
                 self.ready.remove(&entry);
@@ -753,6 +785,27 @@ impl Run<'_, '_> {
             }
         }
         None
+    }
+    /// Returns how long it is estimated an edge would wait for one of the build's own jobs: the least time one of the
+    /// edges which run here has left, by how long it took when it last ran, or `None` if none of them has run before.
+    fn local_wait(&self) -> Option<Duration> {
+        let running = self.started.iter().filter(|(index, _)| !self.sent.contains_key(index));
+        let left = running.filter_map(|(&index, started)| {
+            let record = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
+            Some(Duration::from_millis(u64::from(record.duration)).saturating_sub(started.elapsed()))
+        });
+        left.min()
+    }
+    /// Returns how long it is estimated to take to send an edge to a worker over a link, and fetch its outputs: its
+    /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
+    /// worker is missing, sending them, running the edge, and fetching its outputs.
+    fn sending(&self, index: usize, link: crate::remote::Link) -> Duration {
+        let Some(previous) = self.state.get(&plan::first_output(self.graph, self.edges[index])) else {
+            return Duration::MAX;
+        };
+        let files = previous.inputs.iter().chain(&previous.discovered).chain(&previous.outputs);
+        let bytes = files.filter(|(path, _)| !self.on_workers.contains(path)).map(|(_, stamp)| stamp.size()).sum();
+        link.time(bytes, 4)
     }
     /// Returns the identity of the toolchain of an edge which may run on a worker: a cached edge which is not in the
     /// console pool, which inherits only the variables which locate its tools, and which has run before, so that the
@@ -796,6 +849,8 @@ impl Run<'_, '_> {
             self.local_only.insert(index);
             return None;
         }
+        // what it is sent, the worker has
+        self.on_workers.extend(inputs.iter().cloned());
         let mut env = self.options.env.clone();
         for name in edge.pass_env() {
             if let Some(value) = std::env::var_os(name) {
@@ -851,6 +906,7 @@ impl Run<'_, '_> {
         plan::reason(graph, self.state, &mut self.stamps, self.edges[index], &changed).is_none()
     }
     fn start(&mut self, index: usize, observer: &mut dyn Observer) {
+        self.started.insert(index, Instant::now());
         let edge = self.edges[index];
         self.inputs.insert(index, plan::input_stamps(self.graph, self.state, edge, &mut self.stamps));
         let data = self.graph.edge(edge);
@@ -894,6 +950,12 @@ impl Run<'_, '_> {
         let Finished { index, mut outcome, output, start, mut duration, cached, remote } = finished;
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
+        self.started.remove(&index);
+        // what a worker wrote, it has
+        if remote {
+            let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+            self.on_workers.extend(outputs.chain(data.depfile()).map(String::from));
+        }
         self.progress.running -= 1;
         self.progress.finished += 1;
         self.report.ran += 1;
@@ -1684,6 +1746,85 @@ mod tests {
         assert_eq!(build.read("portable.o"), "p\n");
         let sent = |contents: &[u8]| store.0.has_blob(&crate::blake3::hash(contents));
         assert!(sent(b"p\n") && !sent(b"r\n") && !sent(b"g\n"));
+    }
+
+    /// A graph of the slow edge, and of two cached edges which copy their inputs, once they have slept for as many
+    /// seconds as their inputs give.
+    fn copied() -> Graph {
+        graph()
+            .rule("slow", &[("command", SLOW)])
+            .edge("slow", &["slow"], &[])
+            .cached("toolchain")
+            .rule("cp", &[("command", "sleep $$(cat $in) && cp $in $out")])
+            .edge("cp", &["a.o"], &["a"])
+            .edge("cp", &["b.o"], &["b"])
+            .finish()
+    }
+
+    /// A worker over a link which is assumed to be as given.
+    fn linked(cache: &TempCache, link: crate::remote::Link) -> Arc<Remote> {
+        let worker = Arc::into_inner(worker(cache, &["toolchain"])).unwrap().with_link(link);
+        assert!(worker.capabilities().is_ok());
+        Arc::new(worker)
+    }
+
+    #[test]
+    fn waits_for_its_jobs_where_sending_would_take_longer() {
+        let mut build = Build::new("waits", copied(), &[("a", "0\n"), ("b", "0\n")]);
+        let first = TempCache::new("waits-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        build.options.jobs = 1;
+        // over a link with a second's latency, sending takes longer than the slow edge has left, or the others take
+        let store = TempCache::new("waits-store");
+        let slow = crate::remote::Link { latency: Duration::from_secs(1), bytes_per_second: 1e9 };
+        build.options.workers = vec![linked(&store, slow)];
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let second = TempCache::new("waits-second");
+        build.options.cache = Some(second.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 0, "{finished:?}");
+        assert_eq!(store.0.stats().blobs, 0);
+        // while over a fast link, they are sent
+        let fast = TempCache::new("waits-fast");
+        let link = crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9 };
+        build.options.workers = vec![linked(&fast, link)];
+        remove(&build, &["slow", "a.o", "b.o"]);
+        let third = TempCache::new("waits-third");
+        build.options.cache = Some(third.0.clone());
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(report.remote, 2, "{finished:?}");
+    }
+
+    #[test]
+    fn interrupts_what_runs_on_workers() {
+        let mut build = Build::new("interrupts", copied(), &[("a", "0\n"), ("b", "0\n")]);
+        let first = TempCache::new("interrupts-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        build.options.jobs = 1;
+        let store = TempCache::new("interrupts-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        assert!(build.options.workers[0].capabilities().is_ok());
+        // the edges which copy their inputs sleep for ten seconds, on the worker, while the slow edge runs here
+        remove(&build, &["slow"]);
+        build.write("a", "10\n");
+        build.write("b", "10\n");
+        let cancel = Arc::clone(&build.options.cancel);
+        let cancelling = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            cancel.store(true, Ordering::SeqCst);
+        });
+        let clock = Instant::now();
+        let (report, finished) = build.build(&[]);
+        cancelling.join().unwrap();
+        // the worker interrupts them at once, and they do not run here then
+        assert!(clock.elapsed() < Duration::from_secs(5), "{:?}", clock.elapsed());
+        assert!(report.interrupted && report.remote == 0, "{report:?} {finished:?}");
+        assert_eq!((build.read("a.o"), build.read("b.o")), ("0\n".into(), "0\n".into()));
+        assert!(store.0.has_blob(&crate::blake3::hash(b"10\n")));
     }
 
     #[test]

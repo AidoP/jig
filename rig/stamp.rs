@@ -25,6 +25,14 @@ pub enum Stamp {
     Content { mtime: i64, size: u64, hash: [u8; 32] },
 }
 impl Stamp {
+    /// The size of the file, or `0` if it is missing.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Missing => 0,
+            Self::File { size, .. } | Self::Content { size, .. } => *size,
+        }
+    }
     /// Returns the stamp of a file as it is now, following symbolic links, as ninja does.
     ///
     /// A file which cannot be read, other than one which is missing, is taken as missing, so that what depends on it

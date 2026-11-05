@@ -383,6 +383,15 @@ impl Executor {
     /// If the toolchain is not one of the worker's, a path does not lead from the build's directory, an input is not
     /// in the cache, or the directory to run it in cannot be made.
     pub fn execute(&self, cache: &Cache, request: &Request) -> Result<Executed, Refused> {
+        self.execute_with(cache, request, &|_| ())
+    }
+    /// Run an action, as [`Self::execute`] does, telling `spawned` the id of its process, which leads its process
+    /// group, once it has started, so that it can be interrupted.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::execute`].
+    pub fn execute_with(&self, cache: &Cache, request: &Request, spawned: &dyn Fn(u32)) -> Result<Executed, Refused> {
         use std::os::unix::fs::PermissionsExt;
         let toolchain = self.toolchain(request).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
@@ -424,7 +433,7 @@ impl Executor {
         let mut env: Vec<_> = given.cloned().collect();
         env.extend(toolchain.env.iter().cloned());
         let environment = crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating) };
-        let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, &|_| ());
+        let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, spawned);
         let mut outputs = Vec::new();
         for path in &request.outputs {
             let full = build.join(path);

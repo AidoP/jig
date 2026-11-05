@@ -42,6 +42,9 @@
 //!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
 //!   that requests for blobs are answered while they run.
 //! - `GET_CAPABILITIES` is replied to by a worker with `FOUND` and its [`crate::worker::Capabilities`].
+//! - `CANCEL`, which is not replied to, has a worker interrupt the actions it runs for the client, as when the client's
+//!   build is interrupted, and kill them a second later if they have not stopped, and run no more of them. It does so
+//!   too when the client ends the connection. The action which is interrupted is replied to as it finishes.
 //!
 //! A blob larger than a part, a MiB, is sent in parts, whether it is a reply to `GET_BLOB` or the request `PUT_BLOB`:
 //! a frame of the kind `MORE` with the id of the request for each part but the last, then the frame of the reply or
@@ -70,7 +73,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -83,6 +86,7 @@ const ADD_TO_MANIFEST: u8 = 8;
 const AUTH: u8 = 9;
 const EXECUTE: u8 = 10;
 const GET_CAPABILITIES: u8 = 11;
+const CANCEL: u8 = 12;
 const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
@@ -409,6 +413,45 @@ struct Push {
     discovery: Discovery,
 }
 
+/// What a build estimates of the link to a server, by which it finds whether to send an edge to a worker: the time a
+/// request takes to be answered, beside what it sends, and the bytes it sends or fetches each second.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Link {
+    pub latency: std::time::Duration,
+    pub bytes_per_second: f64,
+}
+
+impl Default for Link {
+    fn default() -> Self {
+        Self { latency: std::time::Duration::ZERO, bytes_per_second: Self::ASSUMED }
+    }
+}
+
+impl Link {
+    /// The bandwidth assumed until it is measured, of a network rather than a disk.
+    const ASSUMED: f64 = 50e6;
+    /// The fewest bytes sent or fetched at once which the bandwidth is measured by, as the time of fewer is mostly
+    /// latency.
+    const MEASURED: u64 = 1 << 16;
+    /// Returns the time it is estimated to take to send or fetch a number of bytes, in a number of round trips.
+    #[must_use]
+    // an estimate needs no more precision than an `f64` has of a number of bytes
+    #[allow(clippy::cast_precision_loss)]
+    pub fn time(&self, bytes: u64, round_trips: u32) -> std::time::Duration {
+        let sending = std::time::Duration::from_secs_f64(bytes as f64 / self.bytes_per_second.max(1.0));
+        self.latency * round_trips + sending
+    }
+    /// Take a measure of the bandwidth, from a number of bytes sent or fetched in a time, which has the latency of a
+    /// round trip in it, if there are enough to measure it by, weighting what was measured before as much as it.
+    #[allow(clippy::cast_precision_loss)]
+    fn measure(&mut self, bytes: u64, took: std::time::Duration) {
+        let sending = took.saturating_sub(self.latency).as_secs_f64();
+        if bytes >= Self::MEASURED && sending > 0.0 {
+            self.bytes_per_second = f64::midpoint(self.bytes_per_second, bytes as f64 / sending);
+        }
+    }
+}
+
 /// A remote cache, which is connected to when it is first used.
 pub struct Remote {
     transport: Transport,
@@ -427,6 +470,8 @@ pub struct Remote {
     refused: Mutex<std::collections::HashSet<String>>,
     /// What the server, as a worker, last reported of itself.
     reported: Mutex<Option<Arc<crate::worker::Capabilities>>>,
+    /// The link to the server, as it is measured, or as it is assumed to be, if it is not measured.
+    link: Mutex<(Link, bool)>,
 }
 
 /// A server of files over HTTP, and why it failed, once it has, after which it is not used.
@@ -444,8 +489,8 @@ impl Remote {
     fn with_state(transport: Transport, push: bool, state: State) -> Self {
         let (manifests, pusher) = (Mutex::default(), Mutex::default());
         let (refused, reported) = (Mutex::default(), Mutex::default());
-        let state = Mutex::new(state);
-        Self { transport, token: None, push, state, manifests, pusher, http: None, refused, reported }
+        let (state, link) = (Mutex::new(state), Mutex::new((Link::default(), false)));
+        Self { transport, token: None, push, state, manifests, pusher, http: None, refused, reported, link }
     }
     /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
     /// results are pushed to with `push`, if it takes them.
@@ -557,9 +602,16 @@ impl Remote {
         };
         let mut hello = MAGIC.to_vec();
         hello.extend_from_slice(&VERSION.to_le_bytes());
+        let sent = std::time::Instant::now();
         let receiver = connection.send(HELLO, &hello);
         match receiver.and_then(|receiver| receiver.recv().ok()) {
             Some((HELLO, payload)) if payload.len() >= 10 && payload[..4] == VERSION.to_le_bytes() => {
+                // the latency is of the reply to `HELLO`, which has little to send
+                if let Ok(mut link) = self.link.lock()
+                    && !link.1
+                {
+                    link.0.latency = sent.elapsed();
+                }
                 connection.pushes = payload[4] == 1;
                 connection.jobs = u32::from_le_bytes([payload[5], payload[6], payload[7], payload[8]]) as usize;
                 if payload[9] == 1 {
@@ -802,6 +854,7 @@ impl Remote {
         let failed = || Refused::Error(self.error().unwrap_or_else(|| "the worker cannot be reached".into()));
         let connection = self.connection().ok_or_else(failed)?;
         let missing = self.missing(&request.blobs()).ok_or_else(failed)?;
+        let (sending, mut bytes) = (std::time::Instant::now(), 0);
         let mut sent = Vec::new();
         for blob in &missing {
             let Some(input) = request.inputs.iter().find(|input| input.blob == *blob) else {
@@ -812,6 +865,7 @@ impl Remote {
                 .and_then(|file| Ok((file.metadata()?.len(), file)))
                 .map(|(size, file)| (file, size))
                 .map_err(|error| Refused::Error(format!("failed to read {path:?}: {error}")))?;
+            bytes += size;
             sent.push(connection.send_parts(PUT_BLOB, blob, BufReader::new(file), size));
         }
         // a blob which is refused, as its file changed after it was hashed, fails only this action
@@ -822,6 +876,7 @@ impl Remote {
                 _ => return Err(failed()),
             }
         }
+        self.measured(bytes, sending.elapsed());
         let reply = connection.send(EXECUTE, &request.encode()).and_then(|receiver| receiver.recv().ok());
         match reply {
             Some((FOUND, payload)) => Executed::decode(&payload).ok_or_else(|| {
@@ -836,6 +891,38 @@ impl Remote {
             },
             Some((ERROR, message)) => Err(Refused::Error(String::from_utf8_lossy(&message).into_owned())),
             _ => Err(failed()),
+        }
+    }
+    /// Returns the link to the server, as it has been measured, or assumed.
+    #[must_use]
+    pub fn link(&self) -> Link {
+        self.link.lock().map_or_else(|_| Link::default(), |link| link.0)
+    }
+    /// Assume the link to the server is as given, rather than measuring it.
+    #[must_use]
+    pub fn with_link(self, link: Link) -> Self {
+        if let Ok(mut assumed) = self.link.lock() {
+            *assumed = (link, true);
+        }
+        self
+    }
+    /// Take a measure of the link's bandwidth, from a number of bytes sent or fetched in a time.
+    pub(crate) fn measured(&self, bytes: u64, took: std::time::Duration) {
+        if let Ok(mut link) = self.link.lock()
+            && !link.1
+        {
+            link.0.measure(bytes, took);
+        }
+    }
+    /// Have the server, as a worker, interrupt the actions it runs for this client, and run no more, as when the
+    /// build is interrupted. Those which are interrupted fail.
+    pub fn cancel(&self) {
+        let connection = match self.state.try_lock().as_deref() {
+            Ok(State::Connected(connection)) => Some(Arc::clone(connection)),
+            _ => None,
+        };
+        if let Some(connection) = connection {
+            connection.write(CANCEL, 0, &[]);
         }
     }
     /// Wait until what has been queued has been pushed, or failed to be.
@@ -1172,6 +1259,28 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
     // actions run on threads of their own, so that they do not hold up the requests for blobs
     let (actions, running) = std::sync::mpsc::channel::<(u32, Vec<u8>)>();
     let running = Mutex::new(running);
+    // the process groups of the actions which run, by the ids of their requests, which are interrupted once the
+    // client cancels them, or ends the connection
+    let groups: Mutex<HashMap<u32, u32>> = Mutex::default();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let cancel = || {
+        if cancelled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let signal = |signum| {
+            let running: Vec<u32> = groups.lock().map(|groups| groups.values().copied().collect()).unwrap_or_default();
+            for group in running {
+                crate::sys::signal_group(group, signum);
+            }
+        };
+        signal(crate::sys::SIGINT);
+        // what ignores the signal is killed
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while groups.lock().is_ok_and(|groups| !groups.is_empty()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        signal(crate::sys::SIGKILL);
+    };
     let written: Mutex<std::io::Result<()>> = Mutex::new(Ok(()));
     let reply = |kind: u8, id: u32, payload: &[u8]| {
         let result = writer.lock().map_or(Ok(()), |mut writer| write_frame(&mut *writer, kind, id, payload));
@@ -1205,8 +1314,28 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                     let Some(executor) = executor else {
                         break;
                     };
-                    let (kind, payload) = match crate::worker::Request::decode(&payload) {
-                        Some(request) => match executor.execute(cache, &request) {
+                    if cancelled.load(Ordering::SeqCst) {
+                        reply(ERROR, id, b"the action was cancelled");
+                        continue;
+                    }
+                    let spawned = |pid| {
+                        if let Ok(mut groups) = groups.lock() {
+                            groups.insert(id, pid);
+                        }
+                        // an action which starts as it is cancelled is interrupted too
+                        if cancelled.load(Ordering::SeqCst) {
+                            crate::sys::signal_group(pid, crate::sys::SIGKILL);
+                        }
+                    };
+                    let executed = crate::worker::Request::decode(&payload).map(|request| {
+                        let executed = executor.execute_with(cache, &request, &spawned);
+                        if let Ok(mut groups) = groups.lock() {
+                            groups.remove(&id);
+                        }
+                        executed
+                    });
+                    let (kind, payload) = match executed {
+                        Some(executed) => match executed {
                             Ok(executed) => (FOUND, executed.encode()),
                             Err(crate::worker::Refused::Toolchain) => (NOT_FOUND, Vec::new()),
                             Err(crate::worker::Refused::Error(message)) => (ERROR, message.into_bytes()),
@@ -1246,6 +1375,7 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                         break Ok(());
                     }
                 },
+                Ok(Some((CANCEL, _, _))) => cancel(),
                 Ok(Some((kind, id, payload))) => {
                     uploads.remove(&id);
                     if requests.send((kind, id, payload)).is_err() {
@@ -1256,9 +1386,11 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                 Err(error) => break Err(error),
             }
         };
-        // the threads stop once there are no more requests, and the actions which run have finished
+        // the threads stop once there are no more requests, and the actions which run have finished, which are
+        // cancelled, as the client which would fetch what they write is gone
         drop(requests);
         drop(actions);
+        cancel();
         read
     })?;
     written.into_inner().unwrap_or(Ok(()))
@@ -1527,6 +1659,27 @@ mod tests {
             let _ = std::fs::remove_dir_all(cache.dir());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn estimates_the_link() {
+        use std::time::Duration;
+        let mut link = Link { latency: Duration::from_millis(10), bytes_per_second: 1e6 };
+        assert_eq!(link.time(500_000, 2), Duration::from_millis(520));
+        // the bandwidth is measured by what takes long enough to send, without the latency, and weighted with the
+        // measures before
+        link.measure(1000, Duration::from_secs(1));
+        assert!((link.bytes_per_second - 1e6).abs() < 1.0);
+        link.measure(3_000_000, Duration::from_millis(1010));
+        assert!((link.bytes_per_second - 2e6).abs() < 1.0);
+        // the latency is measured by `HELLO`, unless the link is assumed
+        let measured = served(cache("link"), false, false);
+        let _ = measured.pushes();
+        assert!(measured.link().latency < Duration::from_secs(1));
+        let assumed = Link { latency: Duration::from_secs(3), bytes_per_second: 1.0 };
+        let remote = served(cache("link-assumed"), false, false).with_link(assumed);
+        let _ = remote.pushes();
+        assert_eq!(remote.link(), assumed);
     }
 
     /// The reply to `HELLO` of a server which does not take pushes, is not a worker, and needs no token.

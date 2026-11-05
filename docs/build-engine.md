@@ -1283,8 +1283,42 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Not done yet:**
      - That what rustc writes doesn't depend on the host is assumed, rather than tested, as the tests have one host.
      - A worker's capabilities are asked for once per build, so a toolchain it installs is used by the next build.
-4. Scheduling by the estimated time to transfer an edge's inputs and outputs against its wait here, from the durations
-   in the log. Interrupts are passed on to workers.
+4. **Done:** scheduling by cost, and interrupts passed on to workers (protocol version 8).
+   - **The link.** `Remote` keeps a `Link` estimate of each server: its latency, and its bandwidth.
+     - The latency is the round trip of `HELLO`, which has little to send.
+     - The bandwidth starts at an assumed 50 MB/s. It's measured from uploads of an action's inputs and fetches of
+       its outputs of 64 KiB or more, without the latency, each measure weighted equally with what was measured before.
+     - `Remote::with_link` assumes a link instead, as the tests do.
+   - **Waiting or sending.** Once the build's jobs are full, a ready edge goes to a worker only if sending it is
+     estimated to be sooner than its wait for a job here.
+     - The wait is the least time an edge running here has left, by how long it took when it last ran. With no
+       running edge that has run before, there is no estimate, and the edge goes to the worker as before.
+     - Sending is the size of the edge's inputs, discovered inputs and outputs when it last ran, over the bandwidth,
+       plus four round trips: asking which blobs are missing, sending them, running the edge, and fetching its
+       outputs.
+     - Files the workers have from the build are left out, as one wrote them or was sent them, so a chain of crates
+       whose libraries a worker wrote doesn't send them back.
+     - The edge is looked at again as edges finish, or each 50 ms, so one which waits runs here once a job is free,
+       or goes to a worker once the wait has grown.
+   - **Interrupts.**
+     - An interrupted build sends `CANCEL` to each worker running its edges. It also stops the edges which waited on
+       a worker from running here instead, as an edge which fails there otherwise would.
+     - A worker interrupts the process group of each action it runs for that connection, kills those which haven't
+       stopped a second later, and refuses any action it hadn't started. It does the same when the connection ends,
+       as when ssh is interrupted along with the client, so nothing runs on for a build which is gone.
+     - The interrupted actions are replied to as they finish, so the build ends at once.
+   - **jig.** `jig workers` shows how long each worker's first answer took, which over ssh is mostly starting it.
+   - **Tests.**
+     - rig, remote: an estimate of a send, the bandwidth measured by what is large enough and weighted, and the
+       latency of `HELLO`, unless a link is assumed.
+     - rig, exec:
+       - The slow edge holds the one job here. Over a link with a second's latency, two cached edges wait for it
+         and run here, sending the worker nothing, while over a fast link both are sent.
+       - Two edges which sleep ten seconds on a worker. The build is cancelled after 0.6 s, and ends within five
+         seconds, interrupted. Neither ran here, and their outputs are as they were.
+     - Integration: `jig workers` shows the round trip.
+   - **Not done yet:** a worker is assumed to run an edge as fast as it ran here, and a measure of each worker's
+     speed would let a faster one take edges sooner.
 5. Tests run on workers whose host is the test's target.
 
 ### Phase 7: later
