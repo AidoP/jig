@@ -37,12 +37,13 @@ running the test harness with `--nocapture`, as in `build/<target>/test/jig benc
 
 `rig/` is rig, the build engine which builds projects, as `docs/build-engine.md` plans. It is a crate which `jig`
 uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate` writes rig's
-graph to `graph` in the build directory beside `build.ninja`, from the same description. rig builds the project,
-keeping the state of the build in `.rig` in the build directory, while with `JIG_ENGINE=ninja`, ninja does, with
-`build.ninja`, which ninja can also use on its own in the build directory.
+graph to `graph` in the build directory, and rig builds the project, keeping the state of the build in `.rig` in the
+build directory. With `JIG_ENGINE=ninja`, `jig generate` writes `build.ninja` instead, from the same description, and
+ninja builds the project, which it can also do on its own in the build directory. Only the file of the engine which
+builds the project is written, and building with the other engine generates its file first.
 
-The build system needs to be bootstrapped, with `bootstrap.sh`, which builds `jig` with rustc alone, or with
-`bootstrap.ninja`, which does the same with ninja.
+The build system needs to be bootstrapped, with `bootstrap.sh`, which builds `jig` with rustc alone, and configures the
+project for the engine `JIG_ENGINE` chooses.
 
 ```
 sh bootstrap.sh
@@ -64,7 +65,7 @@ tested with `jig test`.
 ./build/bootstrap/jig test
 ```
 
-`jig generate` evaluates `Jig`, writes `build.ninja` and rig's `graph` to the build directory and records the build
+`jig generate` evaluates `Jig`, writes rig's `graph`, or `build.ninja`, to the build directory and records the build
 directory in `.jig`, at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install`
 find `.jig` in the working directory or its parents, so they can be run from anywhere in the project. They configure the
 project first if it is not, from the `Jig` in the closest of those directories with one, or again from what it was
@@ -87,7 +88,7 @@ are replaced by a summary, such as `[15/15] completed in 3m 14s`, or `[12/15] st
 `jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
 program and running tests took, each in total, and with rig, the ten commands of the build which took longest, from
 when each started until it finished, such as `jig --timings test`.
-`build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
+The graph regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so running another one reports the `other-jig` warning, which names both, until `jig generate` configures
 the project with the one which is running. Its severity is that of `diagnostic/other-jig`
 when it was configured, where `'error'` stops the command before running ninja.
@@ -906,9 +907,9 @@ target bluemetal-riscv64
   nightly version is a pre-release, unless it is given `ignore-pre-release: true`
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
   once it is used, such as by a crate or the outputs of a custom command, so it is set before them. When it changes,
-  `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to date, and
-  `jig build`, `jig check`, `jig test` and `jig install` regenerate `build.ninja` before running ninja, so that they run
-  it in the new build directory. The rest of the previous build directory is kept
+  `jig build`, `jig check`, `jig test` and `jig install` regenerate the graph in the new build directory, and build
+  there. With ninja, `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to
+  date, so that ninja, which is regenerating it there, stops. The rest of the previous build directory is kept
 - `target`: the target triple for crates without a `target` attribute, initially the host
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default

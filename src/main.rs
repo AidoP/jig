@@ -55,8 +55,8 @@ shows on stderr, once the command has finished, how long configuring, building, 
 commands of the build which took longest.
 
 commands:
-    generate [<input>]   evaluate the configuration, `Jig` by default, and generate `build.ninja` in the build
-                         directory
+    generate [<input>]   evaluate the configuration, `Jig` by default, and generate rig's graph in the build
+                         directory, or `build.ninja` if `JIG_ENGINE` is `ninja`
     build [<arg> ...]    build the project, or the targets given, with rig, or with ninja if `JIG_ENGINE` is
                          `ninja`, which is given the arguments
     test [-v] [--all] [--tag <tag> ...] [<name> ...]
@@ -204,7 +204,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
     }
 }
 
-/// Evaluate the configuration from its root file, `input`, then generate `build.ninja` and the files beside it, with a
+/// Evaluate the configuration from its root file, `input`, then generate the graph and the files beside it, with a
 /// rustup toolchain if one is given.
 fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;

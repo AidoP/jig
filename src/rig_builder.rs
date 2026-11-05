@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::builder::{Builder, Output, Request};
-use crate::{Error, ninja, rig_graph};
+use crate::{Error, rig_graph};
 
 /// The directory of the state of the build, in the build directory.
 pub const STATE: &str = ".rig";
@@ -222,13 +222,13 @@ impl Builder for Rig<'_> {
     }
     fn regenerate(&self, quiet: bool, output: Output) -> Result<(), Error> {
         let console = Console { quiet, verbose: false };
-        if self.run(&[ninja::FILE], &self.options()?, console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
+        if self.run(&[rig_graph::FILE], &self.options()?, console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
     fn up_to_date(&self, target: &str) -> Result<bool, Error> {
         self.planned(&[target])
     }
     fn graph_up_to_date(&self) -> Result<bool, Error> {
-        self.planned(&[ninja::FILE])
+        self.planned(&[rig_graph::FILE])
     }
 }
 
@@ -263,7 +263,7 @@ impl Rig<'_> {
 ///
 /// Nothing is recorded if the state is in use, as when rig runs the edge itself, and records it once it has run.
 pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Error> {
-    let Some(node) = graph.node(ninja::FILE) else {
+    let Some(node) = graph.node(rig_graph::FILE) else {
         return Ok(());
     };
     let Some(edge) = graph.producer(node).filter(|&edge| graph.edge(edge).generator()) else {
