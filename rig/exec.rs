@@ -170,6 +170,14 @@ pub trait Observer {
     fn finished(&mut self, graph: &Graph, edge: EdgeId, outcome: &Outcome, output: &[u8], progress: Progress) {
         let _ = (graph, edge, outcome, output, progress);
     }
+    /// An edge which started has not run, as what it reads was lost, and starts again in the build's next pass.
+    fn unstarted(&mut self, graph: &Graph, edge: EdgeId) {
+        let _ = (graph, edge);
+    }
+    /// Time has passed, as it is told often while edges run, so that how long they have run can be shown.
+    fn tick(&mut self) {}
+    /// The build has finished, or stopped.
+    fn done(&mut self) {}
 }
 
 /// What a build did.
@@ -553,7 +561,14 @@ pub fn build(
 ) -> Result<Report, Error> {
     let mut total = Report::default();
     for _ in 0..PASSES {
-        let report = build_once(graph, state, options, targets, observer)?;
+        let report = build_once(graph, state, options, targets, observer);
+        let report = match report {
+            Ok(report) => report,
+            Err(error) => {
+                observer.done();
+                return Err(error);
+            },
+        };
         total.ran += report.ran;
         total.failed += report.failed;
         total.restat_skipped += report.restat_skipped;
@@ -566,6 +581,7 @@ pub fn build(
             break;
         }
     }
+    observer.done();
     Ok(total)
 }
 
@@ -1085,6 +1101,7 @@ impl Run<'_, '_> {
                 // tokens are given back by the commands as well as the edges, so they are looked for again soon,
                 // while an interrupt is looked for less often
                 let timeout = Duration::from_millis(if waiting_for_token { 5 } else { 50 });
+                observer.tick();
                 match receiver.recv_timeout(timeout) {
                     Ok(Message::Spawned(index, pid)) => {
                         if self.graph.edge(self.edges[index]).pool() != Pool::Console {
@@ -1520,6 +1537,7 @@ impl Run<'_, '_> {
             for path in &lost {
                 self.lose(path);
             }
+            observer.unstarted(self.graph, edge);
             if data.pool() == Pool::Console {
                 self.console = false;
                 for (index, outcome, output) in std::mem::take(&mut self.held) {
@@ -1851,6 +1869,9 @@ pub(crate) fn run_command(
     (outcome, output)
 }
 
+/// The most running edges which are listed in place, beyond which how many more there are is shown.
+const LISTED: usize = 10;
+
 /// Shows a build as ninja does on a terminal which is not smart: the status and description of each edge once it
 /// finishes, or as it starts for a console edge, which then has the terminal, followed by its output. A failed edge
 /// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown, and
@@ -1860,35 +1881,115 @@ pub(crate) fn run_command(
 /// printed are left out, as ninja leaves them out, so that commands can be told to print in colour, as rustc is with
 /// `--color=always`, whose output is captured rather than a terminal, without their actions depending on where the
 /// build's output goes.
+///
+/// [`Self::in_place`] has the edges which are running listed below what has finished, with how long each has run,
+/// which is updated in place with escape sequences, as on a terminal, each line cut to its width so that none wraps.
+/// The list is taken away while a console edge has the terminal, and once the build is done.
 pub struct Console<W: std::io::Write> {
     pub out: W,
     pub quiet: bool,
     pub verbose: bool,
     pub colour: bool,
+    /// The width of the terminal, if what is running is listed in place.
+    width: Option<usize>,
+    /// The edges which are running, with their descriptions, and when they started.
+    running: Vec<(EdgeId, String, Instant)>,
+    /// The lines of the list as they were last drawn, which are below the cursor's line.
+    drawn: Vec<String>,
+    /// Whether a console edge has the terminal.
+    terminal_held: bool,
 }
 impl<W: std::io::Write> Console<W> {
+    #[must_use]
+    pub fn new(out: W, quiet: bool, verbose: bool, colour: bool) -> Self {
+        Self { out, quiet, verbose, colour, width: None, running: Vec::new(), drawn: Vec::new(), terminal_held: false }
+    }
+    /// List the edges which are running in place, below what has finished, on a terminal this wide, unless `quiet`.
+    #[must_use]
+    pub fn in_place(mut self, width: usize) -> Self {
+        self.width = (!self.quiet && width > 0).then_some(width);
+        self
+    }
+    fn description(&self, graph: &Graph, edge: EdgeId) -> String {
+        let data = graph.edge(edge);
+        match (data.description(), data.kind()) {
+            (description, EdgeKind::Command(action)) if description.is_empty() || self.verbose => action.command_line(),
+            (description, _) => description.to_string(),
+        }
+    }
     fn status(&mut self, graph: &Graph, edge: EdgeId, progress: Progress) {
         if self.quiet {
             return;
         }
-        let data = graph.edge(edge);
-        let description = match (data.description(), data.kind()) {
-            (description, EdgeKind::Command(action)) if description.is_empty() || self.verbose => action.command_line(),
-            (description, _) => description.to_string(),
-        };
+        let description = self.description(graph, edge);
         let _ = writeln!(self.out, "[{}/{}] {description}", progress.finished, progress.total);
+    }
+    /// Take the list away, leaving the cursor where it started.
+    fn clear(&mut self) {
+        if !self.drawn.is_empty() {
+            let _ = write!(self.out, "\x1b[{}A\x1b[J", self.drawn.len());
+            self.drawn.clear();
+        }
+    }
+    /// Draw the list again, if it has changed, unless a console edge has the terminal.
+    fn draw(&mut self) {
+        let Some(width) = self.width.filter(|_| !self.terminal_held) else {
+            return;
+        };
+        let mut lines: Vec<String> = self.running.iter().take(LISTED).map(|(_, description, started)| {
+            let line = format!("  {:>4}s {description}", started.elapsed().as_secs());
+            // cut short, so that it does not wrap, which would leave the cursor below where it is thought to be
+            line.chars().take(width.saturating_sub(1)).collect()
+        }).collect();
+        if self.running.len() > LISTED {
+            lines.push(format!("  ... and {} more", self.running.len() - LISTED));
+        }
+        if lines == self.drawn {
+            return;
+        }
+        self.clear();
+        for line in &lines {
+            let _ = writeln!(self.out, "{line}");
+        }
+        self.drawn = lines;
+        let _ = self.out.flush();
     }
 }
 impl<W: std::io::Write> Observer for Console<W> {
     fn started(&mut self, graph: &Graph, edge: EdgeId, _: &Reason, progress: Progress) {
         if graph.edge(edge).pool() == Pool::Console {
+            // which has the terminal, without the list
+            self.clear();
+            self.terminal_held = self.width.is_some();
             self.status(graph, edge, progress);
             let _ = self.out.flush();
+        } else if self.width.is_some() {
+            let description = self.description(graph, edge);
+            self.running.retain(|(running, ..)| *running != edge);
+            self.running.push((edge, description, Instant::now()));
+            self.draw();
         }
+    }
+    fn unstarted(&mut self, _: &Graph, edge: EdgeId) {
+        self.running.retain(|(running, ..)| *running != edge);
+        self.draw();
+    }
+    fn tick(&mut self) {
+        self.draw();
+    }
+    fn done(&mut self) {
+        self.clear();
+        self.running.clear();
+        let _ = self.out.flush();
     }
     fn finished(&mut self, graph: &Graph, edge: EdgeId, outcome: &Outcome, output: &[u8], progress: Progress) {
         let data = graph.edge(edge);
-        if data.pool() != Pool::Console {
+        // what has finished is shown above the list, which is drawn again below it
+        self.clear();
+        self.running.retain(|(running, ..)| *running != edge);
+        if data.pool() == Pool::Console {
+            self.terminal_held = false;
+        } else {
             self.status(graph, edge, progress);
         }
         if !outcome.succeeded() && !matches!(outcome, Outcome::Interrupted) {
@@ -1913,8 +2014,15 @@ impl<W: std::io::Write> Observer for Console<W> {
         if !output.is_empty() && !output.ends_with(b"\n") {
             let _ = writeln!(self.out);
         }
+        self.draw();
         let _ = self.out.flush();
     }
+}
+
+/// Returns the width of the terminal a file descriptor is, in columns, or `None` if it is not one.
+#[must_use]
+pub fn terminal_width(fd: i32) -> Option<usize> {
+    sys::terminal_width(fd)
 }
 
 /// Returns what a command printed without the escape sequences which colour it, `ESC [ ... <letter>`, and those which
@@ -1956,7 +2064,7 @@ mod tests {
         // and from what a console shows without colour
         let graph = graph().rule("say", &[("command", "printf '\\033[1mbold\\033[0m\\n' && touch $out")]);
         let mut build = Build::new("colour", graph.edge("say", &["a"], &[]).finish(), &[]);
-        let mut console = Console { out: Vec::new(), quiet: true, verbose: false, colour: false };
+        let mut console = Console::new(Vec::new(), true, false, false);
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         assert_eq!(String::from_utf8(console.out).unwrap(), "bold\n");
     }
@@ -2020,6 +2128,35 @@ mod tests {
 
     fn cat() -> Graphs {
         graph().rule("cat", &[("command", "cat $in > $out")])
+    }
+
+    #[test]
+    fn lists_what_runs_in_place() {
+        let graph = cat().edge("cat", &["ab"], &["a", "b"]).edge("cat", &["cd"], &["c", "d"]).finish();
+        let edge = |output: &str| graph.producer(graph.node(output).unwrap()).unwrap();
+        let (ab, cd) = (edge("ab"), edge("cd"));
+        // each line cut short of the terminal's width
+        let mut console = Console::new(Vec::new(), false, false, true).in_place(12);
+        let mut progress = Progress { total: 2, ..Progress::default() };
+        let shown = |console: &mut Console<Vec<u8>>| String::from_utf8(std::mem::take(&mut console.out)).unwrap();
+        console.started(&graph, ab, &Reason::NoRecord, progress);
+        assert_eq!(shown(&mut console), "     0s cat\n");
+        console.started(&graph, cd, &Reason::NoRecord, progress);
+        assert_eq!(shown(&mut console), "\x1b[1A\x1b[J     0s cat\n     0s cat\n");
+        // nothing is drawn while it is the same
+        console.tick();
+        assert_eq!(shown(&mut console), "");
+        // what finishes is shown above the list, which is drawn again
+        progress.finished = 1;
+        console.finished(&graph, ab, &Outcome::Succeeded, b"printed", progress);
+        assert_eq!(shown(&mut console), "\x1b[2A\x1b[J[1/2] cat a b > ab\nprinted\n     0s cat\n");
+        // and is taken away once the build is done
+        console.done();
+        assert_eq!(shown(&mut console), "\x1b[1A\x1b[J");
+        // which without a terminal, or quiet, is not listed
+        let mut console = Console::new(Vec::new(), true, false, true).in_place(80);
+        console.started(&graph, ab, &Reason::NoRecord, progress);
+        assert_eq!(shown(&mut console), "");
     }
 
     #[test]
@@ -2116,7 +2253,7 @@ mod tests {
             ..Default::default()
         };
         let mut build = Build::new("exec-failed", program(exec), &[]);
-        let mut console = Console { out: Vec::new(), quiet: true, verbose: false, colour: true };
+        let mut console = Console::new(Vec::new(), true, false, true);
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         assert_eq!(String::from_utf8(console.out).unwrap(), "FAILED: out\nX=1 false 'a b' c\n");
         // and a program which is not found fails
@@ -3070,7 +3207,7 @@ mod tests {
             .edge("cat", &["ab"], &["a", "b"]).edge("fail", &["bad"], &[]);
         let mut build = Build::new("console-output", graph.finish(), &[("a", "a\n"), ("b", "b\n")]);
         build.options.jobs = 1;
-        let mut console = Console { out: Vec::new(), quiet: false, verbose: false, colour: true };
+        let mut console = Console::new(Vec::new(), false, false, true);
         super::build(&build.graph, &mut build.state, &build.options, &[], &mut console).unwrap();
         let out = String::from_utf8(console.out).unwrap();
         assert_eq!(out, "[1/2] cat a b > ab\n[2/2] FAIL bad\nFAILED: bad\necho why && false\nwhy\n");

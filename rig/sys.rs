@@ -10,8 +10,31 @@ unsafe extern "C" {
     fn signal(signum: c_int, handler: usize) -> usize;
     fn kill(pid: c_int, signal: c_int) -> c_int;
     fn mkfifo(path: *const std::ffi::c_char, mode: ModeT) -> c_int;
-    #[cfg(target_os = "linux")]
     fn ioctl(fd: c_int, request: std::ffi::c_ulong, ...) -> c_int;
+}
+
+/// The size of a terminal, as `TIOCGWINSZ` gives it.
+#[repr(C)]
+#[derive(Default)]
+struct Winsize {
+    rows: u16,
+    columns: u16,
+    x_pixels: u16,
+    y_pixels: u16,
+}
+
+/// The request of `ioctl` which gives the size of a terminal.
+#[cfg(target_os = "macos")]
+const TIOCGWINSZ: std::ffi::c_ulong = 0x4008_7468;
+#[cfg(not(target_os = "macos"))]
+const TIOCGWINSZ: std::ffi::c_ulong = 0x5413;
+
+/// Returns the width of the terminal a file descriptor is, in columns, or `None` if it is not one.
+pub fn terminal_width(fd: c_int) -> Option<usize> {
+    let mut size = Winsize::default();
+    // SAFETY: the request writes a `winsize`, which `size` is, and has no other effect
+    let result = unsafe { ioctl(fd, TIOCGWINSZ, &raw mut size) };
+    (result == 0 && size.columns > 0).then_some(usize::from(size.columns))
 }
 
 /// The request of `ioctl` which makes a file share the extents of another, `_IOW(0x94, 9, int)`.
