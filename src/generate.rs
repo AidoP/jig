@@ -902,6 +902,7 @@ fn write_database(
         push: settings.push,
         token_file: &token_file,
         workers: settings.workers.iter().map(String::as_str).collect(),
+        workers_only: settings.workers_only,
         toolchain_identity: settings.release.as_ref().map_or("", |(identity, _)| identity),
         toolchain_release: settings.release.as_ref().map_or("", |(_, release)| &release.identity),
         toolchain_install: settings.release.as_ref().map_or("", |(_, release)| &release.install),

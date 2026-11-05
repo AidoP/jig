@@ -320,7 +320,7 @@ impl Project {
         }
     }
     /// Returns the values of the cache's properties, `cache/dir`, `cache/size`, `cache/remote`, `cache/push`,
-    /// `cache/token-file` and `workers`.
+    /// `cache/token-file`, `workers` and `workers-only`.
     pub fn cache_properties(&self) -> crate::cache::Properties {
         let value = |name: &str| self.values_idx.get(name).map(|&value| &self.values[value].data);
         let string = |name: &str| value(name).map(Data::coerce_string).unwrap_or_default();
@@ -335,6 +335,7 @@ impl Project {
                 Some(worker) => vec![worker.coerce_string()],
                 None => Vec::new(),
             },
+            workers_only: matches!(value("workers-only"), Some(Data::Bool(true))),
         }
     }
     pub fn install_prefix(&self) -> String {

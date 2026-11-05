@@ -373,6 +373,14 @@ fn declare_builtins(
             project::Data::List(Vec::new()),
         ),
         (
+            project::Property::new("workers-only".into(), project::Type::Bool).info(
+                "whether what a worker may build waits for one, rather than being built here, which \
+                 `JIG_WORKERS_ONLY=1` overrides, while what no worker builds, and what has not been built before, is \
+                 still built here",
+            ),
+            project::Data::Bool(false),
+        ),
+        (
             project::Property::new("test-tags".into(), project::Type::List)
                 .info("the tags of the tests `jig test` runs without names or tags, beside the tests without tags"),
             project::Data::List(Vec::new()),

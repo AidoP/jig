@@ -797,6 +797,15 @@ impl Remote {
         }
         self.connection().map_or(0, |connection| connection.jobs)
     }
+    /// Whether the server may be used: it has not failed, or is still being connected to, without waiting for it.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        match self.state.try_lock().as_deref() {
+            Ok(State::Failed(_)) => false,
+            Ok(State::Connected(connection)) => !connection.has_failed(),
+            Ok(State::Unconnected(_)) | Err(_) => true,
+        }
+    }
     /// Returns the number of actions the server runs at once, as a worker, if it has been connected to, without waiting
     /// for a connection which is being made, or `0`.
     ///

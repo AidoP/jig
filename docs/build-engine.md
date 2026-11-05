@@ -1352,6 +1352,31 @@ implementation of that trait, so `generate.rs` doesn't change.
        glibc host of the same architecture.
      - A test which runs on a worker isn't cached, as a test isn't here either.
 
+6. **Done:** builds only for workers (database version 25).
+   - **`Options::workers_only`.** An edge which a worker may run waits for one rather than running here, whatever the
+     build's jobs. That's an edge which may run on a worker at all, while a worker is usable and either still
+     connecting, or connected and reports that it runs the edge.
+     - The build doesn't end while such an edge is ready, though nothing runs, as a worker is still being connected to.
+     - It doesn't wait for a job here to be sooner than sending it.
+     - `Remote::usable` says whether a worker hasn't failed, without waiting for one which is connecting.
+   - **What still runs here.**
+     - What no worker runs, as none has its toolchain, target or tags, or none can be reached.
+     - An edge which hasn't run before, as its discovered inputs aren't known.
+     - What isn't cached.
+     - An edge which fails on a worker, or can't be sent, which runs here again as before.
+   - **jig.**
+     - The property `workers-only`, or `JIG_WORKERS_ONLY=1`, recorded in `.jig`.
+     - A build which used workers ends by saying how many of its commands ran on them, as nothing else shows it.
+   - **Tests.**
+     - rig, exec: with eight jobs here and the build only for workers, the two cached edges wait for a worker which
+       is still connecting as the build starts, while the uncached edge runs here. With a worker without their
+       toolchain, or one which can't be reached, they run here.
+     - jig: `JIG_WORKERS_ONLY` overrides `workers-only`.
+     - Integration: with `-j 8` and `JIG_WORKERS_ONLY=1`, every command of a build whose outputs were removed runs on
+       the worker, and the libraries are those built here.
+   - **Not done yet:** a first build still runs here, as what an edge discovers is only known once it has run. A cheap
+     local `rustc --emit=dep-info` pass would find it, as the plan for distribution suggests.
+
 ### Phase 7: later
 
 - **Pipelining.** Start dependents from `.rmeta`, using early outputs.

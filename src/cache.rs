@@ -23,6 +23,8 @@
 //!   own jobs are full, each as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` there with
 //!   ssh, as `tcp://<host>:<port>`, which `jig worker --listen` serves, with the token of `cache/token-file`, or as a
 //!   command, split at spaces, which serves one on its stdin and stdout.
+//! - `workers-only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for one, rather than being built
+//!   here.
 //!
 //! The settings are resolved when the project is configured, as the variables are read by the configuration, and
 //! recorded in its database, which a build reads them from.
@@ -43,6 +45,8 @@ pub const REMOTE: &str = "JIG_REMOTE_CACHE";
 pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
 /// The environment variable which gives the workers, separated by `;`.
 pub const WORKERS: &str = "JIG_WORKERS";
+/// The environment variable which has what a worker may build wait for one, if it is `1`.
+pub const WORKERS_ONLY: &str = "JIG_WORKERS_ONLY";
 /// The size the cache is collected down to by default.
 pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
@@ -70,6 +74,7 @@ pub struct Properties {
     pub push: bool,
     pub token_file: String,
     pub workers: Vec<String>,
+    pub workers_only: bool,
 }
 
 /// How rig caches, from the cache's properties and the variables which override them.
@@ -87,6 +92,8 @@ pub struct Settings {
     pub token_file: Option<PathBuf>,
     /// The workers, as `workers` gives them.
     pub workers: Vec<String>,
+    /// Whether what a worker may build waits for one, rather than being built here.
+    pub workers_only: bool,
     /// The identity of the project's toolchain, and its release: what identifies it on any host, and the name rustup
     /// installs it by, if it is known, which configuring finds.
     pub release: Option<(String, rig::worker::Release)>,
@@ -125,7 +132,11 @@ impl Settings {
         if let Some(worker) = workers.iter().find(|worker| worker_transport(worker).is_none()) {
             return Err(Error::InvalidWorker(worker.clone()));
         }
-        Ok(Self { dir, size, remote, push, token_file, workers, release: None })
+        let workers_only = match env(WORKERS_ONLY) {
+            Some(only) => only == "1",
+            None => properties.workers_only,
+        };
+        Ok(Self { dir, size, remote, push, token_file, workers, workers_only, release: None })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -521,6 +532,7 @@ mod tests {
             push: true,
             token_file: "/t".into(),
             workers: vec!["ssh://worker".into(), " ".into()],
+            workers_only: true,
         };
         let settings = resolved(Settings::resolve(&properties, env(&[])));
         let expected = Settings {
@@ -530,6 +542,7 @@ mod tests {
             push: true,
             token_file: Some("/t".into()),
             workers: vec!["ssh://worker".into()],
+            workers_only: true,
             release: None,
         };
         assert_eq!(settings, expected);
@@ -539,6 +552,7 @@ mod tests {
             ("JIG_REMOTE_CACHE", "ssh://other"),
             ("JIG_REMOTE_CACHE_PUSH", "0"),
             ("JIG_WORKERS", "tcp://a:1; env jig worker --stdio ;"),
+            ("JIG_WORKERS_ONLY", "0"),
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
         let expected = Settings {
@@ -548,6 +562,7 @@ mod tests {
             push: false,
             token_file: Some("/t".into()),
             workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
+            workers_only: false,
             release: None,
         };
         assert_eq!(settings, expected);
@@ -561,6 +576,7 @@ mod tests {
             push: false,
             token_file: String::new(),
             workers: Vec::new(),
+            workers_only: false,
         };
         assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
         // what is not a size or a remote cache is an error

@@ -195,7 +195,14 @@ not have. One which fails there and succeeds here runs here for a month, or unti
 A command goes to a worker only if sending its files, other than those the worker has from the build, and fetching what
 it writes, by the latency and bandwidth measured of the worker's link, would take less time than waiting for a job
 here, by how long the commands which run here took before. An interrupted build interrupts what its workers run for it,
-as does one whose connection to a worker ends. A
+as does one whose connection to a worker ends. A build which used workers ends by saying how many of its commands ran
+on them.
+
+With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
+built here, however many jobs the build has, but waits for a worker, as for a machine which should be left alone. What
+must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, what
+has not been built before, as which files it reads is only known once it has, and what is not cached, such as custom
+commands without `cache`. A command which fails on a worker is run here again, as without it. A
 worker runs whatever it is sent, so it must only be reachable by those who are trusted.
 
 A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
@@ -888,6 +895,8 @@ target bluemetal-riscv64
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
 - `workers`: the workers which cached commands run on once a build's own jobs are full, as described for them, empty
   by default, which `JIG_WORKERS` overrides
+- `workers-only`: whether what a worker may build waits for one, rather than being built here, as described for
+  workers, `false` by default, which `JIG_WORKERS_ONLY=1` overrides
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for `crate`, while
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
