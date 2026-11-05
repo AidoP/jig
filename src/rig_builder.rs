@@ -80,6 +80,9 @@ impl Rig<'_> {
         if options.cache.is_some() {
             options.workers = self.cache.workers()?;
             options.workers_only = self.cache.workers_only;
+            if self.cache.download_targets {
+                options.download = rig::exec::Download::Targets;
+            }
             options.releases.extend(self.cache.release.clone());
         }
         Ok(options)

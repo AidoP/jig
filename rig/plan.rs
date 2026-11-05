@@ -278,12 +278,9 @@ enum Status {
 ///
 /// If a target is not in the graph, or an input which no edge produces is missing, or the graph has a cycle.
 pub fn plan<'g>(graph: &'g Graph, state: &State, stamps: &mut Stamps<'g>, targets: &[&str]) -> Result<Plan, Error> {
-    let targets = if targets.is_empty() {
-        default_targets(graph)
-    } else {
-        let nodes = targets.iter().map(|&path| graph.node(path).ok_or_else(|| Error::UnknownTarget(path.into())));
-        nodes.collect::<Result<_, _>>()?
-    };
+    let targets = target_nodes(graph, targets)?;
+    // an output left on a worker is stamped as it was left while its file is missing
+    stamps.extend_remote(state.remote_outputs());
     // the files the plan may need are stamped together first
     let (nodes, paths) = reachable(graph, state, &targets);
     stamps.prefetch(&nodes, &paths.iter().map(String::as_str).collect::<Vec<_>>());
@@ -417,6 +414,19 @@ pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> String {
     output.map(|&node| graph.path(node).to_string()).unwrap_or_default()
 }
 
+/// Returns the nodes of targets, given by their paths, or the default targets if none are given.
+///
+/// # Errors
+///
+/// If a target is not a node of the graph.
+pub fn target_nodes(graph: &Graph, targets: &[&str]) -> Result<Vec<NodeId>, Error> {
+    if targets.is_empty() {
+        return Ok(default_targets(graph));
+    }
+    let nodes = targets.iter().map(|&path| graph.node(path).ok_or_else(|| Error::UnknownTarget(path.into())));
+    nodes.collect()
+}
+
 /// Returns the nodes an edge discovered when it last ran which an edge produces, which are built before it.
 pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Vec<NodeId> {
     let record = state.get(&first_output(graph, edge));
@@ -459,8 +469,10 @@ pub(crate) fn reason(
         return Some(Reason::CommandChanged);
     }
     let hashed = edge.hashed();
+    // a file which was left on a worker is compared by its contents once it is here
+    let hashed_as = |stamp: &Stamp| hashed || stamp.is_remote();
     for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
-        let now = stamps.node_as(output, hashed, Some((stamp, finished(record))));
+        let now = stamps.node_as(output, hashed_as(stamp), Some((stamp, finished(record))));
         if !now.exists() {
             return Some(Reason::OutputMissing(path.clone()));
         }
@@ -476,12 +488,12 @@ pub(crate) fn reason(
         return Some(Reason::InputRebuilt(graph.path(input).into()));
     }
     for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
-        if !stamps.node_as(node, hashed, Some((stamp, record.start))).same(*stamp) {
+        if !stamps.node_as(node, hashed_as(stamp), Some((stamp, record.start))).same(*stamp) {
             return Some(Reason::InputChanged(path.clone()));
         }
     }
     for (path, stamp) in &record.discovered {
-        if !stamps.path_as(path, hashed, Some((stamp, finished(record)))).same(*stamp) {
+        if !stamps.path_as(path, hashed_as(stamp), Some((stamp, finished(record)))).same(*stamp) {
             return Some(Reason::DiscoveredChanged(path.clone()));
         }
     }

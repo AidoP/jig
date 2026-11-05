@@ -381,6 +381,14 @@ fn declare_builtins(
             project::Data::Bool(false),
         ),
         (
+            project::Property::new("download".into(), project::Type::String).info(
+                "what is fetched of what workers build: `'all'`, or `'targets'`, which are what is asked for, as by \
+                 default, installed or tested, and what is built here, while the rest is left on the workers, which \
+                 `JIG_DOWNLOAD` overrides",
+            ),
+            project::Data::Str("all".into()),
+        ),
+        (
             project::Property::new("test-tags".into(), project::Type::List)
                 .info("the tags of the tests `jig test` runs without names or tags, beside the tests without tags"),
             project::Data::List(Vec::new()),
@@ -541,6 +549,8 @@ enum Error {
     /// A `JIG_REMOTE_CACHE` which is not a remote cache.
     InvalidRemote(String),
     InvalidWorker(String),
+    /// A `download` which is not what is fetched of what workers build.
+    InvalidDownload(String),
     InvalidJobs(String),
     /// A `--color` which is not when to show colour.
     InvalidColour(String),
@@ -624,6 +634,9 @@ impl core::fmt::Display for Error {
                      `tcp://<host>:<port>`, `http://[<user>:<password>@]<host>[:<port>][/<path>]` or a command, as \
                      `https://` is not spoken, which a proxy which speaks TLS can be put in front of",
                 )
+            },
+            Self::InvalidDownload(download) => {
+                write!(f, "{download:?} is not what is fetched of what workers build, `all` or `targets`")
             },
             Self::InvalidWorker(worker) => {
                 write!(

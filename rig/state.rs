@@ -14,8 +14,10 @@
 //! outputs, its declared inputs and the inputs it discovered, each as their number followed by each path and its stamp,
 //! then the environment variables it read, as their number followed by each name, and `0` if it was not set, or `1`
 //! followed by the hash of its value, as a `u64`.
-//! A stamp is `0` if the file was missing, or `1` followed by its modification time, as an `i64`, and its size, as a
-//! `u64`. Numbers are little-endian, and paths are their length as a `u32` followed by their UTF-8 bytes.
+//! A stamp is `0` if the file was missing, `1` followed by its modification time, as an `i64`, and its size, as a
+//! `u64`, `2` followed by those and the BLAKE3 hash of its contents, or `3`, for an output left on a worker, followed
+//! by its hash, and `1` if it is executable or `0` if not. Numbers are little-endian, and paths are their
+//! length as a `u32` followed by their UTF-8 bytes.
 
 use std::collections::HashMap;
 use std::io::{Seek, Write};
@@ -25,7 +27,7 @@ use crate::Error;
 use crate::stamp::Stamp;
 
 const MAGIC: &[u8; 4] = b"RIGL";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 /// The fewest records the log has before it is rewritten without those which have been replaced.
 const COMPACT_MIN: usize = 1024;
@@ -107,6 +109,12 @@ impl State {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<&Record> {
         self.records.get(key)
+    }
+    /// Returns the outputs left on workers, by path, with their stamps, as their edges' records have them.
+    #[must_use]
+    pub fn remote_outputs(&self) -> HashMap<String, Stamp> {
+        let outputs = self.records.values().flat_map(|record| &record.outputs);
+        outputs.filter(|(_, stamp)| stamp.is_remote()).map(|(path, stamp)| (path.clone(), *stamp)).collect()
     }
     /// Returns the number of edges with a record.
     #[must_use]
@@ -191,6 +199,11 @@ fn write_record(bytes: &mut Vec<u8>, record: &Record) {
                     contents.extend_from_slice(&size.to_le_bytes());
                     contents.extend_from_slice(hash);
                 },
+                Stamp::Remote { hash, executable } => {
+                    contents.push(3);
+                    contents.extend_from_slice(hash);
+                    contents.push(u8::from(*executable));
+                },
             }
         }
     }
@@ -257,6 +270,10 @@ fn read_record(contents: &[u8]) -> Option<Record> {
                     mtime: i64::from_le_bytes(r.take(8)?.try_into().ok()?),
                     size: u64::from_le_bytes(r.take(8)?.try_into().ok()?),
                     hash: r.take(32)?.try_into().ok()?,
+                },
+                3 => Stamp::Remote {
+                    hash: r.take(32)?.try_into().ok()?,
+                    executable: r.take(1)?[0] == 1,
                 },
                 _ => return None,
             };
@@ -325,7 +342,10 @@ mod tests {
             start,
             duration: 5,
             action: 42,
-            outputs: vec![(output.into(), Stamp::File { mtime: -3, size: 7 })],
+            outputs: vec![
+                (output.into(), Stamp::File { mtime: -3, size: 7 }),
+                (format!("{output}.left"), Stamp::Remote { hash: [9; 32], executable: true }),
+            ],
             inputs: vec![("in".into(), Stamp::File { mtime: 1_700_000_000_000_000_000, size: 0 })],
             discovered: vec![("header.h".into(), Stamp::Missing), ("hashed".into(), Stamp::Content {
                 mtime: 5,
@@ -351,6 +371,10 @@ mod tests {
         assert_eq!(state.get("a"), Some(&record("a", 3)));
         assert_eq!(state.get("b"), Some(&record("b", 2)));
         assert_eq!(state.logged, 3);
+        let left = Stamp::Remote { hash: [9; 32], executable: true };
+        let remote = state.remote_outputs();
+        assert_eq!(remote.len(), 2);
+        assert_eq!(remote.get("a.left"), Some(&left));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 25;
+const VERSION: u32 = 26;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -67,6 +67,8 @@ pub struct Database<'a> {
     pub workers: Vec<&'a str>,
     /// Whether what a worker may build waits for one, rather than being built here.
     pub workers_only: bool,
+    /// Whether only the targets are fetched of what workers build, and what is built here reads.
+    pub download_targets: bool,
     /// The identity of the toolchain, the identity of its release on any host, and the name rustup installs it by,
     /// by which a worker may run what is built, or empty.
     pub toolchain_identity: &'a str,
@@ -172,6 +174,7 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.token_file)?;
     write_strs(w, &database.workers)?;
     write_u32(w, u32::from(database.workers_only))?;
+    write_u32(w, u32::from(database.download_targets))?;
     write_str(w, database.toolchain_identity)?;
     write_str(w, database.toolchain_release)?;
     write_str(w, database.toolchain_install)?;
@@ -240,6 +243,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         token_file: r.str()?,
         workers: r.strs()?,
         workers_only: r.bool()?,
+        download_targets: r.bool()?,
         toolchain_identity: r.str()?,
         toolchain_release: r.str()?,
         toolchain_install: r.str()?,
@@ -368,6 +372,7 @@ mod tests {
             token_file: "/home/user/.config/jig/token",
             workers: vec!["ssh://build", "tcp://worker:7000"],
             workers_only: true,
+            download_targets: true,
             toolchain_identity: "0123abcd",
             toolchain_release: "4567ef01",
             toolchain_install: "nightly-2026-11-03",

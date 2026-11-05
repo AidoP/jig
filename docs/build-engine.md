@@ -334,7 +334,8 @@ Distribution reuses the cache's blob store and keys. A remote execution is a cac
   2. The worker materializes the inputs in a fresh directory under its own root, using hard links from its store, and
      runs the action. Paths are relative and remapped, so the outputs match a local run.
   3. The worker hashes the outputs into its store and returns the result.
-  4. The client downloads the outputs. A later version downloads only what is needed locally; see the phases.
+  4. The client downloads the outputs, or with `download = 'targets'`, only those which are needed here; see phase 7,
+     step 3.
 - **Complete inputs.** An action must not read anything it doesn't declare.
   - For rustc, the declared inputs are the crate's sources from its last depfile, its `--extern` libraries, its link
     script and its target specification. The toolchain must match by identity, and the worker installs it with rustup
@@ -1461,8 +1462,50 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Integration: the expectations of what `build.ninja` holds now have libraries' externs as `.rmeta`, and a
        program's as `.rlib`. A library whose code takes a while to generate has the library which uses it finish
        before it, and the program after; the warning rustc gave is shown as it would have printed it, with no JSON.
-3. **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
-   and what tests need.
+3. **Done:** building without the bytes (state version 4, database version 26).
+   - **`Download`.** With `Options::download` `Targets`, the outputs of an edge which runs on a worker are left there,
+     but for the targets of the build, through aliases, and its depfile and stderr file, which are always fetched.
+     jig's targets are what was asked for: the defaults, `install`, the tests `jig test` runs, or what `jig build` is
+     given. `All`, the default, fetches everything, as before.
+   - **`Stamp::Remote`.** An output left on a worker is stamped by its BLAKE3 hash and whether it's executable, and
+     the stale file, if one was here, is removed. Its edge's record keeps that stamp, so a later build knows it.
+     - `Stamps` gives that stamp to a file which is missing, while a record has it, so the edge which wrote it is up
+       to date, and what reads it has its stamp, and key in the cache, by its hash.
+     - A stamp is the same as another by their hashes, if both have them, so a file which is fetched later is the same
+       as it was left. A recorded stamp which was left is compared by the file's contents, even for an edge which isn't
+       hashed.
+     - Its result isn't added to the local cache, nor pushed, as its blobs aren't here.
+   - **Fetching.** A `Fetcher` fetches each file once, on the thread which needs it: from the local cache, then the
+     remote cache, then each worker, and restores it as from the cache.
+     - An edge which runs here fetches the inputs it reads which were left, declared and discovered, before its
+       command, but not when its result is found in the cache.
+     - An edge which is sent to a worker asks it which of those it's missing, and only those are fetched here and
+       sent. An edge which hasn't run fetches them all, as the action which discovers what it reads runs here.
+     - Once the build has run, the targets which were left, by it or an earlier build, are fetched, on as many threads
+       as the build has jobs.
+   - **Lost outputs.** One which none has any longer, as a worker's cache was collected, is lost.
+     - The edge which needed it doesn't run, and isn't counted as failed. The edge which wrote it is recorded as
+       missing it.
+     - Once the build has run, it's planned and run again, which builds the lost output again, and then what needed
+       it, up to three times. `Report::lost` counts them.
+   - **jig.** The property `download`, `'all'` or `'targets'`, or `JIG_DOWNLOAD`, recorded in `.jig`.
+   - **Not done yet:**
+     - A file fetched later is hashed on each build which compares it, as its record has only its hash, until its
+       edge runs again.
+     - Which worker an edge goes to doesn't count which of them has its inputs already.
+     - What a worker leaves isn't kept from its cache's collection, which loses it.
+   - **Tests.**
+     - rig, stamp: a missing file left on a worker has the stamp it was left with, and the same as its contents once
+       it's here.
+     - rig, state: stamps of what was left saved and loaded, and found by `remote_outputs`.
+     - rig, exec: only for workers, an edge's output which another reads there is left there, with its depfile here,
+       and both are up to date. With a new worker, an edge here which reads it has it built again, by another pass,
+       and fetches it. A target which an earlier build left is built again once no worker has it.
+     - jig: `JIG_DOWNLOAD` overrides `download`, and what isn't `all` or `targets` is an error.
+     - Integration: a library which another uses, and a program, built only for a worker, with the program asked for.
+       The libraries and their metadata are left there, and are up to date. A default build fetches the libraries, the
+       same as built here, without building them again. Once the worker no longer has them, and the library which
+       uses the other changes, the other is built again, and the program runs.
 4. **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
 5. **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
    so Windows can be added later.

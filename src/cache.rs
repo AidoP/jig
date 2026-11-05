@@ -25,6 +25,8 @@
 //!   command, split at spaces, which serves one on its stdin and stdout.
 //! - `workers-only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for one, rather than being built
 //!   here.
+//! - `download`, or `JIG_DOWNLOAD`: what is fetched of what workers build, `'all'`, or `'targets'`, which are what is
+//!   asked for, as by default, installed or tested, and what is built here, while the rest is left on the workers.
 //!
 //! The settings are resolved when the project is configured, as the variables are read by the configuration, and
 //! recorded in its database, which a build reads them from.
@@ -47,6 +49,8 @@ pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
 pub const WORKERS: &str = "JIG_WORKERS";
 /// The environment variable which has what a worker may build wait for one, if it is `1`.
 pub const WORKERS_ONLY: &str = "JIG_WORKERS_ONLY";
+/// The environment variable which gives what is fetched of what workers build, `all` or `targets`.
+pub const DOWNLOAD: &str = "JIG_DOWNLOAD";
 /// The size the cache is collected down to by default.
 pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
@@ -75,6 +79,7 @@ pub struct Properties {
     pub token_file: String,
     pub workers: Vec<String>,
     pub workers_only: bool,
+    pub download: String,
 }
 
 /// How rig caches, from the cache's properties and the variables which override them.
@@ -94,6 +99,8 @@ pub struct Settings {
     pub workers: Vec<String>,
     /// Whether what a worker may build waits for one, rather than being built here.
     pub workers_only: bool,
+    /// Whether only the targets are fetched of what workers build, and what is built here reads, rather than all of it.
+    pub download_targets: bool,
     /// The identity of the project's toolchain, and its release: what identifies it on any host, and the name rustup
     /// installs it by, if it is known, which configuring finds.
     pub release: Option<(String, rig::worker::Release)>,
@@ -136,7 +143,16 @@ impl Settings {
             Some(only) => only == "1",
             None => properties.workers_only,
         };
-        Ok(Self { dir, size, remote, push, token_file, workers, workers_only, release: None })
+        let download = match env(DOWNLOAD) {
+            Some(download) => download.to_string_lossy().into_owned(),
+            None => properties.download.clone(),
+        };
+        let download_targets = match download.as_str() {
+            "" | "all" => false,
+            "targets" => true,
+            _ => return Err(Error::InvalidDownload(download)),
+        };
+        Ok(Self { dir, size, remote, push, token_file, workers, workers_only, download_targets, release: None })
     }
     /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
@@ -533,6 +549,7 @@ mod tests {
             token_file: "/t".into(),
             workers: vec!["ssh://worker".into(), " ".into()],
             workers_only: true,
+            download: "targets".into(),
         };
         let settings = resolved(Settings::resolve(&properties, env(&[])));
         let expected = Settings {
@@ -543,6 +560,7 @@ mod tests {
             token_file: Some("/t".into()),
             workers: vec!["ssh://worker".into()],
             workers_only: true,
+            download_targets: true,
             release: None,
         };
         assert_eq!(settings, expected);
@@ -553,6 +571,7 @@ mod tests {
             ("JIG_REMOTE_CACHE_PUSH", "0"),
             ("JIG_WORKERS", "tcp://a:1; env jig worker --stdio ;"),
             ("JIG_WORKERS_ONLY", "0"),
+            ("JIG_DOWNLOAD", "all"),
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
         let expected = Settings {
@@ -563,6 +582,7 @@ mod tests {
             token_file: Some("/t".into()),
             workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
             workers_only: false,
+            download_targets: false,
             release: None,
         };
         assert_eq!(settings, expected);
@@ -577,10 +597,13 @@ mod tests {
             token_file: String::new(),
             workers: Vec::new(),
             workers_only: false,
+            download: String::new(),
         };
         assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
         // what is not a size or a remote cache is an error
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_SIZE", "lots")])), Err(Error::InvalidSize(_))));
+        let download = Settings::resolve(&properties, env(&[("JIG_DOWNLOAD", "some")]));
+        assert!(matches!(download, Err(Error::InvalidDownload(_))));
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_REMOTE_CACHE", "ssh://")])), Err(Error::InvalidRemote(_))));
         let workers: [&'static [(&str, &str)]; 3] =
             [&[("JIG_WORKERS", "http://cache")], &[("JIG_WORKERS", "ssh://")], &[("JIG_WORKERS", "tcp://worker")]];

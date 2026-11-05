@@ -1987,6 +1987,63 @@ fn workers() {
 }
 
 #[test]
+fn leaves_outputs_on_workers() {
+    if !rig_engine() {
+        return;
+    }
+    // a library another uses, which a program uses, built only for the worker, which leaves there what is not asked
+    // for, once the build here has found what they read
+    let dir = std::env::temp_dir().join(format!("jig-test-{}-leaves", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let jig = configure_path().display().to_string();
+    let worker = |store: &str| {
+        format!("/usr/bin/env JIG_CACHE={} {jig} worker --stdio --jobs 4", dir.join(store).display())
+    };
+    let project = Project::new("leaves", &[
+        ("Jig", "crate a 'a.rs'\ncrate b 'b.rs'\n    use a\ncrate app 'app.rs'\n    crate-type 'bin'\n    use b\n"),
+        ("a.rs", "pub fn value() -> u32 { 40 }\n"),
+        ("b.rs", "pub fn value() -> u32 { a::value() + 2 }\n"),
+        ("app.rs", "fn main() { print!(\"{}\", b::value()); }\n"),
+    ]);
+    let host = project.host();
+    let outputs = project.dir.join("build").join(&host);
+    let build = |args: &[&str], cache: &str, worker: &str| {
+        let mut command = jig_command();
+        command.arg("build").args(args).env("JIG_CACHE", dir.join(cache)).env("JIG_WORKERS", worker);
+        let output = command.env("JIG_WORKERS_ONLY", "1").env("JIG_DOWNLOAD", "targets").current_dir(&project.dir);
+        let output = output.output().unwrap();
+        let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+    let run = || String::from_utf8(Command::new(outputs.join("app")).output().unwrap().stdout).unwrap();
+    build(&[], "first", "");
+    let library = std::fs::read(outputs.join("liba.rlib")).unwrap();
+    // with the outputs gone, the program, asked for alone, is fetched, while the libraries are left on the worker
+    std::fs::remove_dir_all(&outputs).unwrap();
+    let app = format!("{host}/app");
+    let shown = build(&[&app], "second", &worker("store"));
+    assert_contains(&shown, "3 of 3 commands ran on workers");
+    assert_eq!(run(), "42");
+    for left in ["liba.rlib", "liba.rmeta", "libb.rlib", "libb.rmeta"] {
+        assert!(!outputs.join(left).exists(), "{left} was fetched");
+    }
+    // and are up to date
+    assert!(!build(&[&app], "second", &worker("store")).contains(" RUSTC "));
+    // what is built by default is fetched, without being built again
+    let shown = build(&[], "second", &worker("store"));
+    assert!(!shown.contains(" RUSTC "), "{shown}");
+    assert!(std::fs::read(outputs.join("liba.rlib")).unwrap() == library, "liba.rlib differs from what was built");
+    assert!(!outputs.join("liba.rmeta").exists());
+    // once the worker no longer has the metadata a library is built against, the library which wrote it is built again
+    std::fs::write(project.dir.join("b.rs"), "pub fn value() -> u32 { a::value() + 3 }\n").unwrap();
+    let shown = build(&[], "second", &worker("other"));
+    assert_contains(&shown, &format!(" RUSTC {host}/liba.rlib\n"));
+    assert_eq!(run(), "43");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn tests_on_workers() {
     // a target whose `test` is `'workers'` has its crates' tests run on a worker which runs it, here the host, which
     // is sent the test harness and what it depends on, as the files the tests read

@@ -23,13 +23,16 @@ pub enum Stamp {
     /// A file stamped by its contents, as an edge which is hashed stamps its files, with the time and size it had, by
     /// which its hash is reused while they are the same.
     Content { mtime: i64, size: u64, hash: [u8; 32] },
+    /// An output left on a worker, which wrote it, rather than fetched, by its contents and whether it is executable,
+    /// which is fetched once something here needs it. Its file is missing until then, and its size is not known.
+    Remote { hash: [u8; 32], executable: bool },
 }
 impl Stamp {
-    /// The size of the file, or `0` if it is missing.
+    /// The size of the file, or `0` if it is missing, or left on a worker.
     #[must_use]
     pub fn size(&self) -> u64 {
         match self {
-            Self::Missing => 0,
+            Self::Missing | Self::Remote { .. } => 0,
             Self::File { size, .. } | Self::Content { size, .. } => *size,
         }
     }
@@ -52,25 +55,30 @@ impl Stamp {
         };
         Self::File { mtime, size: metadata.len() }
     }
-    /// Returns the hash of the contents of the file, if it is stamped by them.
+    /// Returns the hash of the contents of the file, if it is stamped by them, as one left on a worker is.
     #[must_use]
     pub fn hash(&self) -> Option<&[u8; 32]> {
         match self {
-            Self::Content { hash, .. } => Some(hash),
+            Self::Content { hash, .. } | Self::Remote { hash, .. } => Some(hash),
             Self::Missing | Self::File { .. } => None,
         }
+    }
+    /// Whether the file was left on a worker.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote { .. })
     }
     #[must_use]
     pub fn exists(self) -> bool {
         self != Self::Missing
     }
-    /// Whether a file has not changed between two stamps: by its contents if both are of them, or otherwise by its
-    /// time and size, while a stamp of one kind differs from a stamp of the other.
+    /// Whether a file has not changed between two stamps: by its contents if both are of them, as a file left on a
+    /// worker is, or otherwise by its time and size, while a stamp of one kind differs from a stamp of the other.
     #[must_use]
     pub fn same(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Content { hash, .. }, Self::Content { hash: other, .. }) => hash == other,
-            (lhs, rhs) => lhs == rhs,
+        match (self.hash(), other.hash()) {
+            (Some(hash), Some(other)) => hash == other,
+            _ => self == other,
         }
     }
 }
@@ -100,13 +108,42 @@ pub struct Stamps<'a> {
     env: Vec<(String, String)>,
     /// The stamps of the contents of files, by path, each found once.
     contents: HashMap<String, Stamp>,
+    /// The outputs left on workers, by path, whose stamps they have while their files are missing.
+    remote: HashMap<String, Stamp>,
 }
 impl<'a> Stamps<'a> {
     /// The stamps of the files of a graph, whose paths are relative to `dir`.
     #[must_use]
     pub fn new(graph: &'a Graph, dir: &Path) -> Self {
         let nodes = vec![None; graph.nodes()];
-        Self { dir: dir.into(), graph, nodes, paths: HashMap::new(), env: Vec::new(), contents: HashMap::new() }
+        let (paths, contents, remote) = (HashMap::new(), HashMap::new(), HashMap::new());
+        Self { dir: dir.into(), graph, nodes, paths, env: Vec::new(), contents, remote }
+    }
+    /// Stamp the outputs left on workers, by path, by these stamps while their files are missing, beside those which
+    /// were.
+    pub fn extend_remote(&mut self, remote: HashMap<String, Stamp>) {
+        self.remote.extend(remote);
+    }
+    /// An output has been left on a worker, with this stamp, which it has while its file is missing, or with `None`,
+    /// is no longer, as its edge has run again, or it was lost, so that it is stamped again.
+    pub fn set_remote(&mut self, path: &str, stamp: Option<Stamp>) {
+        match stamp {
+            Some(stamp) => self.remote.insert(path.to_string(), stamp),
+            None => self.remote.remove(path),
+        };
+        match self.graph.node(path) {
+            Some(node) => self.forget(node),
+            None => {
+                self.paths.remove(path);
+            },
+        }
+    }
+    /// Returns the stamp of a file left on a worker, if it is one, and it is missing here.
+    fn or_remote(&self, path: &str, stamp: Stamp) -> Stamp {
+        match stamp {
+            Stamp::Missing => self.remote.get(path).copied().unwrap_or(stamp),
+            stamp => stamp,
+        }
     }
     /// Stamp environment variables as they are for commands which are given `env` beside what they inherit.
     #[must_use]
@@ -141,7 +178,8 @@ impl<'a> Stamps<'a> {
         if let Some(stamp) = self.nodes[index] {
             return stamp;
         }
-        let stamp = Stamp::of(&self.dir.join(self.graph.path(node)));
+        let path = self.graph.path(node);
+        let stamp = self.or_remote(path, Stamp::of(&self.dir.join(path)));
         self.nodes[index] = Some(stamp);
         stamp
     }
@@ -153,7 +191,7 @@ impl<'a> Stamps<'a> {
         if let Some(&stamp) = self.paths.get(path) {
             return stamp;
         }
-        let stamp = Stamp::of(&self.dir.join(path));
+        let stamp = self.or_remote(path, Stamp::of(&self.dir.join(path)));
         self.paths.insert(path.into(), stamp);
         stamp
     }
@@ -167,9 +205,10 @@ impl<'a> Stamps<'a> {
         let full: Vec<&Path> = full.iter().map(PathBuf::as_path).collect();
         let mut stamps = stamps_of(&full).into_iter();
         for (node, stamp) in nodes.iter().zip(stamps.by_ref()) {
-            self.nodes[node.0 as usize] = Some(stamp);
+            self.nodes[node.0 as usize] = Some(self.or_remote(self.graph.path(*node), stamp));
         }
         for (path, stamp) in paths.iter().zip(stamps) {
+            let stamp = self.or_remote(path, stamp);
             self.paths.insert((*path).to_string(), stamp);
         }
     }
@@ -278,6 +317,28 @@ mod tests {
         assert!(!again.same(hashed));
         // and without a recorded hash, as without hashing, it is stamped by its time and size
         assert!(matches!(Stamps::new(&graph, &dir).node_as(source, false, None), Stamp::File { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stamps_what_was_left_on_a_worker() {
+        let dir = std::env::temp_dir().join(format!("rig-stamps-remote-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut graph = Graph::new();
+        let left = graph.file("left");
+        let hash = crate::blake3::hash(b"left");
+        let remote = Stamp::Remote { hash, executable: false };
+        // while it is missing, it is stamped as it was left
+        let mut stamps = Stamps::new(&graph, &dir);
+        stamps.extend_remote(HashMap::from([("left".to_string(), remote)]));
+        assert_eq!(stamps.node(left), remote);
+        // and once it is here, by its file, which is the same by its contents
+        std::fs::write(dir.join("left"), "left").unwrap();
+        stamps.forget(left);
+        let here = stamps.node_as(left, true, None);
+        assert!(here.same(remote) && remote.same(here));
+        assert!(!stamps.node(left).same(remote));
+        assert!(!Stamp::Remote { hash: [0; 32], executable: false }.same(remote));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
