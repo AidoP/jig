@@ -81,7 +81,7 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     let mut failures = Vec::new();
     // the tests which run on workers are sent at once, and run while those here run in turn
     let workers = Workers::new(&project, tests.iter().any(|test| !test.on_workers.is_empty()))?;
-    std::thread::scope(|scope| {
+    crate::timings::step("test", || std::thread::scope(|scope| {
         let mut sent: Vec<_> = tests
             .iter()
             .map(|test| (!test.on_workers.is_empty()).then(|| scope.spawn(|| workers.run(test, style.pretty))))
@@ -106,7 +106,7 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
                 failures.push((test.name, report));
             }
         }
-    });
+    }));
     let elapsed = started.elapsed();
     // the output of each failure, unless it was shown already
     for (name, report) in failures.iter().filter(|_| !verbose) {

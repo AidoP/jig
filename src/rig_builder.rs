@@ -5,6 +5,7 @@
 //! `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would run, `-v` to show commands
 //! rather than descriptions, and `--quiet`.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -106,8 +107,13 @@ impl Rig<'_> {
             Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr())),
         };
         let (quiet, verbose) = (console.quiet, console.verbose);
-        let mut observer = rig::exec::Console { out: &mut out, quiet, verbose, colour };
-        let built = rig::exec::build(&graph, &mut state, options, targets, &mut observer);
+        let mut console = rig::exec::Console { out: &mut out, quiet, verbose, colour };
+        let built = if crate::timings::enabled() {
+            let mut observer = Timed { inner: &mut console, started: HashMap::new() };
+            rig::exec::build(&graph, &mut state, options, targets, &mut observer)
+        } else {
+            rig::exec::build(&graph, &mut state, options, targets, &mut console)
+        };
         // what ran elsewhere is told, as it is not otherwise shown
         if let Ok(report) = &built
             && report.remote > 0
@@ -152,6 +158,36 @@ impl Rig<'_> {
 struct Console {
     quiet: bool,
     verbose: bool,
+}
+
+/// What times each command of a build, for `--timings`, from when it starts until it finishes, before what shows it.
+struct Timed<'a> {
+    inner: &'a mut dyn rig::exec::Observer,
+    started: HashMap<rig::EdgeId, std::time::Instant>,
+}
+impl rig::exec::Observer for Timed<'_> {
+    fn started(&mut self, graph: &rig::Graph, edge: rig::EdgeId, reason: &rig::plan::Reason, progress: rig::exec::Progress) {
+        self.started.insert(edge, std::time::Instant::now());
+        self.inner.started(graph, edge, reason, progress);
+    }
+    fn finished(
+        &mut self,
+        graph: &rig::Graph,
+        edge: rig::EdgeId,
+        outcome: &rig::exec::Outcome,
+        output: &[u8],
+        progress: rig::exec::Progress,
+    ) {
+        if let Some(started) = self.started.remove(&edge) {
+            let data = graph.edge(edge);
+            let description = match (data.description(), data.kind()) {
+                ("", rig::EdgeKind::Command(action)) => action.command_line(),
+                (description, _) => description.to_string(),
+            };
+            crate::timings::command(description, started.elapsed());
+        }
+        self.inner.finished(graph, edge, outcome, output, progress);
+    }
 }
 
 impl Builder for Rig<'_> {
