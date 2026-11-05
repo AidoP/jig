@@ -102,12 +102,16 @@ impl Rig<'_> {
         let graph = self.graph()?;
         let mut state = self.state()?;
         // rustc and clippy print in colour, which is left out where the output is not in colour, as ninja does
-        let (mut out, colour): (Box<dyn std::io::Write>, bool) = match output {
-            Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout())),
-            Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr())),
+        let (mut out, colour, fd): (Box<dyn std::io::Write>, bool, i32) = match output {
+            Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout()), 1),
+            Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr()), 2),
         };
         let (quiet, verbose) = (console.quiet, console.verbose);
-        let mut console = rig::exec::Console { out: &mut out, quiet, verbose, colour };
+        let mut console = rig::exec::Console::new(&mut out, quiet, verbose, colour);
+        // with escape sequences, on a terminal, what is running is listed in place
+        if colour && let Some(width) = rig::exec::terminal_width(fd) {
+            console = console.in_place(width);
+        }
         let built = if crate::timings::enabled() {
             let mut observer = Timed { inner: &mut console, started: HashMap::new() };
             rig::exec::build(&graph, &mut state, options, targets, &mut observer)
@@ -187,6 +191,16 @@ impl rig::exec::Observer for Timed<'_> {
             crate::timings::command(description, started.elapsed());
         }
         self.inner.finished(graph, edge, outcome, output, progress);
+    }
+    fn unstarted(&mut self, graph: &rig::Graph, edge: rig::EdgeId) {
+        self.started.remove(&edge);
+        self.inner.unstarted(graph, edge);
+    }
+    fn tick(&mut self) {
+        self.inner.tick();
+    }
+    fn done(&mut self) {
+        self.inner.done();
     }
 }
 
