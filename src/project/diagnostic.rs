@@ -572,8 +572,8 @@ impl core::fmt::Display for Message {
             },
             Self::OtherJig { running, configured } => write!(
                 f,
-                "the project is configured by {configured:?}, which regenerates `build.ninja`, rather than the running \
-                 {running:?}, which `jig generate` would configure it with",
+                "the project was configured by another jig, {configured:?}, which regenerates it; run `jig generate` \
+                 to use this one, {running:?}",
             ),
             Self::ProxyBuild { program, configuration: false } => write!(f, "building {program}"),
             Self::ProxyBuild { program, configuration: true } => {
