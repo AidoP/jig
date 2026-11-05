@@ -6339,11 +6339,12 @@ fn other_jig_warning() {
     // the `jig` which configured the project is not warned about
     let (success, stderr) = build(&configure_path());
     assert!(success && !stderr.contains("other-jig"), "{stderr}");
-    // while another is, as the one which configured it regenerates `build.ninja`
+    // while another is, as the one which configured it regenerates it
     let (success, stderr) = build(&copy);
     assert!(success, "{stderr}");
     assert_contains(&stderr, &format!(
-        "warning[other-jig]: the project is configured by {:?}, which regenerates `build.ninja`, rather than the running {:?}",
+        "warning[other-jig]: the project was configured by another jig, {:?}, which regenerates it; run `jig generate` \
+         to use this one, {:?}",
         configure_path().display().to_string(),
         copy.display().to_string(),
     ));

@@ -80,8 +80,8 @@ where the build's output is not a terminal, so that what is built does not depen
 --color <when>`, before the command, chooses otherwise, as `auto`, `always` or `never`, for the build with rig, `jig
 lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. ninja chooses for itself.
 `build.ninja` regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
-the project, so another one which is run reports the `other-jig` warning, as it is not the one which regenerates it,
-until the project is configured with it, such as with `jig generate`. Its severity is that of `diagnostic/other-jig`
+the project, so running another one reports the `other-jig` warning, which names both, until `jig generate` configures
+the project with the one which is running. Its severity is that of `diagnostic/other-jig`
 when it was configured, where `'error'` stops the command before running ninja.
 
 `jig run [<name>] [--] [<argument> ...]` builds a binary crate and runs it with the arguments, in the working
