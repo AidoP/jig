@@ -1641,11 +1641,13 @@ mod tests {
         }
     }
 
-    /// A graph of two cached edges which each discover `extra.h`, and print, and of one which reads `hidden`, which it
-    /// does not declare or discover.
+    /// A graph of two cached edges which each discover `extra.h`, and print, of one which reads `hidden`, which it
+    /// does not declare or discover, and of the slow edge, which is not cached.
     fn compiled() -> Graph {
         let cc = "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d && echo compiled $out";
         graph()
+            .rule("slow", &[("command", SLOW)])
+            .edge("slow", &["slow"], &[])
             .cached("toolchain")
             .rule("cc", &[("command", cc), ("depfile", "$out.d")])
             .rule("hidden", &[
@@ -1679,12 +1681,11 @@ mod tests {
         let store = TempCache::new("workers-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
         let (report, finished) = build.build(&[]);
-        assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
-        // once they are, with an empty cache, the one job runs one edge, and the worker the others, but for the one
-        // which reads what it was not sent, which fails there and runs here again, unless it was the one which ran here
-        for output in ["a.o", "b.o", "c.o", "a.o.d", "b.o.d"] {
-            std::fs::remove_file(build.dir.join(output)).unwrap();
-        }
+        assert_eq!((report.ran, report.remote), (4, 0), "{finished:?}");
+        // once they are, with an empty cache, the slow edge holds the one job, which the others would wait for
+        // longer than they take to send, so the worker runs them, but for the one which reads what it was not sent,
+        // which fails there and runs here again
+        remove(&build, &["slow", "a.o", "b.o", "c.o", "a.o.d", "b.o.d"]);
         let second = TempCache::new("workers-second");
         build.options.cache = Some(second.0.clone());
         // which is connected to first, and reports what it has, as the build does not wait for it
@@ -1692,29 +1693,26 @@ mod tests {
         assert!(build.options.workers[0].capabilities().is_ok());
         let (report, finished) = build.build(&[]);
         assert!(report.succeeded(), "{finished:?}");
-        assert_eq!((report.ran, report.cached), (3, 0), "{finished:?}");
-        assert!(matches!(report.remote, 1 | 2), "{report:?}");
+        assert_eq!((report.ran, report.cached, report.remote), (4, 0, 2), "{finished:?}");
         assert_eq!(build.read("a.o"), "a\nh\n");
         assert_eq!(build.read("b.o"), "b\nh\n");
         assert_eq!(build.read("c.o"), "c\nhidden\n");
         assert_eq!(build.read("a.o.d"), "a.o: a.c extra.h\n");
         let mut printed: Vec<String> = finished.iter().map(|(_, printed)| printed.clone()).collect();
         printed.sort();
-        assert_eq!(printed, ["", "compiled a.o\n", "compiled b.o\n"]);
+        assert_eq!(printed, ["", "", "compiled a.o\n", "compiled b.o\n"]);
         // what ran on the worker is recorded, and added to the cache, as what ran here is
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         assert_eq!(second.0.stats().results, 3);
         // a worker without the toolchain is sent nothing
-        for output in ["a.o", "b.o", "c.o"] {
-            std::fs::remove_file(build.dir.join(output)).unwrap();
-        }
+        remove(&build, &["slow", "a.o", "b.o", "c.o"]);
         let third = TempCache::new("workers-third");
         build.options.cache = Some(third.0.clone());
         let other = TempCache::new("workers-other");
         build.options.workers = vec![worker(&other, &["another toolchain"])];
         assert!(build.options.workers[0].capabilities().is_ok());
         let (report, finished) = build.build(&[]);
-        assert_eq!((report.ran, report.remote), (3, 0), "{finished:?}");
+        assert_eq!((report.ran, report.remote), (4, 0), "{finished:?}");
         assert_eq!(other.0.stats().blobs, 0);
         assert_eq!(build.read("b.o"), "b\nh\n");
     }
