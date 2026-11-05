@@ -1883,8 +1883,10 @@ pub(crate) fn run_command(
 /// at once, updated in place with escape sequences: each edge which is running, by the order it started in, with how
 /// long it has run, as `[ 2/15] RUSTC liba.rlib (3m)`, and a line whose edge has finished, while no other has taken
 /// its place, as `[  /15] -`. Each line is cut to the terminal's width, so that none wraps. What finishes is not kept,
-/// but what it printed, and its failure, is shown above the lines. The lines are taken away while a console edge has
-/// the terminal, and once the build is done, which leaves the status of the edge which finished last.
+/// but what it printed, and its failure, is shown above the lines. The cursor is left at the end of the last line, so
+/// that no blank line is below them. The lines are taken away while a console edge has the terminal, and once the
+/// build is done, when they are replaced by how many edges finished, of those which may run, and how long the build
+/// took, as `[15/15] completed in 3m 14s`, or `[12/15] stopped after 2s` if not every one did.
 pub struct Console<W: std::io::Write> {
     pub out: W,
     pub quiet: bool,
@@ -1896,12 +1898,14 @@ pub struct Console<W: std::io::Write> {
     lines: Vec<Option<Running>>,
     /// The number of edges which may run, as it was last told.
     total: usize,
-    /// The lines as they were last drawn, which are above the cursor.
+    /// The lines as they were last drawn, the last of which the cursor is at the end of.
     drawn: Vec<String>,
     /// Whether a console edge has the terminal.
     terminal_held: bool,
-    /// The status of the edge which finished last, which is left once the build is done.
-    last: Option<String>,
+    /// How far the build had got when an edge last finished, if one has.
+    progress: Option<Progress>,
+    /// When the build started, as the console was made.
+    began: Instant,
 }
 
 /// An edge which is running, shown in place.
@@ -1916,8 +1920,9 @@ struct Running {
 impl<W: std::io::Write> Console<W> {
     #[must_use]
     pub fn new(out: W, quiet: bool, verbose: bool, colour: bool) -> Self {
-        let (lines, drawn) = (Vec::new(), Vec::new());
-        Self { out, quiet, verbose, colour, width: None, lines, total: 0, drawn, terminal_held: false, last: None }
+        let (lines, drawn, began) = (Vec::new(), Vec::new(), Instant::now());
+        Self { out, quiet, verbose, colour, width: None, lines, total: 0, drawn, terminal_held: false, progress: None,
+            began }
     }
     /// Show what is running in place, on a terminal this wide, unless `quiet`.
     #[must_use]
@@ -1941,10 +1946,15 @@ impl<W: std::io::Write> Console<W> {
     }
     /// Take the lines away, leaving the cursor where they started.
     fn clear(&mut self) {
-        if !self.drawn.is_empty() {
-            let _ = write!(self.out, "\x1b[{}A\x1b[J", self.drawn.len());
-            self.drawn.clear();
+        if self.drawn.is_empty() {
+            return;
         }
+        let _ = write!(self.out, "\r");
+        if self.drawn.len() > 1 {
+            let _ = write!(self.out, "\x1b[{}A", self.drawn.len() - 1);
+        }
+        let _ = write!(self.out, "\x1b[J");
+        self.drawn.clear();
     }
     /// Returns the lines as they are now.
     fn render(&self, width: usize) -> Vec<String> {
@@ -1974,9 +1984,7 @@ impl<W: std::io::Write> Console<W> {
             return;
         }
         self.clear();
-        for line in &lines {
-            let _ = writeln!(self.out, "{line}");
-        }
+        let _ = write!(self.out, "{}", lines.join("\n"));
         self.drawn = lines;
         let _ = self.out.flush();
     }
@@ -1987,6 +1995,16 @@ impl<W: std::io::Write> Console<W> {
                 *line = None;
             }
         }
+    }
+}
+
+/// Returns how long a build took, in hours, minutes and seconds, as `3m 14s`, or in seconds to a tenth below a minute.
+fn total_time(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    match seconds {
+        0..60 => format!("{:.1}s", duration.as_secs_f64()),
+        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m {}s", seconds / 3600, seconds / 60 % 60, seconds % 60),
     }
 }
 
@@ -2033,8 +2051,10 @@ impl<W: std::io::Write> Observer for Console<W> {
         }
         self.clear();
         self.lines.clear();
-        if let Some(last) = self.last.take() {
-            let _ = writeln!(self.out, "{last}");
+        if let Some(Progress { finished, total, .. }) = self.progress.take() {
+            let took = total_time(self.began.elapsed());
+            let ended = if finished == total { "completed in" } else { "stopped after" };
+            let _ = writeln!(self.out, "[{finished}/{total}] {ended} {took}");
         }
         let _ = self.out.flush();
     }
@@ -2050,10 +2070,8 @@ impl<W: std::io::Write> Observer for Console<W> {
             }
             if data.pool() == Pool::Console {
                 self.terminal_held = false;
-            } else {
-                let description = self.description(graph, edge);
-                self.last = Some(format!("[{}/{}] {description}", progress.finished, progress.total));
             }
+            self.progress = Some(progress);
         } else if data.pool() != Pool::Console {
             self.status(graph, edge, progress);
         }
@@ -2208,29 +2226,43 @@ mod tests {
         let shown = |console: &mut Console<Vec<u8>>| String::from_utf8(std::mem::take(&mut console.out)).unwrap();
         let progress = |started, finished| Progress { total: 12, started, finished, running: 0 };
         console.started(&graph, ab, &Reason::NoRecord, progress(1, 0));
-        assert_eq!(shown(&mut console), "[ 1/12] cat a b > ab (0s)\n");
+        assert_eq!(shown(&mut console), "[ 1/12] cat a b > ab (0s)");
         console.started(&graph, cd, &Reason::NoRecord, progress(2, 0));
-        assert_eq!(shown(&mut console), "\x1b[1A\x1b[J[ 1/12] cat a b > ab (0s)\n[ 2/12] cat c d > cd (0s)\n");
+        // the cursor is left at the end of the last line, so that there is no blank line below them
+        assert_eq!(shown(&mut console), "\r\x1b[J[ 1/12] cat a b > ab (0s)\n[ 2/12] cat c d > cd (0s)");
         // nothing is drawn while it is the same
         console.tick();
         assert_eq!(shown(&mut console), "");
         // what finishes is not kept, though what it printed is, above the lines, where its line is free
         console.finished(&graph, ab, &Outcome::Succeeded, b"printed", progress(2, 1));
-        assert_eq!(shown(&mut console), "\x1b[2A\x1b[Jprinted\n[  /12] -\n[ 2/12] cat c d > cd (0s)\n");
+        assert_eq!(shown(&mut console), "\r\x1b[1A\x1b[Jprinted\n[  /12] -\n[ 2/12] cat c d > cd (0s)");
         // until another takes it
         console.started(&graph, ef, &Reason::NoRecord, progress(3, 1));
-        assert_eq!(shown(&mut console), "\x1b[2A\x1b[J[ 3/12] cat e f > ef (0s)\n[ 2/12] cat c d > cd (0s)\n");
+        assert_eq!(shown(&mut console), "\r\x1b[1A\x1b[J[ 3/12] cat e f > ef (0s)\n[ 2/12] cat c d > cd (0s)");
         console.finished(&graph, ef, &Outcome::Succeeded, b"", progress(3, 2));
-        assert_eq!(shown(&mut console), "\x1b[2A\x1b[J[  /12] -\n[ 2/12] cat c d > cd (0s)\n");
-        // and once the build is done, the lines are taken away, but for the status of what finished last
+        assert_eq!(shown(&mut console), "\r\x1b[1A\x1b[J[  /12] -\n[ 2/12] cat c d > cd (0s)");
+        // and once the build is done, the lines are replaced by how far it got, and how long it took
         console.finished(&graph, cd, &Outcome::Succeeded, b"", progress(3, 3));
         shown(&mut console);
         console.done();
-        assert_eq!(shown(&mut console), "\x1b[2A\x1b[J[3/12] cat c d > cd\n");
+        let summary = shown(&mut console);
+        let stopped = summary.strip_prefix("\r\x1b[1A\x1b[J[3/12] stopped after ");
+        let stopped = stopped.and_then(|rest| rest.strip_suffix("s\n"));
+        assert!(stopped.is_some_and(|took| took.parse::<f64>().is_ok()), "{summary:?}");
+        let mut console = Console::new(Vec::new(), false, false, true).in_place(80);
+        let all = Progress { total: 1, started: 1, finished: 1, running: 0 };
+        console.started(&graph, ab, &Reason::NoRecord, all);
+        console.finished(&graph, ab, &Outcome::Succeeded, b"", all);
+        shown(&mut console);
+        console.done();
+        assert!(shown(&mut console).starts_with("\r\x1b[J[1/1] completed in "));
+        assert_eq!(total_time(Duration::from_millis(3440)), "3.4s");
+        assert_eq!(total_time(Duration::from_secs(194)), "3m 14s");
+        assert_eq!(total_time(Duration::from_secs(3725)), "1h 2m 5s");
         // a line is cut to the terminal's width, keeping how long it has run
         let mut console = Console::new(Vec::new(), false, false, true).in_place(20);
         console.started(&graph, ab, &Reason::NoRecord, progress(1, 0));
-        assert_eq!(shown(&mut console), "[ 1/12] cat a (0s)\n");
+        assert_eq!(shown(&mut console), "[ 1/12] cat a (0s)");
         // which long running edges show in minutes and hours
         assert_eq!([elapsed(Duration::from_secs(59)), elapsed(Duration::from_secs(185))], ["59s", "3m"]);
         assert_eq!(elapsed(Duration::from_secs(7300)), "2h");

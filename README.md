@@ -82,8 +82,8 @@ lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. n
 With colour, where the build's output is a terminal, rig shows the build in place, as ninja does on a smart terminal:
 a line for each of the commands which run at once, by the order it started in, with how long it has run, such as
 `[ 2/15] RUSTC libexample.rlib (3m)`, or `[  /15] -` once its command has finished and no other has started in its
-place. What has finished is not kept, but what it printed is, above the lines, and once the build is done, only the
-status of the command which finished last is left.
+place. What has finished is not kept, but what it printed is, above the lines, and once the build is done, the lines
+are replaced by a summary, such as `[15/15] completed in 3m 14s`, or `[12/15] stopped after 2.0s` if it stopped first.
 `jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
 program and running tests took, each in total, and with rig, the ten commands of the build which took longest, from
 when each started until it finished, such as `jig --timings test`.
