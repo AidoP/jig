@@ -375,8 +375,8 @@ fn declare_builtins(
         (
             project::Property::new("workers-only".into(), project::Type::Bool).info(
                 "whether what a worker may build waits for one, rather than being built here, which \
-                 `JIG_WORKERS_ONLY=1` overrides, while what no worker builds, and what has not been built before, is \
-                 still built here",
+                 `JIG_WORKERS_ONLY=1` overrides, while what no worker builds, and what is not cached, is still built \
+                 here",
             ),
             project::Data::Bool(false),
         ),

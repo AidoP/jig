@@ -190,6 +190,7 @@ fn write(generated: &Generated, ninja_dir: &Path, rig_dir: &Path) {
                 cache: None,
                 pass_env: &[],
                 placement: rig::Placement::default(),
+                discover: None,
             })
             .unwrap_or_else(|error| panic!("{error}"));
     }

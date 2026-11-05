@@ -14,9 +14,12 @@ use std::collections::HashMap;
 use crate::graph::{Action, Edge, EdgeKind, Graph, NodeId, Pool};
 use crate::Error;
 
-/// The bindings a rule can have, as ninja allows.
+/// The bindings a rule can have, as ninja allows, and `discover`, which only rig reads, as a command which writes the
+/// depfile of an edge which has not run, without running it. ninja does not allow it, so a manifest for both does not
+/// have it, but gives rig its edges' actions which discover, as jig does.
 const RULE_BINDINGS: &[&str] = &[
     "command",
+    "discover",
     "description",
     "depfile",
     "deps",
@@ -141,6 +144,9 @@ pub struct Build<'a> {
     pub pass_env: Vec<String>,
     /// Which workers the edge may run on, if it is cached.
     pub placement: crate::Placement,
+    /// What finds the inputs the edge discovers without running it, in place of the `discover` binding of its rule,
+    /// which rig takes as a command which writes its depfile, while ninja does not know it.
+    pub discover: Option<Action>,
 }
 
 impl Manifest {
@@ -238,6 +244,9 @@ impl Manifest {
             edge.cache.clone_from(&build.cache);
             edge.pass_env.clone_from(&build.pass_env);
             edge.placement.clone_from(&build.placement);
+            let discover = scope.lookup("discover", 0).map_err(message)?;
+            let bound = (!discover.is_empty()).then_some(Action::Shell(discover));
+            edge.discover = build.discover.clone().or(bound);
         }
         self.graph.add_edge(edge)?;
         Ok(())

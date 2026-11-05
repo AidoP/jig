@@ -1400,22 +1400,42 @@ implementation of that trait, so `generate.rs` doesn't change.
      - jig: `JIG_WORKERS_ONLY` overrides `workers-only`.
      - Integration: with `-j 8` and `JIG_WORKERS_ONLY=1`, every command of a build whose outputs were removed runs on
        the worker, and the libraries are those built here.
-   - **Not done yet:** a first build still runs here, as what an edge discovers is only known once it has run. A cheap
-     local `rustc --emit=dep-info` pass would find it, as the plan for distribution suggests.
+   - **Not done at first, since done:** a first build ran here, as what an edge discovers was only known once it had
+     run. Phase 7, step 1 finds it by a local `rustc --emit=dep-info` pass.
 
 ### Phase 7: later
 
-- **Pipelining.** Start dependents from `.rmeta`, using early outputs.
-- **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
-  and what tests need.
-- **First builds on workers.** An edge which hasn't run before runs here, even in a build only for workers, as which
-  files it reads is only known from its depfile once it has. A cheap local pass, such as `rustc --emit=dep-info` with
-  the edge's arguments, would find them without compiling, so that a fresh checkout's first build goes to workers too.
-  rig would take it as an edge's discovery action, run it here when there's no record, and send the edge with what it
-  found.
-- **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
-- **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
-  so Windows can be added later.
+#### Steps
+
+1. **Done:** first builds on workers (graph format version 7).
+   - **`Edge::discover`.** An edge may have an action which writes its depfile, as running it would, without doing
+     its work. For rustc, rustdoc's checks and clippy, that's the edge's own command with `--emit=dep-info` alone,
+     and without the file of its diagnostics.
+     - A rule of a manifest for rig alone may give it as its `discover` binding, as the tests do. ninja doesn't allow
+       the binding, so jig gives rig its programs instead, and `build.ninja` doesn't have them.
+   - **Which edges.** An edge which hasn't run before may go to a worker if it has an action which discovers, and its
+     declared inputs, outputs and depfile all lead from the build's directory. It used to need a record of what it
+     discovered, so a fresh checkout's first build ran here, even one only for workers.
+   - **Discovering.** The job's thread runs the action here first, with the edge's environment, then sends the edge
+     with the inputs its depfile lists beside those it declares.
+     - If the action fails, or lists a path which doesn't lead from the build's directory, the edge is given back to
+       run here, which shows why.
+     - What the worker's run discovers is recorded once its outputs are restored, as a local run's would be.
+   - **Not done yet:** with no record of how long an edge took, its cost isn't estimated. It goes to a worker when
+     the wait for a job here isn't known either, or the build is only for workers, and otherwise runs here.
+   - **Tests.**
+     - rig, graph: an edge's discovery saved and loaded.
+     - rig, exec: in a first build only for workers, an edge whose rule discovers that it reads `extra.h` is sent
+       with it, and runs there. One whose discovery fails runs here. What ran there is recorded, and runs again when
+       `extra.h` changes.
+     - Integration: a fresh checkout's first build only for workers runs all six commands there, `mod inner;` among
+       what is found. Its libraries are the same, byte for byte, as another checkout's built here.
+2. **Pipelining.** Start dependents from `.rmeta`, using early outputs.
+3. **Building without the bytes.** Leave intermediate outputs on workers, and download only defaults, installed files
+   and what tests need.
+4. **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
+5. **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
+   so Windows can be added later.
 
 ## Risks
 

@@ -201,9 +201,10 @@ trusted.
 
 With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
 built here, however many jobs the build has, but waits for a worker, as for a machine which should be left alone. What
-must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, what
-has not been built before, as which files it reads is only known once it has, and what is not cached, such as custom
-commands without `cache`. A command which fails on a worker is run here again, as without it.
+must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, and
+what is not cached, such as custom commands without `cache`. What has not been built before, such as a fresh checkout's
+crates, goes to workers too, once rustc finds the files it reads without compiling it, here first. A command which fails
+on a worker is run here again, as without it.
 
 A worker must have the standard library of a crate's target, if the target is builtin, and its rustup installs it with
 the toolchain, with `--install`. A crate's commands are sent only to workers with every tag its `worker-tag` attribute

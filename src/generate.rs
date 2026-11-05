@@ -630,6 +630,7 @@ fn write_graph(
             pass_env: rust.pass_env,
             cache,
             placement: placement.clone(),
+            discover: Some(discovery(&exec)),
             ..Default::default()
         })?;
         everything.push(output.clone());
@@ -659,6 +660,7 @@ fn write_graph(
                 cache,
                 // the test harness links, as a binary does
                 placement: self::placement(unit, units, project, true),
+                discover: Some(discovery(&exec)),
                 ..Default::default()
             })?;
         }
@@ -786,6 +788,7 @@ fn write_graph(
                 pass_env: rust.pass_env,
                 cache,
                 placement: placement.clone(),
+                discover: Some(discovery(&exec)),
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
@@ -813,6 +816,7 @@ fn write_graph(
             pass_env: rust.pass_env,
             cache,
             placement,
+            discover: Some(discovery(&exec)),
             ..Default::default()
         })?;
         graph.alias(&Path::new("check").join(&unit.label), &[&output])?;
@@ -1177,6 +1181,14 @@ impl Rust<'_> {
         exec.stderr = stderr.map(|path| path.display().to_string());
         exec
     }
+}
+
+/// Returns a command of rustc or clippy which writes its dep-info alone, as the command does, without compiling the
+/// crate, by which rig finds the sources of a crate which has not been built, to send it to a worker.
+fn discovery(exec: &rig::Exec) -> rig::Exec {
+    let emits = |arg: &&String| arg.starts_with("--emit=") && !arg.starts_with("--emit=dep-info=");
+    let args = exec.args.iter().filter(|arg| !emits(arg)).cloned().collect();
+    rig::Exec { args, stderr: None, ..exec.clone() }
 }
 
 /// Returns the arguments of rustc which compile a crate to `output`, with its dep-info beside it.
