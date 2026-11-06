@@ -123,15 +123,17 @@ mod benches {
 
     #[test]
     fn replaying_shared_dependencies() {
-        // each crate uses the eight after it, so that each is reached many times but replayed once
-        let labels: Vec<_> = (0..4000).map(|i| format!("c{i}")).collect();
+        // each crate uses the eight after it, so that each is reached many times but replayed once, for few enough
+        // crates that those of the larger input fit in a core's cache, as the time to visit each grows once they do
+        // not, which made 4000 take more than ten times as long as 1000 on some machines, though the work is linear
+        let labels: Vec<_> = (0..1000).map(|i| format!("c{i}")).collect();
         let shared = |n: usize| -> Vec<Flycheck> {
             (0..n).map(|i| {
                 let deps = (i as u32 + 1..n.min(i + 9) as u32).collect();
                 Flycheck { label: &labels[i], diagnostics: &labels[i], member: true, deps }
             }).collect()
         };
-        assert_linear("replay-shared", 1000, shared, |flychecks| {
+        assert_linear("replay-shared", 250, shared, |flychecks| {
             assert_eq!(replayed(&flychecks[0], flychecks).len(), flychecks.len());
         });
     }
