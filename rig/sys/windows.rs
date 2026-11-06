@@ -6,6 +6,8 @@
 //!   once it has started, which ends it and every process it started when it is killed.
 //! - A jobserver is a named semaphore, whose count is its tokens, as GNU make has it on Windows.
 //! - Files have no modes which make them executable, and there are no reflinks.
+//! - A shell command line, as a ninja rule's command, is not run, as an edge runs a program, as each which jig writes
+//!   does, so that rig needs no shell.
 
 use std::ffi::{c_int, c_void};
 use std::path::Path;
@@ -225,13 +227,18 @@ pub fn signal_group(leader: u32, signum: c_int) {
     }
 }
 
-/// Returns the command which runs a line with the shell, `cmd /C`, which is given the line as it is, as `cmd` parses
-/// it itself.
-pub fn shell(line: &str) -> std::process::Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = std::process::Command::new("cmd.exe");
-    cmd.arg("/C").raw_arg(line);
-    cmd
+/// A shell command line, as a ninja rule's command, is not run on Windows, where an edge runs a program, as each which
+/// jig writes does.
+///
+/// # Errors
+///
+/// Always.
+pub fn shell(line: &str) -> std::io::Result<std::process::Command> {
+    let _ = line;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "a shell command line is not run on Windows, where an edge runs a program",
+    ))
 }
 
 /// Whether a file is executable by a mode, which no file on Windows is.
@@ -326,9 +333,10 @@ mod tests {
 
     #[test]
     fn ends_a_group_by_its_job() {
-        // `cmd` runs `ping`, which takes half a minute, in a group of its own, which is put in a job once it starts
+        // `ping`, which takes half a minute, in a group of its own, which is put in a job once it starts
         for signal in [SIGKILL, SIGINT] {
-            let mut command = shell("ping -n 30 127.0.0.1 >NUL");
+            let mut command = std::process::Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null());
             new_group(&mut command);
             let mut child = command.spawn().unwrap();
             group_started(child.id());

@@ -32,7 +32,8 @@ target x86_64-pc-windows-gnu
 ```
 
 Then `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu` runs their tests for Windows, but for those whose
-commands are POSIX shell, and `jig lint` lints them for Windows too.
+commands are shell lines, and `jig lint` lints them for Windows too. On Windows, rig runs each command as a program,
+without a shell, as each which jig writes is, so `JIG_ENGINE=ninja`, which runs them with one, isn't supported there.
 
 ## Building
 

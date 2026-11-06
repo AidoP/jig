@@ -1574,7 +1574,8 @@ implementation of that trait, so `generate.rs` doesn't change.
        starts a child process (`cmd /C`), and writes a file.
      - The first run takes about 7.5 s, as Wine makes its prefix. Each later run takes about 0.4 s.
      - CI would add a Linux job which installs `wine64`, `gcc-mingw-w64-x86-64` and the target, and tests it.
-   - **Where Wine isn't enough.** Wine isn't Windows, and is least like it where rig's port is:
+   - **Where Wine isn't enough.** Wine isn't Windows, and is least like it where rig's port is. Wine's `cmd`, for one,
+     runs what follows `&&` when the command before it failed, if its output was redirected, which Windows' doesn't.
      - console control events, as for Ctrl-C;
      - job objects, which end a tree of processes;
      - locking files;
@@ -1592,19 +1593,25 @@ implementation of that trait, so `generate.rs` doesn't change.
        - **The jobserver.** Its tokens are `sys::Tokens`: bytes in a FIFO on Unix, or the count of a named semaphore
          on Windows, given as `--jobserver-auth=<name>`, as GNU make has it there. `jobserver.rs` has no platform code
          of its own now.
-       - **Shell lines** run with `sh -c`, or `cmd /C`, which is given the line as it is.
+       - **Shell lines** run with `sh -c`, and not at all on Windows, where an edge which has one fails, saying so. Each
+         edge jig writes runs a program, as do aliases nothing, so only a ninja rule's command without a program has
+         one. So rig needs no shell on Windows, and `cmd` isn't used.
+       - **Locating variables.** A hermetic edge inherits, on Windows, beside `PATH`, `HOME` and `TMPDIR`, those of the
+         system's directories and the user's, and the extensions of programs, `SystemRoot`, `SystemDrive`, `windir`,
+         `TEMP`, `TMP`, `USERPROFILE`, `PATHEXT` and `ComSpec`, which Windows programs need.
        - **File modes.** Nothing is executable by its mode on Windows, and making a file executable does nothing.
        - **The terminal's width** is the console's window.
      - **Elsewhere.** Variables' values are hashed by `as_encoded_bytes`, which is their bytes on Unix.
      - **The state log** is closed while it's replaced by its compacted copy, and opened again, since Windows doesn't
        replace a file which is open.
-     - **Tests.** rig's tests build for Windows, and run under Wine: 82 pass. 43 are ignored there, as their commands
-       are POSIX shell, `cat`, `printf` and `sleep`, which `cmd` doesn't have. They still run on Unix.
+     - **Tests.** rig's tests build for Windows, and run under Wine: 81 pass. 44 are ignored there, as their commands
+       are shell lines, or run `sh`, which run only on Unix, where they still run.
        - rig, sys (Windows): `cmd` running `ping` for half a minute, in a group and job of its own, ends within a
          second of `SIGKILL`, or of `SIGINT`.
        - rig, jobserver: another joins the jobserver by what `MAKEFLAGS` gives it, and shares its tokens, a FIFO on Unix
          and a semaphore under Wine. One of file descriptors isn't joined.
-       - rig, exec: a line runs with the platform's shell, which writes a file, and what it printed is captured.
+       - rig, exec: a shell line runs with `sh`, which writes a file, and what it printed is captured, while on Windows
+         its edge fails, saying it isn't run there.
    - **Done: jig builds, runs and is tested for Windows, under Wine.**
      - **`src/platform.rs`** has what differs: file modes, which on Windows are only whether a file is read-only;
        links, which are copies where one can't be made, as making one needs a privilege; what identifies a file, its
@@ -1627,12 +1634,12 @@ implementation of that trait, so `generate.rs` doesn't change.
        - jig, platform: a program is found without its extension, a file isn't one, a link reaches the same file on
          Unix, and a file written by none is read-only.
        - Integration: a program for Windows is `<name>.exe`, while one for the host isn't.
+     - **The ninja engine** is refused on Windows, with `JIG_ENGINE=ninja`, as ninja runs its commands with a shell.
      - **CI.** A Linux job installs Wine, MinGW and the target, configures the target as the README shows in
        `Jig.local`, runs `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu`, and lints for both.
      - **Not done yet:**
        - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell, and
          build with a `rustc` which Wine runs only once it's the Windows-hosted one;
-       - the tests which are POSIX shell, which would run programs instead;
        - `jig install --proxy`, whose wrappers are shell scripts;
        - and a `windows-latest` runner, for what Wine isn't.
 

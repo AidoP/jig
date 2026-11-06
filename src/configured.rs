@@ -45,10 +45,12 @@ impl Engine {
             Self::Rig => rig_graph::FILE,
         }
     }
-    /// Returns the engine `JIG_ENGINE` names, which is rig by default.
+    /// Returns the engine `JIG_ENGINE` names, which is rig by default, and on Windows, only rig, as ninja runs its
+    /// commands with a shell, which rig does not need.
     pub fn from_env() -> Result<Self, Error> {
         match std::env::var("JIG_ENGINE").as_deref() {
             Err(_) | Ok("" | "rig") => Ok(Self::Rig),
+            Ok("ninja") if cfg!(windows) => Err(Error::NinjaOnWindows),
             Ok("ninja") => Ok(Self::Ninja),
             Ok(other) => Err(Error::UnknownEngine(other.into())),
         }

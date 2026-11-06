@@ -125,10 +125,15 @@ pub fn group_ended(leader: u32) {
 }
 
 /// Returns the command which runs a line with the shell, `sh -c`.
-pub fn shell(line: &str) -> std::process::Command {
+///
+/// # Errors
+///
+/// Never, as it can on Windows.
+#[allow(clippy::unnecessary_wraps, reason = "as on Windows, where it fails")]
+pub fn shell(line: &str) -> std::io::Result<std::process::Command> {
     let mut sh = std::process::Command::new("/bin/sh");
     sh.arg("-c").arg(line);
-    sh
+    Ok(sh)
 }
 
 /// Whether a file is executable, by any of its modes.
