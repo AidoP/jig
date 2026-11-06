@@ -17,7 +17,7 @@ use crate::Error;
 use crate::depfile::Discovered;
 use crate::graph::{Action, EdgeId, EdgeKind, EdgeRef, Graph, NodeId};
 use crate::stamp::{Stamp, Stamps};
-use crate::state::{Record, State, fnv1a};
+use crate::state::{Record, State};
 
 /// Why an edge must run.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,24 +78,45 @@ impl Plan {
 /// passes on, as which it inherits are part of what it does.
 #[must_use]
 pub fn action_hash(edge: EdgeRef) -> u64 {
+    // each hash is of the bytes it would be of if they were together, as they are hashed in turn, so that a large
+    // graph's hashes are found without copying each action
     let mut hash = match edge.kind() {
         EdgeKind::Alias => 0,
-        EdgeKind::Command(Action::Shell(command)) => fnv1a(command.as_bytes()),
-        EdgeKind::Command(Action::Exec(_)) => fnv1a(&action_bytes(edge)),
+        EdgeKind::Command(action) => {
+            let mut fnv = Fnv::new();
+            parts_of(action, &mut |bytes| fnv.write(bytes));
+            fnv.0
+        },
     };
     if let Some(identity) = edge.cache() {
-        hash = fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", identity.as_bytes()].concat());
+        let mut fnv = Fnv::new();
+        fnv.write(&hash.to_le_bytes());
+        fnv.write(b"\0cache");
+        fnv.write(identity.as_bytes());
+        hash = fnv.0;
     }
     if !edge.pass_env().is_empty() {
-        let mut bytes = hash.to_le_bytes().to_vec();
-        bytes.extend_from_slice(b"\0pass-env");
+        let mut fnv = Fnv::new();
+        fnv.write(&hash.to_le_bytes());
+        fnv.write(b"\0pass-env");
         for name in edge.pass_env() {
-            bytes.extend_from_slice(&name.len().to_le_bytes());
-            bytes.extend_from_slice(name.as_bytes());
+            fnv.write(&name.len().to_le_bytes());
+            fnv.write(name.as_bytes());
         }
-        hash = fnv1a(&bytes);
+        hash = fnv.0;
     }
     hash
+}
+
+/// The 64-bit FNV-1a hash of bytes given in parts, as [`crate::state::fnv1a`] is of them together.
+struct Fnv(u64);
+impl Fnv {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = bytes.iter().fold(self.0, |hash, &byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    }
 }
 
 /// Returns an edge's action as bytes, which differ whenever it does: a shell command as it is, or each part of a
@@ -142,13 +163,19 @@ pub(crate) fn relocated(action: &Action, dir: &str) -> Action {
 }
 
 fn bytes_of(action: &Action) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    parts_of(action, &mut |part| bytes.extend_from_slice(part));
+    bytes
+}
+
+/// Gives the bytes of an action, as [`bytes_of`] returns them, in parts, in turn.
+fn parts_of(action: &Action, write: &mut dyn FnMut(&[u8])) {
     match action {
-        Action::Shell(command) => command.as_bytes().to_vec(),
+        Action::Shell(command) => write(command.as_bytes()),
         Action::Exec(exec) => {
-            let mut bytes = Vec::new();
             let mut part = |part: &str| {
-                bytes.extend_from_slice(&part.len().to_le_bytes());
-                bytes.extend_from_slice(part.as_bytes());
+                write(&part.len().to_le_bytes());
+                write(part.as_bytes());
             };
             part(&exec.program);
             exec.args.iter().for_each(|arg| part(arg));
@@ -159,7 +186,6 @@ fn bytes_of(action: &Action) -> Vec<u8> {
             });
             part(exec.dir.as_deref().unwrap_or("\0"));
             part(exec.stderr.as_deref().unwrap_or("\0"));
-            bytes
         },
     }
 }
@@ -187,7 +213,7 @@ pub fn declared_inputs(graph: &Graph, edge: EdgeRef) -> Vec<NodeId> {
 /// contents if it is hashed, reusing the hashes of its last record.
 pub fn input_stamps(graph: &Graph, state: &State, edge: EdgeId, stamps: &mut Stamps) -> Vec<(String, Stamp)> {
     let data = graph.edge(edge);
-    let previous = state.get(&first_output(graph, edge));
+    let previous = state.get(first_output(graph, edge));
     let recorded = |path: &str| {
         let record = previous?;
         let (_, stamp) = record.inputs.iter().find(|(recorded, _)| recorded == path)?;
@@ -317,7 +343,7 @@ fn reachable(graph: &Graph, state: &State, targets: &[NodeId]) -> (Vec<NodeId>, 
         let data = graph.edge(edge);
         let lists = [data.outputs(), data.implicit_outputs(), data.inputs(), data.implicit(), data.order_only()];
         stack.extend(lists.into_iter().flatten());
-        for (path, _) in state.get(&first_output(graph, edge)).into_iter().flat_map(|record| &record.discovered) {
+        for (path, _) in state.get(first_output(graph, edge)).into_iter().flat_map(|record| &record.discovered) {
             match graph.node(path) {
                 Some(node) => stack.push(node),
                 None => paths.push(path.clone()),
@@ -397,7 +423,7 @@ impl Planner<'_, '_, '_> {
         discovered_nodes(self.graph, self.state, edge)
     }
     fn first_output(&self, edge: EdgeId) -> String {
-        first_output(self.graph, edge)
+        first_output(self.graph, edge).to_string()
     }
     /// Returns why an edge must run, once the edges which produce its inputs have been visited, or `None` if it is up
     /// to date.
@@ -408,10 +434,10 @@ impl Planner<'_, '_, '_> {
 }
 
 /// Returns the first output of an edge, which its record is kept by.
-pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> String {
+pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> &str {
     let edge = graph.edge(edge);
     let output = edge.outputs().iter().chain(edge.implicit_outputs()).next();
-    output.map(|&node| graph.path(node).to_string()).unwrap_or_default()
+    output.map_or("", |&node| graph.path(node))
 }
 
 /// Returns the nodes of targets, given by their paths, or the default targets if none are given.
@@ -429,7 +455,7 @@ pub fn target_nodes(graph: &Graph, targets: &[&str]) -> Result<Vec<NodeId>, Erro
 
 /// Returns the nodes an edge discovered when it last ran which an edge produces, which are built before it.
 pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Vec<NodeId> {
-    let record = state.get(&first_output(graph, edge));
+    let record = state.get(first_output(graph, edge));
     let paths = record.into_iter().flat_map(|record| &record.discovered);
     let nodes = paths.filter_map(|(path, _)| graph.node(path));
     nodes.filter(|&node| graph.producer(node).is_some()).collect()
@@ -580,6 +606,36 @@ mod tests {
         let inputs: Vec<&str> = ["a.c", "|"].into_iter().chain(implicit.iter().copied()).collect();
         let graph = cc().edge("cc", &["a.o"], &inputs).edge("cc", &["lib.a"], &["a.o"]);
         graph.edge("cc", &["app"], &["lib.a", "main.c"]).edge("phony", &["all"], &["app"]).finish()
+    }
+
+    #[test]
+    fn hashes_actions_as_they_were_hashed() {
+        // as the hashes are in the records of builds, they are those of the bytes of each action together, as they were
+        use crate::state::fnv1a;
+        let exec = crate::Exec {
+            program: "rustc".into(),
+            args: vec!["--crate-name".into(), "a".into()],
+            env: vec![("A".into(), "b".into())],
+            dir: Some("sub".into()),
+            stderr: None,
+        };
+        let mut graph = Graph::new();
+        let (a, b) = (graph.file("a"), graph.file("b"));
+        let kind = EdgeKind::Command(Action::Exec(exec));
+        let cache = Some("toolchain".into());
+        let edge = crate::Edge { kind, outputs: vec![a], cache, pass_env: vec!["CC".into()], ..Default::default() };
+        let id = graph.add_edge(edge).unwrap();
+        let kind = EdgeKind::Command(Action::Shell("cc".into()));
+        let shell = graph.add_edge(crate::Edge { kind, outputs: vec![b], ..Default::default() }).unwrap();
+        let edge = graph.edge(id);
+        let mut hash = fnv1a(&action_bytes(edge));
+        hash = fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", b"toolchain"].concat());
+        let mut bytes = hash.to_le_bytes().to_vec();
+        bytes.extend_from_slice(b"\0pass-env");
+        bytes.extend_from_slice(&2_usize.to_le_bytes());
+        bytes.extend_from_slice(b"CC");
+        assert_eq!(action_hash(edge), fnv1a(&bytes));
+        assert_eq!(action_hash(graph.edge(shell)), fnv1a(b"cc"));
     }
 
     #[test]

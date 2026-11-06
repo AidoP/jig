@@ -21,6 +21,7 @@ pub mod http;
 mod format;
 mod graph;
 pub mod jobserver;
+pub mod hash;
 pub mod json;
 pub mod ninja;
 pub mod plan;

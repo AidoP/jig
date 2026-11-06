@@ -66,6 +66,8 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     if !built {
         return Err(Error::TestBuild);
     }
+    // a build which a test starts may need the state, which is closed first
+    crate::rig_builder::release();
     // read after building, in case it reconfigured
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;

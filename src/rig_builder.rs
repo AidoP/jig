@@ -59,9 +59,57 @@ impl Args {
     }
 }
 
+/// The graph and state which bringing the graph up to date loaded, while the graph is as it was, which the build which
+/// follows it in the same process takes, rather than loading them again, as loading a large graph takes most of a build
+/// which has nothing to do.
+static LOADED: std::sync::Mutex<Option<Loaded>> = std::sync::Mutex::new(None);
+
+struct Loaded {
+    /// The graph's file, and what it was when it was loaded, by which it is known not to have changed.
+    path: PathBuf,
+    file: Option<FileId>,
+    graph: rig::Graph,
+    state: rig::state::State,
+}
+
+/// What a file is: its inode, size and modification time, which change when it is replaced or written.
+type FileId = (u64, u64, std::time::SystemTime);
+
+fn file_id(path: &Path) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
+}
+
+/// Close the state which was left loaded, if it was, which unlocks it for another build, as a program which runs may
+/// start one.
+pub fn release() {
+    if let Ok(mut loaded) = LOADED.lock()
+        && let Some(loaded) = loaded.take()
+    {
+        drop(loaded.state);
+        std::mem::forget(loaded.graph);
+    }
+}
+
 impl Rig<'_> {
     fn graph(&self) -> Result<rig::Graph, Error> {
         rig::Graph::load(&self.build_dir.join(rig_graph::FILE)).map_err(Error::Rig)
+    }
+    /// Returns the graph and state, as they were left loaded if the graph has not changed since, or loaded, with what
+    /// the graph's file was when it was loaded.
+    fn loaded(&self) -> Result<(rig::Graph, rig::state::State, Option<FileId>), Error> {
+        let path = self.build_dir.join(rig_graph::FILE);
+        let left = LOADED.lock().ok().and_then(|mut loaded| loaded.take());
+        if let Some(loaded) = left
+            && loaded.path == path
+            && loaded.file.is_some()
+            && loaded.file == file_id(&path)
+        {
+            return Ok((loaded.graph, loaded.state, loaded.file));
+        }
+        let file = file_id(&path);
+        Ok((self.graph()?, self.state()?, file))
     }
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
@@ -99,8 +147,7 @@ impl Rig<'_> {
         console: Console,
         output: Output,
     ) -> Result<bool, Error> {
-        let graph = self.graph()?;
-        let mut state = self.state()?;
+        let (graph, mut state, file) = self.loaded()?;
         // rustc and clippy print in colour, which is left out where the output is not in colour, as ninja does
         let (mut out, colour, fd): (Box<dyn std::io::Write>, bool, i32) = match output {
             Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout()), 1),
@@ -131,6 +178,18 @@ impl Rig<'_> {
             crate::cache::report_remote(cache);
             self.cache.collect_if_due(cache);
         }
+        let path = self.build_dir.join(rig_graph::FILE);
+        if targets == [rig_graph::FILE] && file.is_some() && file == file_id(&path) {
+            // what brought the graph up to date, without changing it, leaves it for the build which follows
+            if let Ok(mut loaded) = LOADED.lock() {
+                *loaded = Some(Loaded { path, file, graph, state });
+            }
+        } else {
+            // the state is closed, which unlocks it for another build, while the graph, which may be large, is not
+            // freed, as the process ends soon after
+            drop(state);
+            std::mem::forget(graph);
+        }
         match built {
             Ok(report) => Ok(report.succeeded()),
             Err(error @ (rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_))) => {
@@ -142,19 +201,24 @@ impl Rig<'_> {
     }
     /// Returns whether targets are up to date, from a plan, which runs nothing.
     fn planned(&self, targets: &[&str]) -> Result<bool, Error> {
-        let graph = self.graph()?;
-        let state = match self.state() {
-            Ok(state) => state,
+        let (graph, state, file) = match self.loaded() {
+            Ok(loaded) => loaded,
             // a build is running, so they may not be
             Err(Error::Rig(rig::Error::Locked(_))) => return Ok(false),
             Err(error) => return Err(error),
         };
         let mut stamps = rig::Stamps::new(&graph, self.build_dir);
-        match rig::plan::plan(&graph, &state, &mut stamps, targets) {
+        let planned = match rig::plan::plan(&graph, &state, &mut stamps, targets) {
             Ok(plan) => Ok(plan.is_empty()),
             Err(rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_)) => Ok(false),
             Err(error) => Err(Error::Rig(error)),
+        };
+        // what was left loaded is left for what follows, as planning changes neither
+        drop(stamps);
+        if let Ok(mut loaded) = LOADED.lock() {
+            *loaded = Some(Loaded { path: self.build_dir.join(rig_graph::FILE), file, graph, state });
         }
+        planned
     }
 }
 

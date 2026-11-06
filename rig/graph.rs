@@ -1,6 +1,5 @@
 //! The build graph: files, and the edges which produce them.
 
-use std::collections::HashMap;
 
 use crate::Error;
 
@@ -175,7 +174,7 @@ struct EdgeData {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Graph {
     paths: Vec<String>,
-    index: HashMap<String, NodeId>,
+    index: crate::hash::Map<String, NodeId>,
     /// The edge which produces each node, if one does.
     producers: Vec<Option<EdgeId>>,
     edges: Vec<EdgeData>,
@@ -187,6 +186,12 @@ impl Graph {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Reserve room for as many more nodes.
+    pub(crate) fn reserve(&mut self, nodes: usize) {
+        self.paths.reserve(nodes);
+        self.index.reserve(nodes);
+        self.producers.reserve(nodes);
     }
     /// Returns the node of a path, adding it if it is not in the graph.
     ///
@@ -246,9 +251,19 @@ impl Graph {
     /// # Panics
     ///
     /// If the graph has as many edges, or nodes in their lists, as a `u32` can count, or a node is not in the graph.
-    pub fn add_edge(&mut self, edge: Edge) -> Result<EdgeId, Error> {
+    pub fn add_edge(&mut self, mut edge: Edge) -> Result<EdgeId, Error> {
+        let take = std::mem::take::<Vec<NodeId>>;
+        let (outputs, implicit_outputs) = (take(&mut edge.outputs), take(&mut edge.implicit_outputs));
+        let (inputs, implicit) = (take(&mut edge.inputs), take(&mut edge.implicit));
+        let order_only = take(&mut edge.order_only);
+        self.add_edge_with(edge, [&outputs, &implicit_outputs, &inputs, &implicit, &order_only])
+    }
+    /// Add an edge whose lists of nodes are given apart from it, rather than in it, as its outputs, implicit outputs,
+    /// inputs, implicit inputs and order-only inputs, so that they need not be in vectors of their own, as when a graph
+    /// is loaded.
+    pub(crate) fn add_edge_with(&mut self, edge: Edge, nodes: [&[NodeId]; 5]) -> Result<EdgeId, Error> {
         let id = EdgeId(u32::try_from(self.edges.len()).expect("too many edges"));
-        let outputs = edge.outputs.iter().chain(&edge.implicit_outputs);
+        let outputs = nodes[0].iter().chain(nodes[1]);
         for (i, &output) in outputs.clone().enumerate() {
             let twice = outputs.clone().take(i).any(|&other| other == output);
             if twice || self.producers[output.0 as usize].is_some() {
@@ -259,7 +274,6 @@ impl Graph {
             self.producers[output.0 as usize] = Some(id);
         }
         let mut lists = [(0, 0); 5];
-        let nodes = [&edge.outputs, &edge.implicit_outputs, &edge.inputs, &edge.implicit, &edge.order_only];
         for (list, nodes) in lists.iter_mut().zip(nodes) {
             let start = u32::try_from(self.ids.len()).expect("too many nodes in edges");
             for node in nodes {
