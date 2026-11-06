@@ -551,6 +551,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn installs_toolchains_it_does_not_have() {
         use std::sync::{Arc, Mutex};
         type Installed = Vec<(String, Option<String>)>;
@@ -603,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn runs_with_the_toolchain_it_matches() {
         let toolchain = |identity: &str, release: &str, targets: &[&str]| Toolchain {
             identity: identity.into(),
@@ -675,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn runs_actions_with_their_inputs() {
         let dir = dir("runs");
         let cache = Cache::open(&dir.join("cache")).unwrap();
@@ -742,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn refuses_what_it_cannot_run() {
         let dir = dir("refuses");
         let cache = Cache::open(&dir.join("cache")).unwrap();

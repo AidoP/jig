@@ -123,7 +123,7 @@ impl Options {
         Self { dir: dir.into(), jobs, keep_going: 1, jobserver: true, cancel: Arc::default(),
             env: Vec::new(),
             cache: None,
-            locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
+            locating: LOCATING.map(String::from).to_vec(),
             workers: Vec::new(),
             workers_only: false,
             releases: HashMap::new(),
@@ -131,6 +131,17 @@ impl Options {
         }
     }
 }
+
+/// The variables which locate the tools and files a hermetic edge uses, by default: `PATH`, `HOME` and `TMPDIR`, and
+/// on Windows, those of the system's directories and the user's, and the extensions of programs, which Windows
+/// programs need to run.
+#[cfg(unix)]
+const LOCATING: [&str; 3] = ["PATH", "HOME", "TMPDIR"];
+#[cfg(windows)]
+const LOCATING: [&str; 11] = [
+    "PATH", "HOME", "TMPDIR", "SystemRoot", "SystemDrive", "windir", "TEMP", "TMP", "USERPROFILE", "PATHEXT",
+    "ComSpec",
+];
 
 /// How an edge which ran finished.
 #[derive(Debug)]
@@ -1766,7 +1777,10 @@ pub(crate) fn run_command(
 ) -> (Outcome, Vec<u8>) {
     let (mut command, program, stderr_file) = match action {
         Action::Shell(line) => {
-            let mut sh = sys::shell(line);
+            let mut sh = match sys::shell(line) {
+                Ok(sh) => sh,
+                Err(error) => return (Outcome::Error(error.to_string()), Vec::new()),
+            };
             sh.current_dir(dir);
             (sh, "sh", None)
         },
@@ -2140,7 +2154,7 @@ mod tests {
     use crate::graph::Exec;
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn removes_colour() {
         let coloured = b"\x1b[0m\x1b[1m\x1b[33mwarning\x1b[0m\x1b[0m\x1b[1m: unneeded `return`\x1b(B\x1b[m\n";
         assert_eq!(without_colour(coloured), b"warning: unneeded `return`\n");
@@ -2274,20 +2288,29 @@ mod tests {
     }
 
     #[test]
-    fn runs_the_platforms_shell() {
-        // `sh -c`, or on Windows, `cmd /C`, which each take the line as it is
-        let line = if cfg!(windows) { "echo built> $out && echo printed" } else { "echo built > $out && echo printed" };
-        let graph = graph().rule("echo", &[("command", line)]).edge("echo", &["out"], &[]).finish();
-        let mut build = Build::new("platform-shell", graph, &[]);
+    fn runs_shell_lines_only_on_unix() {
+        // with `sh -c`, which takes the line as it is
+        let graph = graph().rule("echo", &[("command", "echo built > $out && echo printed")]);
+        let graph = graph.edge("echo", &["out"], &[]);
+        let mut build = Build::new("shell-lines", graph.finish(), &[]);
         let (report, finished) = build.build(&[]);
+        if cfg!(windows) {
+            // while on Windows, where an edge runs a program, one which has a shell line fails, saying so
+            assert_eq!(report.failed, 1, "{finished:?}");
+            assert!(!build.dir.join("out").exists());
+            let environment = Environment { makeflags: None, env: &[], inherit: None, reports: None };
+            let (outcome, _) = run_command(&Action::Shell("echo".into()), &build.dir, false, &environment, &|_| ());
+            assert!(matches!(outcome, Outcome::Error(error) if error.contains("not run on Windows")));
+            return;
+        }
         assert!(report.succeeded(), "{finished:?}");
-        assert_eq!(build.read("out").trim_end(), "built");
-        assert_eq!(finished[0].1.trim_end(), "printed");
+        assert_eq!(build.read("out"), "built\n");
+        assert_eq!(finished[0].1, "printed\n");
         assert_eq!(build.ran(&[]), Vec::<String>::new());
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn builds_and_records() {
         let graph = cat().edge("cat", &["ab"], &["a", "b"]).edge("cat", &["abc"], &["ab", "c"]);
         let mut build = Build::new("records", graph.finish(), &[("a", "a\n"), ("b", "b\n"), ("c", "c\n")]);
@@ -2300,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn creates_the_directories_of_outputs() {
         let graph = graph().rule("cc", &[("command", "touch $out $out.d"), ("depfile", "deps/$out.d")])
             .edge("cc", &["out/sub/a.o"], &[]);
@@ -2310,7 +2333,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_the_critical_path_first() {
         // one job, so that the order they finish in is the order they start in
         let sleep = |graph: Graphs, output: &str, time: &str, inputs: &[&str]| {
@@ -2332,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_in_parallel() {
         let graph = graph().rule("sleep", &[("command", "sleep 0.4 && touch $out")])
             .edge("sleep", &["a"], &[]).edge("sleep", &["b"], &[]).edge("sleep", &["c"], &[]);
@@ -2353,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_programs_without_a_shell() {
         // the arguments reach the program as they are, as no shell splits or expands them, in its working directory,
         // with its variables, and its stderr in a file
@@ -2377,7 +2400,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn shows_a_failed_program_as_a_command_line() {
         let exec = Exec {
             program: "false".into(),
@@ -2397,7 +2420,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn captures_output() {
         let graph = graph().rule("say", &[("command", "echo out && echo err >&2 && touch $out")]);
         let graph = graph.edge("say", &["a"], &[]);
@@ -2406,7 +2429,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn stops_at_a_failure() {
         let graph = cat().rule("fail", &[("command", "echo failing && exit 3")]).edge("fail", &["bad"], &[])
             .edge("cat", &["after"], &["bad"]).edge("cat", &["other"], &["a"]).edge("cat", &["more"], &["a"]);
@@ -2425,7 +2448,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn records_discovered_inputs() {
         let graph = graph()
             .rule("cc", &[
@@ -2442,7 +2465,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn builds_again_when_a_variable_it_read_changes() {
         // as rustc lists the variables `env!` reads, in the environment the command is given
         let graph = graph()
@@ -2532,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_edges_on_workers_once_its_jobs_are_full() {
         let files = [("a.c", "a\n"), ("b.c", "b\n"), ("c.c", "c\n"), ("extra.h", "h\n"), ("hidden", "hidden\n")];
         let mut build = Build::new("workers", compiled(), &files);
@@ -2591,7 +2614,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn sends_edges_to_workers_which_can_run_them() {
         use crate::worker::{Capabilities, Release, Toolchain};
         // an edge which may run on another host, an edge for a target, and an edge which needs a tag
@@ -2661,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn waits_for_its_jobs_where_sending_would_take_longer() {
         let mut build = Build::new("waits", copied(), &[("a", "0\n"), ("b", "0\n")]);
         let first = TempCache::new("waits-first");
@@ -2692,7 +2715,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_only_on_workers_where_they_can() {
         let mut build = Build::new("workers-only", copied(), &[("a", "0\n"), ("b", "0\n")]);
         let first = TempCache::new("workers-only-first");
@@ -2726,7 +2749,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn sends_edges_to_the_worker_they_finish_soonest_on() {
         // the edges which copy their inputs take 0.1 s here, while the slow edge holds the one job for 0.3 s, as it is
         // the first to run only if it took longer when it last ran, by enough that the copies, which start a process
@@ -2762,7 +2785,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn measures_how_fast_workers_run_edges() {
         // an edge which took 0.2 s here, which a worker runs as fast, is measured as taking as long there
         let mut build = Build::new("speed", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
@@ -2783,7 +2806,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn sends_what_has_not_run_once_it_discovers_its_inputs() {
         // edges which read `extra.h`, which they do not declare, and which have not run, one of which finds it by
         // its rule's action which discovers its inputs, and one of which fails to
@@ -2815,7 +2838,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn leaves_what_is_not_a_target_on_workers() {
         // an edge whose output another reads on the worker, and an edge which is not cached reads here
         let cc = "cat $in > $out && echo \"$out: $in\" > $out.d";
@@ -2878,7 +2901,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn starts_what_needs_early_outputs_once_they_are_written() {
         // an edge which writes its metadata, reports it as rustc does, prints a diagnostic, and goes on for a while,
         // before it writes the rest
@@ -2915,7 +2938,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn interrupts_what_runs_on_workers() {
         let mut build = Build::new("interrupts", copied(), &[("a", "0\n"), ("b", "0\n")]);
         let first = TempCache::new("interrupts-first");
@@ -2945,7 +2968,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_what_fails_on_workers_in_its_own_jobs() {
         // the slow edge, and the edge which reads what it is not sent, take the same lock as they run here, which is
         // free only if they do not run at once, as the build has one job
@@ -2980,7 +3003,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn marks_edges_which_fail_on_workers_to_run_here() {
         let cc = "cat $in extra.h > $out && echo \"$out: $in extra.h\" > $out.d && echo compiled $out";
         let hidden = "cat $in hidden > $out && echo \"$out: $in\" > $out.d";
@@ -3041,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn fetches_from_the_cache() {
         let cache = TempCache::new("fetches");
         let files = [("a.c", "a\n"), ("extra.h", "h\n")];
@@ -3086,7 +3109,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn fetches_from_a_remote_cache() {
         // a build pushes what it runs to the remote cache, from which a build with an empty cache of its own fetches it
         let (server, first_cache, second_cache) =
@@ -3110,7 +3133,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_what_the_cache_cannot_restore() {
         let cache = TempCache::new("corrupted");
         let files = [("a.c", "a\n"), ("extra.h", "h\n")];
@@ -3137,7 +3160,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn shares_results_with_builds_in_other_directories() {
         // a program given its build's directory, as rustc is to remap it, is the same in the key of the cache wherever
         // the build is
@@ -3181,7 +3204,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_cached_edges_in_a_hermetic_environment() {
         // the names of the variables `env` is run with, as it prints them, passing on `pass_env`, and cached if `cached`
         let names = |name: &str, cached: bool, pass_env: &[&str], locating: &[&str]| {
@@ -3214,7 +3237,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn builds_again_when_a_variable_it_passes_on_changes() {
         let cache = TempCache::new("passed");
         let mut build = Build::new("passed", environment(true, &["RIG_TEST_PASSED"]), &[]);
@@ -3275,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn restat_skips_past_order_only_inputs() {
         // `out` depends on `gen.h`, which a restat edge leaves alone, and on `first` only to be built after it, which
         // does change, so `out` is up to date, as the differential tests found
@@ -3296,7 +3319,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn restat_skips_what_did_not_change() {
         // the generated file is only written when its contents change, as jig writes generated files
         let graph = cat()
@@ -3322,7 +3345,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn hashed_edges_cut_off_what_does_not_change() {
         // the first character of the input is generated, so a change to the rest leaves the generated file as it was,
         // though it is written again
@@ -3345,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn console_edges_run_alone() {
         // a console edge fails if another is running, as the directory exists
         let graph = graph()
@@ -3362,7 +3385,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn shows_progress() {
         let graph = cat().rule("fail", &[("command", "echo why && false"), ("description", "FAIL $out")])
             .edge("cat", &["ab"], &["a", "b"]).edge("fail", &["bad"], &[]);
@@ -3375,7 +3398,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn cancelling_stops_the_commands() {
         // a command whose process starts another, which is in its process group
         let graph = graph().rule("wait", &[("command", "sleep 30 & echo $$! > $out.pid; wait; touch $out")])
@@ -3407,7 +3430,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn commands_share_the_jobs() {
         // the only edge running takes the tokens of the other jobs, as a compiler's threads would, and gives them back
         let graph = graph()
@@ -3420,7 +3443,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn reuses_the_job_without_a_token() {
         // `a` runs in the job without a token and finishes first, which `c` then runs in, rather than waiting for `b`
         // to give back the only token
@@ -3437,7 +3460,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
     fn runs_without_a_jobserver() {
         let graph = graph().rule("check", &[("command", "echo \"[$$MAKEFLAGS]\" > $out")]).edge("check", &["a"], &[]);
         let mut build = Build::new("no-jobserver", graph.finish(), &[]);

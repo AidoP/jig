@@ -558,6 +558,8 @@ enum Error {
     RigArgument(String),
     /// A value of `JIG_ENGINE` which is not an engine.
     UnknownEngine(String),
+    /// `JIG_ENGINE=ninja` on Windows, where only rig builds.
+    NinjaOnWindows,
     /// A value of `change-detection` which is not a way to detect changes.
     ChangeDetection(String),
     /// A size, of the cache, which is not one.
@@ -642,6 +644,7 @@ impl core::fmt::Display for Error {
                 write!(f, "`change-detection` is {value:?}, rather than `'timestamp'` or `'hash'`")
             },
             Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
+            Self::NinjaOnWindows => write!(f, "`JIG_ENGINE=ninja` is not supported on Windows, where rig builds"),
             Self::InvalidSize(size) => write!(f, "{size:?} is not a size, such as `512M` or `10G`"),
             Self::CacheOff => {
                 write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
