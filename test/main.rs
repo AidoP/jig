@@ -2131,9 +2131,14 @@ fn cached_commands_run_the_chosen_toolchain() {
     jig(&["generate"], "nightly");
     assert!(!jig(&["build", "doc"], "nightly").contains("incompatible version of rustc"));
     // and choosing another configures the project again, identifying the toolchain afresh, here building a check, as
-    // the documentation nightly wrote is not of a format stable's rustdoc reads
+    // the documentation nightly wrote is not of a format another's rustdoc reads, which is the toolchain the tests are
+    // run with, which is installed, as rustup would otherwise install one it lacks, as `stable` in CI's jobs of the
+    // MSRV, while the build waits
+    let other = std::env::var("RUSTUP_TOOLCHAIN").ok();
+    let other = other.filter(|toolchain| !toolchain.is_empty() && !toolchain.starts_with("nightly"));
+    let other = other.unwrap_or_else(|| "stable".into());
     let check = format!("check/app@{}", project.host());
-    assert_contains(&jig(&["build", &check], "stable"), "CONFIGURE build.ninja");
+    assert_contains(&jig(&["build", &check], &other), "CONFIGURE build.ninja");
     let _ = std::fs::remove_dir_all(&cache);
 }
 
