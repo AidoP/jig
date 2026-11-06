@@ -66,11 +66,13 @@ mod tests {
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| OsString::from(value))
         };
-        assert_eq!(path(env(&[("JIG_CONFIG", "/c/jig"), ("HOME", "/h")])), Some(PathBuf::from("/c/jig")));
+        // each absolute, which on Windows has a drive
+        let absolute = |path: &str| Some(std::path::absolute(path).unwrap());
+        assert_eq!(path(env(&[("JIG_CONFIG", "/c/jig"), ("HOME", "/h")])), absolute("/c/jig"));
         assert_eq!(path(env(&[("JIG_CONFIG", "off"), ("HOME", "/h")])), None);
         assert_eq!(path(env(&[("JIG_CONFIG", ""), ("HOME", "/h")])), None);
-        assert_eq!(path(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), Some(PathBuf::from("/x/jig/config")));
-        assert_eq!(path(env(&[("HOME", "/h")])), Some(PathBuf::from("/h/.config/jig/config")));
+        assert_eq!(path(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), absolute("/x/jig/config"));
+        assert_eq!(path(env(&[("HOME", "/h")])), absolute("/h/.config/jig/config"));
         assert_eq!(path(env(&[])), None);
     }
 }

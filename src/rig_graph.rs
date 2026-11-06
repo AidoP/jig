@@ -23,7 +23,7 @@ impl RigGraph {
 }
 
 fn paths(paths: &[&Path]) -> Vec<String> {
-    paths.iter().map(|path| path.to_string_lossy().into_owned()).collect()
+    paths.iter().map(|path| crate::graph::path_string(path)).collect()
 }
 
 fn strs(strings: &[String]) -> Vec<&str> {

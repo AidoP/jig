@@ -186,7 +186,6 @@ impl Workers {
         (passed, report, started.elapsed())
     }
     fn try_run(&self, test: &database::Test, pretty: bool) -> Result<(bool, String), String> {
-        use std::os::unix::fs::PermissionsExt;
         let target = test.on_workers;
         let cache = self.cache.as_ref().ok_or("a test runs on a worker only with rig's cache, which is off")?;
         // a statically linked harness runs on any Linux of its architecture, as it needs no loader
@@ -213,7 +212,7 @@ impl Workers {
             let full = self.root.join(path);
             let metadata = std::fs::metadata(&full).map_err(|error| format!("failed to read {full:?}: {error}"))?;
             let blob = rig::blake3::hash_file(&full).map_err(|error| format!("failed to read {full:?}: {error}"))?;
-            let executable = metadata.permissions().mode() & 0o111 != 0;
+            let executable = crate::platform::is_program(&full, &metadata);
             inputs.push(rig::worker::Input { path: (*path).to_string(), blob, executable });
         }
         let mut args: Vec<String> = test.command[1..].iter().map(|&arg| arg.to_string()).collect();

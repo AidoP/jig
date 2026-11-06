@@ -1605,10 +1605,36 @@ implementation of that trait, so `generate.rs` doesn't change.
        - rig, jobserver: another joins the jobserver by what `MAKEFLAGS` gives it, and shares its tokens, a FIFO on Unix
          and a semaphore under Wine. One of file descriptors isn't joined.
        - rig, exec: a line runs with the platform's shell, which writes a file, and what it printed is captured.
+   - **Done: jig builds, runs and is tested for Windows, under Wine.**
+     - **`src/platform.rs`** has what differs: file modes, which on Windows are only whether a file is read-only;
+       links, which are copies where one can't be made, as making one needs a privilege; what identifies a file, its
+       canonical path on Windows rather than its device and inode; finding a program, with the extensions Windows
+       runs it by; and the exit code of a program ended by a signal, which only Unix has.
+     - **Variables and the toolchain's stamp.** A variable's value is hashed by `as_encoded_bytes`, and the
+       toolchain's stamp is its modification time from `modified()`, which are each the same on Unix as before, so
+       what was recorded stays valid.
+     - **Programs for Windows** are named with `.exe`, by their target, as rustc names them, and their test harnesses
+       too, which also fixes builds for Windows from Linux, where the program was always missing, and built again.
+     - **Paths.** The graph's paths have `/` between their components, as joining them on Windows puts `\` there, so
+       that a target is named the same however it was made, as `test/<name>` is. What jig records for `jig run` and
+       `jig install`, and the targets `jig build` is given, are the same.
+     - **Tried under Wine,** with the Windows-hosted toolchain, `stable-x86_64-pc-windows-gnu`, installed with
+       `rustup toolchain install --force-non-host`: `jig build`, `jig run`, `jig test`, `jig --timings build` and the
+       cache, from which a build takes 0.11 s to restore what took 1 s to compile. Configuring takes most of a build
+       there, as rustc takes about a second to start under Wine.
+     - **Tests.** jig's unit tests pass under Wine, all 43, with the expectations of absolute paths made absolute,
+       which on Windows have a drive, and a runner which succeeds or fails with `cmd`.
+       - jig, platform: a program is found without its extension, a file isn't one, a link reaches the same file on
+         Unix, and a file written by none is read-only.
+       - Integration: a program for Windows is `<name>.exe`, while one for the host isn't.
+     - **CI.** A Linux job installs Wine, MinGW and the target, configures the target as the README shows in
+       `Jig.local`, runs `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu`, and lints for both.
      - **Not done yet:**
-       - jig itself, which has Unix-only parts of its own;
+       - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell, and
+         build with a `rustc` which Wine runs only once it's the Windows-hosted one;
        - the tests which are POSIX shell, which would run programs instead;
-       - and CI, on Wine and on `windows-latest`.
+       - `jig install --proxy`, whose wrappers are shell scripts;
+       - and a `windows-latest` runner, for what Wine isn't.
 
 ## Risks
 

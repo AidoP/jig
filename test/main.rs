@@ -3812,6 +3812,20 @@ log note '''
 }
 
 #[test]
+fn programs_for_windows_are_exe() {
+    // a program for Windows is named as rustc names it, with `.exe`, as one for another target is not, as its test
+    // harness is
+    let project = Project::new("windows-programs", &[(
+        "Jig",
+        "crate app 'app.rs'\n    crate-type 'bin'\n    target ['x86_64-pc-windows-gnu', host-target]\n",
+    )]);
+    let host = project.host();
+    let output = project.configure().ok();
+    output.build("x86_64-pc-windows-gnu/app.exe");
+    output.build(&format!("{host}/app"));
+}
+
+#[test]
 fn crate_targets() {
     let project = Project::new("crate-targets", &[("Jig", "\
 crate core 'core.rs'

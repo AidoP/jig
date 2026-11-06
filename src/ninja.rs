@@ -241,7 +241,7 @@ fn push_paths(statement: &mut Vec<u8>, prefix: &str, paths: &[&Path]) {
 
 /// Append a path, escaping the characters which ninja treats specially in a path list.
 fn push_path(statement: &mut Vec<u8>, path: &Path) {
-    for &b in path.as_os_str().as_encoded_bytes() {
+    for &b in crate::graph::path_string(path).as_bytes() {
         if matches!(b, b'$' | b' ' | b':') {
             statement.push(b'$');
         }

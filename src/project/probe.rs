@@ -344,9 +344,8 @@ fn macos_probe(target: &str) -> Option<Command> {
 /// Write an executable file.
 fn write(path: &Path, contents: &[u8]) -> bool {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::remove_file(path);
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o755).open(path);
+    let file = crate::platform::create_program(path);
     file.and_then(|mut file| file.write_all(contents)).is_ok()
 }
 
@@ -411,10 +410,16 @@ mod tests {
             let host = format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
             assert!(can_run(&host, &[], None));
         }
-        assert!(can_run("s390x-unknown-linux-gnu", &["true".into()], None));
-        assert!(can_run("x86_64-pc-windows-msvc", &["true".into()], None));
-        assert!(!can_run("s390x-unknown-linux-gnu", &["false".into()], None));
-        assert!(!can_run("riscv64gc-unknown-none-elf", &["true".into()], None));
+        // a runner which succeeds, and one which fails, whatever the probe it is given
+        let (yes, no): (Vec<String>, Vec<String>) = if cfg!(windows) {
+            (vec!["cmd".into(), "/C".into(), "exit 0".into()], vec!["cmd".into(), "/C".into(), "exit 1".into()])
+        } else {
+            (vec!["true".into()], vec!["false".into()])
+        };
+        assert!(can_run("s390x-unknown-linux-gnu", &yes, None));
+        assert!(can_run("x86_64-pc-windows-msvc", &yes, None));
+        assert!(!can_run("s390x-unknown-linux-gnu", &no, None));
+        assert!(!can_run("riscv64gc-unknown-none-elf", &yes, None));
     }
 
     #[test]
