@@ -1549,6 +1549,8 @@ implementation of that trait, so `generate.rs` doesn't change.
      notice when the watch overflows, or a file changes before it's watched. On macOS, FSEvents needs a framework rig
      doesn't link, and kqueue a descriptor for each file, so it would fall back to stat there. It's worth it only for
      builds of tens of thousands of edges, where 160 ms is noticed.
+   - **Decided: no daemon.** A project of that size is very unlikely, and what the daemon would save doesn't justify
+     a process which outlives builds.
 5. **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
    so Windows can be added later.
    - **What needs porting.** rig's Unix-only parts:
@@ -1581,6 +1583,32 @@ implementation of that trait, so `generate.rs` doesn't change.
 
      So a `windows-latest` runner in CI checks the port once rig builds for Windows, while Wine stays the loop for
      developing it.
+   - **Done: rig builds and is tested for Windows.**
+     - **`rig/sys.rs`** has the same interface on each platform, from `rig/sys/unix.rs` or `rig/sys/windows.rs`:
+       - **Interrupts.** On Windows, a console control handler, for Ctrl-C, Ctrl-Break and the console closing.
+       - **Process groups.** A command leads a group of its own, with `CREATE_NEW_PROCESS_GROUP`, and is put in a job
+         object once it has started. `SIGINT` is a Ctrl-Break event to its group, or, where there is no console,
+         ending its job, as `SIGKILL` is. What it starts before it is put in its job isn't in it.
+       - **The jobserver.** Its tokens are `sys::Tokens`: bytes in a FIFO on Unix, or the count of a named semaphore
+         on Windows, given as `--jobserver-auth=<name>`, as GNU make has it there. `jobserver.rs` has no platform code
+         of its own now.
+       - **Shell lines** run with `sh -c`, or `cmd /C`, which is given the line as it is.
+       - **File modes.** Nothing is executable by its mode on Windows, and making a file executable does nothing.
+       - **The terminal's width** is the console's window.
+     - **Elsewhere.** Variables' values are hashed by `as_encoded_bytes`, which is their bytes on Unix.
+     - **The state log** is closed while it's replaced by its compacted copy, and opened again, since Windows doesn't
+       replace a file which is open.
+     - **Tests.** rig's tests build for Windows, and run under Wine: 82 pass. 43 are ignored there, as their commands
+       are POSIX shell, `cat`, `printf` and `sleep`, which `cmd` doesn't have. They still run on Unix.
+       - rig, sys (Windows): `cmd` running `ping` for half a minute, in a group and job of its own, ends within a
+         second of `SIGKILL`, or of `SIGINT`.
+       - rig, jobserver: another joins the jobserver by what `MAKEFLAGS` gives it, and shares its tokens, a FIFO on Unix
+         and a semaphore under Wine. One of file descriptors isn't joined.
+       - rig, exec: a line runs with the platform's shell, which writes a file, and what it printed is captured.
+     - **Not done yet:**
+       - jig itself, which has Unix-only parts of its own;
+       - the tests which are POSIX shell, which would run programs instead;
+       - and CI, on Wine and on `windows-latest`.
 
 ## Risks
 

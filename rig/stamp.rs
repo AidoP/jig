@@ -166,11 +166,11 @@ impl<'a> Stamps<'a> {
         self.env_value(name, crate::blake3::hash)
     }
     fn env_value<T>(&self, name: &str, hash: impl Fn(&[u8]) -> T) -> Option<T> {
-        use std::os::unix::ffi::OsStrExt;
         if let Some((_, value)) = self.env.iter().rev().find(|(variable, _)| variable == name) {
             return Some(hash(value.as_bytes()));
         }
-        std::env::var_os(name).map(|value| hash(value.as_bytes()))
+        // a value is hashed as the platform encodes it, which is its bytes on Unix
+        std::env::var_os(name).map(|value| hash(value.as_encoded_bytes()))
     }
     /// Returns the stamp of a node, finding it if it has not been.
     pub fn node(&mut self, node: NodeId) -> Stamp {
