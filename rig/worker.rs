@@ -398,7 +398,6 @@ impl Executor {
     ///
     /// As for [`Self::execute`].
     pub fn execute_with(&self, cache: &Cache, request: &Request, spawned: &dyn Fn(u32)) -> Result<Executed, Refused> {
-        use std::os::unix::fs::PermissionsExt;
         let toolchain = self.toolchain(request).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
@@ -452,7 +451,7 @@ impl Executor {
             };
             let hash = crate::blake3::hash_file(&full).map_err(|failure| failed("read", &full, failure))?;
             cache.put_file(&full, &hash).map_err(|failure| failed("keep", &full, failure))?;
-            let executable = metadata.permissions().mode() & 0o111 != 0;
+            let executable = crate::sys::is_executable(&metadata);
             outputs.push(Output { path: path.clone(), blob: hash, executable });
         }
         let printed = cache.put_bytes(&printed);
@@ -604,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
     fn runs_with_the_toolchain_it_matches() {
         let toolchain = |identity: &str, release: &str, targets: &[&str]| Toolchain {
             identity: identity.into(),
@@ -675,6 +675,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
     fn runs_actions_with_their_inputs() {
         let dir = dir("runs");
         let cache = Cache::open(&dir.join("cache")).unwrap();
@@ -713,6 +714,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn gives_the_build_directory_as_the_commands_find_it() {
         // the root is reached through a symbolic link, as a directory in `/var` is on macOS
         let dir = dir("linked");
@@ -740,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
     fn refuses_what_it_cannot_run() {
         let dir = dir("refuses");
         let cache = Cache::open(&dir.join("cache")).unwrap();

@@ -62,7 +62,9 @@ impl Record {
 /// The state of a build, which is locked while it is open.
 pub struct State {
     dir: PathBuf,
-    log: std::fs::File,
+    /// The log, which is open but while it is replaced as it is compacted, as Windows does not replace a file which
+    /// is open.
+    log: Option<std::fs::File>,
     /// The lock file, which is held while the state is open.
     _lock: std::fs::File,
     records: HashMap<String, Record>,
@@ -99,7 +101,7 @@ impl State {
             log.set_len(end as u64)
         };
         reset.and_then(|()| log.seek(std::io::SeekFrom::End(0))).map_err(io(&path))?;
-        let mut state = Self { dir: dir.into(), log, _lock: lock, records, logged };
+        let mut state = Self { dir: dir.into(), log: Some(log), _lock: lock, records, logged };
         if state.logged >= COMPACT_MIN && state.logged > state.records.len() * 2 {
             state.compact()?;
         }
@@ -133,7 +135,8 @@ impl State {
     pub fn record(&mut self, record: Record) -> Result<(), Error> {
         let mut bytes = Vec::new();
         write_record(&mut bytes, &record);
-        if let Err(error) = self.log.write_all(&bytes) {
+        let closed = || std::io::Error::other("the log is closed");
+        if let Err(error) = self.log.as_mut().ok_or_else(closed).and_then(|log| log.write_all(&bytes)) {
             return Err(Error::Io(self.dir.join("log"), error));
         }
         self.logged += 1;
@@ -156,10 +159,13 @@ impl State {
         for record in records {
             write_record(&mut bytes, record);
         }
-        let written = std::fs::write(&tmp, &bytes).and_then(|()| std::fs::rename(&tmp, &path));
-        written.map_err(|error| Error::Io(path.clone(), error))?;
+        std::fs::write(&tmp, &bytes).map_err(|error| Error::Io(tmp.clone(), error))?;
+        // the log is closed while it is replaced, and opened again, at its end, whether it was replaced or not
+        self.log = None;
+        let renamed = std::fs::rename(&tmp, &path);
         let log = std::fs::File::options().append(true).open(&path);
-        self.log = log.map_err(|error| Error::Io(path, error))?;
+        self.log = Some(log.map_err(|error| Error::Io(path.clone(), error))?);
+        renamed.map_err(|error| Error::Io(path, error))?;
         self.logged = self.records.len();
         Ok(())
     }

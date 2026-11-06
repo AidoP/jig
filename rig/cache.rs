@@ -291,7 +291,6 @@ impl Cache {
     ///
     /// If the cache does not have the blob, it is corrupted, when it is removed, or the file cannot be written.
     pub fn restore(&self, hash: &Hash, path: &Path, executable: bool) -> std::io::Result<()> {
-        use std::os::unix::fs::PermissionsExt;
         self.fetch_blob(hash);
         let blob = self.blob_path(hash);
         let mut tmp = path.as_os_str().to_owned();
@@ -302,8 +301,7 @@ impl Cache {
                 let _ = std::fs::remove_file(&blob);
                 return Err(corrupted(&blob));
             }
-            let mode = if executable { 0o755 } else { 0o644 };
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+            crate::sys::set_executable(&tmp, executable)?;
             std::fs::rename(&tmp, path)
         });
         if restored.is_err() {
@@ -964,7 +962,6 @@ mod tests {
 
     #[test]
     fn keeps_blobs_and_checks_them() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = dir("blobs");
         let cache = Cache::open(&dir.join("cache")).unwrap();
         let file = dir.join("file");
@@ -981,7 +978,11 @@ mod tests {
         std::fs::write(&restored, "old").unwrap();
         cache.restore(&hash, &restored, true).unwrap();
         assert_eq!(std::fs::read_to_string(&restored).unwrap(), "contents");
-        assert_eq!(std::fs::metadata(&restored).unwrap().permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&restored).unwrap().permissions().mode() & 0o777, 0o755);
+        }
         assert_eq!(cache.read_blob(&cache.put_bytes(b"printed").unwrap()).unwrap(), b"printed");
         // a blob which is corrupted is not restored, and is removed, leaving the file as it was
         std::fs::write(cache.blob_path(&hash), "corrupted").unwrap();

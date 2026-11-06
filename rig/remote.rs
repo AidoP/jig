@@ -1656,6 +1656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
     fn runs_actions_only_as_a_worker() {
         use crate::worker::{Capabilities, Executor, Input, Toolchain};
         let dir = std::env::temp_dir().join(format!("rig-remote-{}-worker", std::process::id()));
@@ -2025,6 +2026,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
     fn stops_using_a_remote_which_fails() {
         let remote = Remote::command(vec!["rig-no-such-server".into()], true);
         assert!(remote.manifest(&[0; 32]).is_none());
