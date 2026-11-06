@@ -727,7 +727,7 @@ fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
 fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[Vec<usize>]) -> Vec<u64> {
     let mut priority = vec![0; edges.len()];
     for index in (0..edges.len()).rev() {
-        let record = state.get(&plan::first_output(graph, edges[index]));
+        let record = state.get(plan::first_output(graph, edges[index]));
         let duration = record.map_or(1, |record| u64::from(record.duration).max(1));
         let longest = dependents[index].iter().map(|&dependent| priority[dependent]).max().unwrap_or(0);
         priority[index] = duration.saturating_add(longest);
@@ -1243,21 +1243,21 @@ impl Run<'_, '_> {
     fn local_wait(&self) -> Option<Duration> {
         let running = self.started.iter().filter(|(index, _)| !self.sent.contains_key(index));
         let left = running.filter_map(|(&index, started)| {
-            let record = self.state.get(&plan::first_output(self.graph, self.edges[index]))?;
+            let record = self.state.get(plan::first_output(self.graph, self.edges[index]))?;
             Some(Duration::from_millis(u64::from(record.duration)).saturating_sub(started.elapsed()))
         });
         left.min()
     }
     /// Returns how long an edge took when it last ran, or nothing if it has not run.
     fn took(&self, index: usize) -> Duration {
-        let record = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        let record = self.state.get(plan::first_output(self.graph, self.edges[index]));
         record.map_or(Duration::ZERO, |record| Duration::from_millis(u64::from(record.duration)))
     }
     /// Returns how long it is estimated to take to send an edge to a worker over a link, and fetch its outputs: its
     /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
     /// worker is missing, sending them, running the edge, and fetching its outputs.
     fn sending(&self, index: usize, link: crate::remote::Link) -> Duration {
-        let Some(previous) = self.state.get(&plan::first_output(self.graph, self.edges[index])) else {
+        let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
             return Duration::MAX;
         };
         let files = previous.inputs.iter().chain(&previous.discovered).chain(&previous.outputs);
@@ -1277,7 +1277,7 @@ impl Run<'_, '_> {
         let outputs: Vec<&str> = outputs.chain(edge.depfile()).collect();
         let leads = |path: &str| crate::worker::ups(path).is_some();
         // an edge which has not run finds its inputs by its action which discovers them, if it has one
-        let Some(previous) = self.state.get(&plan::first_output(self.graph, self.edges[index])) else {
+        let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
             let declared = edge.inputs().iter().chain(edge.implicit()).map(|&node| self.graph.path(node));
             let discovers = edge.discover().is_some() && edge.depfile().is_some();
             return (discovers && declared.chain(outputs).all(leads)).then_some(identity);
@@ -1296,7 +1296,7 @@ impl Run<'_, '_> {
             self.local_only.insert(index);
             return None;
         }
-        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        let previous = self.state.get(plan::first_output(self.graph, self.edges[index]));
         // one which has not run discovers its inputs first, as it is sent
         let discovery = match previous {
             Some(_) => None,
@@ -1357,7 +1357,7 @@ impl Run<'_, '_> {
         }
         let declared = self.inputs.get(&index).into_iter().flatten();
         let mut remote: Vec<(String, Stamp)> = declared.filter(|(_, stamp)| stamp.is_remote()).cloned().collect();
-        let previous = self.state.get(&plan::first_output(self.graph, self.edges[index]));
+        let previous = self.state.get(plan::first_output(self.graph, self.edges[index]));
         let discovered: Vec<String> = previous.into_iter().flat_map(|previous| &previous.discovered).map(|(path, _)| {
             path.clone()
         }).collect();
@@ -1397,7 +1397,7 @@ impl Run<'_, '_> {
         let Some(producer) = self.graph.node(path).and_then(|node| self.graph.producer(node)) else {
             return;
         };
-        let Some(mut record) = self.state.get(&plan::first_output(self.graph, producer)).cloned() else {
+        let Some(mut record) = self.state.get(plan::first_output(self.graph, producer)).cloned() else {
             return;
         };
         for (output, stamp) in &mut record.outputs {
@@ -1499,7 +1499,7 @@ impl Run<'_, '_> {
         // the outputs of a restat or hashed edge are stamped before it runs, to find whether it changed them, by their
         // contents if it is hashed, reusing its last record's hashes
         if data.restat() || data.hashed() {
-            let previous = self.state.get(&plan::first_output(self.graph, edge));
+            let previous = self.state.get(plan::first_output(self.graph, edge));
             let outputs = data.outputs().iter().chain(data.implicit_outputs());
             let before = outputs
                 .map(|&output| {
@@ -1562,7 +1562,7 @@ impl Run<'_, '_> {
         if cached {
             self.report.cached += 1;
             // the time it took when it ran is kept, as what it would take if it is not in the cache next time
-            let previous = self.state.get(&plan::first_output(self.graph, edge));
+            let previous = self.state.get(plan::first_output(self.graph, edge));
             if let Some(previous) = previous {
                 duration = Duration::from_millis(u64::from(previous.duration));
             }

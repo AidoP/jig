@@ -1515,7 +1515,40 @@ implementation of that trait, so `generate.rs` doesn't change.
        The libraries and their metadata are left there, and are up to date. A default build fetches the libraries, the
        same as built here, without building them again. Once the worker no longer has them, and the library which
        uses the other changes, the other is built again, and the program runs.
-4. **A resident daemon.** It would watch the filesystem, so a no-op build doesn't stat every file.
+4. **Started:** up-to-date builds, measured first. The step was a resident daemon, which would watch the filesystem
+   so that a no-op build doesn't stat every file. Measuring a no-op build first showed stat isn't most of it.
+   - **What a no-op build costs.** With 20,000 custom commands, 60,000 files, a 5.7 MB `graph` and a 2.3 MB state log,
+     `jig build` with nothing to do took 270 ms:
+     - loading the graph, about 55 ms, twice: once to bring the graph up to date, and again for the build;
+     - opening the state, about 18 ms, also twice;
+     - planning, about 75 ms, of which stat was about 35 ms;
+     - and freeing the graph as the process ends, about 12 ms.
+
+     So watching the filesystem would save about 35 ms of the 270, while loading once would save more.
+   - **Done: loading once.** Bringing the graph up to date leaves the graph and state it loaded for the build which
+     follows in the same process, while the graph's file is the same, by its inode, size and modification time. The
+     build takes them, and closes the state once it's done, which unlocks it. A check of whether a target is up to date
+     uses them, and leaves them.
+     - `jig run` and `jig test` close it before they run a program, which may start a build of its own.
+     - The graph isn't freed as the process ends.
+   - **Done: loading faster.**
+     - Reading the graph made an error for each number it read, and dropped it, as `ok_or` makes its value whether
+       it's needed or not. That was about a fifth of loading.
+     - Each path is looked up once, rather than twice, with room reserved for them all.
+     - An edge's lists of nodes are read into the same vectors, which the graph copies from, rather than into new
+       ones.
+     - The graph's index of paths uses `FxHash`, in `rig/hash.rs`, rather than SipHash.
+   - **Done: planning faster.** An edge's first output, by which its record is found, is borrowed rather than copied,
+     and an action's hash is of its parts in turn, rather than of a copy of them together, which is the same hash, so
+     records stay valid.
+   - **Measured after.** The same build takes about 160 ms, and one of 2,000 commands about 18 ms, from 27 ms.
+   - **Tests.** rig, hash: paths which differ only past a word, or in length, hash apart. rig, plan: an action's hash
+     is the same as before, for a program with a cache and variables, and for a shell command.
+   - **Not done yet: the daemon.** It would keep the graph, state and stamps in memory and watch the files with
+     inotify, so that a no-op build of that size takes about 10 ms. That's a process which outlives builds, and must
+     notice when the watch overflows, or a file changes before it's watched. On macOS, FSEvents needs a framework rig
+     doesn't link, and kqueue a descriptor for each file, so it would fall back to stat there. It's worth it only for
+     builds of tens of thousands of edges, where 160 ms is noticed.
 5. **Windows.** Spawning programs, process groups and the jobserver are each kept in one platform module from phase 1,
    so Windows can be added later.
    - **What needs porting.** rig's Unix-only parts:

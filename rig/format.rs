@@ -130,14 +130,18 @@ impl Graph {
             return Err(Error::Format("another version"));
         }
         let mut graph = Graph::new();
-        for _ in 0..r.u32()? {
-            let path = r.str()?;
-            if graph.node(path).is_some() {
+        let count = r.u32()? as usize;
+        // each path takes at least 4 bytes, so a corrupted count does not reserve more than the file holds
+        graph.reserve(count.min(body.len() / 4));
+        for node in 0..count {
+            // a path seen before is the node it was, rather than the next
+            if graph.file(r.str()?).0 as usize != node {
                 return Err(Error::Format("duplicate path"));
             }
-            graph.file(path);
         }
         let nodes = graph.nodes();
+        // the lists of each edge are read into the same vectors, which the graph copies its nodes from
+        let mut lists: [Vec<NodeId>; 5] = Default::default();
         for _ in 0..r.u32()? {
             let kind = match r.u32()? {
                 0 => EdgeKind::Alias,
@@ -185,14 +189,12 @@ impl Graph {
                 _ => return Err(Error::Format("unknown kind of discovery")),
             };
             let early = r.nodes(nodes)?;
+            for list in &mut lists {
+                r.nodes_into(nodes, list)?;
+            }
             let edge = Edge {
                 kind,
                 description,
-                outputs: r.nodes(nodes)?,
-                implicit_outputs: r.nodes(nodes)?,
-                inputs: r.nodes(nodes)?,
-                implicit: r.nodes(nodes)?,
-                order_only: r.nodes(nodes)?,
                 depfile,
                 pool,
                 generator: flags & GENERATOR != 0,
@@ -203,8 +205,11 @@ impl Graph {
                 placement,
                 discover,
                 early,
+                ..Edge::default()
             };
-            graph.add_edge(edge).map_err(|_| Error::Format("an output is produced by more than one edge"))?;
+            let [outputs, implicit_outputs, inputs, implicit, order_only] = &lists;
+            let added = graph.add_edge_with(edge, [outputs, implicit_outputs, inputs, implicit, order_only]);
+            added.map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
         let defaults = r.nodes(nodes)?;
         graph.add_default(&defaults);
@@ -292,11 +297,16 @@ struct Reader<'a> {
     pos: usize,
 }
 impl<'a> Reader<'a> {
+    // the error is made only when it is returned, as making it for each read, to drop it, is most of reading a graph
+    #[allow(clippy::unnecessary_lazy_evaluations, reason = "an error which is made is dropped, which is not cheap")]
+    #[inline]
     fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
-        let bytes = self.bytes.get(self.pos..self.pos.saturating_add(len)).ok_or(Error::Format("truncated"))?;
+        let range = self.pos..self.pos.saturating_add(len);
+        let bytes = self.bytes.get(range).ok_or_else(|| Error::Format("truncated"))?;
         self.pos += len;
         Ok(bytes)
     }
+    #[inline]
     fn u32(&mut self) -> Result<u32, Error> {
         let bytes = self.take(4)?;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -320,17 +330,26 @@ impl<'a> Reader<'a> {
     }
     /// Read a list of nodes, each of which must be one of the `nodes` of the graph.
     fn nodes(&mut self, nodes: usize) -> Result<Vec<NodeId>, Error> {
+        let mut list = Vec::new();
+        self.nodes_into(nodes, &mut list)?;
+        Ok(list)
+    }
+    /// Read a list of nodes into a vector, in place of what it held, as [`Self::nodes`] does.
+    #[allow(clippy::unnecessary_lazy_evaluations, reason = "an error which is made is dropped, which is not cheap")]
+    fn nodes_into(&mut self, nodes: usize, list: &mut Vec<NodeId>) -> Result<(), Error> {
+        list.clear();
         let len = self.u32()? as usize;
         // each node takes 4 bytes, so a corrupted length does not allocate more than the file holds
-        let mut list = Vec::with_capacity(len.min(self.bytes.len() / 4));
-        for _ in 0..len {
-            let node = self.u32()?;
+        let bytes = self.take(len.checked_mul(4).ok_or_else(|| Error::Format("truncated"))?)?;
+        list.reserve(len);
+        for &word in bytes.as_chunks::<4>().0 {
+            let node = u32::from_le_bytes(word);
             if node as usize >= nodes {
                 return Err(Error::Format("node out of range"));
             }
             list.push(NodeId(node));
         }
-        Ok(list)
+        Ok(())
     }
 }
 
