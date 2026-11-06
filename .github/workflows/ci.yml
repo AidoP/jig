@@ -91,6 +91,38 @@ jobs:
           JIG_ENGINE: ninja
           JIG_PERF_SCALE: 4
 
+  windows:
+    # rig and jig built for Windows with MinGW, and their tests run with Wine, as they are developed, linted as well,
+    # while those whose commands are POSIX shell are ignored there
+    name: test for Windows with Wine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Wine, MinGW and the target
+        run: |
+          sudo apt-get update && sudo apt-get install -y wine64 gcc-mingw-w64-x86-64
+          rustup toolchain install stable --profile minimal --component clippy --target x86_64-pc-windows-gnu
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+      - name: Configure the target
+        # with `Jig.local`, which `Jig` uses if it exists, as for development
+        run: |
+          cat > Jig.local <<EOF
+          set targets [host-target, 'x86_64-pc-windows-gnu']
+          target x86_64-pc-windows-gnu
+              override
+              linker 'x86_64-w64-mingw32-gcc'
+              runner '/usr/lib/wine/wine64'
+          EOF
+      - name: Bootstrap
+        run: sh bootstrap.sh
+      - name: Test
+        timeout-minutes: 30
+        run: build/bootstrap/jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu
+        env:
+          WINEDEBUG: -all
+      - name: Lint
+        run: build/bootstrap/jig lint -D
+
   lint:
     # on one machine, with the latest clippy, as its lints change between versions
     name: lint

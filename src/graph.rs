@@ -118,3 +118,10 @@ impl Graph for Tee<'_> {
         self.1.finish()
     }
 }
+
+/// Returns a path as the graph has it, with `/` between its components, as on Unix, whichever the platform joined them
+/// with, so that a path is named the same however it was made, as `test/<name>` is.
+pub fn path_string(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if cfg!(windows) { path.replace('\\', "/") } else { path.into_owned() }
+}

@@ -668,7 +668,6 @@ impl Project {
     ///
     /// The directories searched before it is found are dependencies, as the program could be added to one of them.
     pub(super) fn which(&mut self, name: &str) -> Result<PathBuf, Message> {
-        use std::os::unix::fs::PermissionsExt;
         if name.is_empty() || name.contains('/') {
             return Err(Message::InvalidProgramName(name.into()));
         }
@@ -678,11 +677,10 @@ impl Project {
             if dir.as_os_str().is_empty() {
                 continue;
             }
-            let path = dir.join(name);
             // a directory which is missing is recorded as missing, as ninja would otherwise find it out of date each
             // time, and configure the project again endlessly, while it configures the project again once it exists
             self.depend_on_path(&dir);
-            if path.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0) {
+            if let Some(path) = crate::platform::program_in(&dir, name) {
                 return Ok(path);
             }
         }
@@ -702,10 +700,9 @@ impl Project {
     /// Read an environment variable, which the configuration then depends on, so that it is generated again when the
     /// variable changes, or is set or unset.
     pub(crate) fn read_env(&mut self, name: &str) -> Option<std::ffi::OsString> {
-        use std::os::unix::ffi::OsStrExt;
         let value = std::env::var_os(name);
         if !self.env.iter().any(|(read, _)| read == name) {
-            self.env.push((name.into(), value.as_ref().map(|value| rig::fnv1a(value.as_bytes()))));
+            self.env.push((name.into(), value.as_ref().map(|value| rig::fnv1a(value.as_encoded_bytes()))));
         }
         value
     }

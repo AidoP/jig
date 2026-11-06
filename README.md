@@ -19,6 +19,21 @@ built by default, installed, and run by the integration tests. A release sets it
 set release-target 'x86_64-unknown-linux-musl'
 ```
 
+`jig` and rig are being ported to Windows, which is developed on Linux, building for `x86_64-pc-windows-gnu` with
+MinGW, and running the tests with Wine, as CI does, with this in `Jig.local`, after `rustup target add
+x86_64-pc-windows-gnu` and installing `wine64` and `gcc-mingw-w64-x86-64`:
+
+```
+set targets [host-target, 'x86_64-pc-windows-gnu']
+target x86_64-pc-windows-gnu
+    override
+    linker 'x86_64-w64-mingw32-gcc'
+    runner '/usr/lib/wine/wine64'
+```
+
+Then `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu` runs their tests for Windows, but for those whose
+commands are POSIX shell, and `jig lint` lints them for Windows too.
+
 ## Building
 
 Building `jig` needs Rust 1.97 or later. ninja 1.11 or later is optional, for building with ninja rather than rig, and

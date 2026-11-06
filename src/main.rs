@@ -18,6 +18,7 @@ mod ninja;
 mod project;
 mod rig_builder;
 mod rig_graph;
+mod platform;
 mod run;
 mod rust_analyzer;
 mod target_spec;

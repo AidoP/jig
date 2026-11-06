@@ -76,9 +76,8 @@ struct Loaded {
 type FileId = (u64, u64, std::time::SystemTime);
 
 fn file_id(path: &Path) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::metadata(path).ok()?;
-    Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
+    Some((crate::platform::inode(&metadata), metadata.len(), metadata.modified().ok()?))
 }
 
 /// Close the state which was left loaded, if it was, which unlocks it for another build, as a program which runs may
@@ -276,7 +275,10 @@ impl Builder for Rig<'_> {
             options.jobs = jobs.max(1);
         }
         options.keep_going = args.keep_going.unwrap_or(usize::from(!request.keep_going));
-        let mut targets: Vec<&str> = args.targets.iter().map(String::as_str).collect();
+        // as the graph has them, with `/`, which a path on Windows may be written without
+        let given = args.targets.iter().map(|target| crate::graph::path_string(Path::new(target)));
+        let given: Vec<String> = given.collect();
+        let mut targets: Vec<&str> = given.iter().map(String::as_str).collect();
         targets.extend_from_slice(request.targets);
         if args.dry_run {
             return self.dry_run(&targets, request.output);

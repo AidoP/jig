@@ -527,6 +527,7 @@ pub fn command(mut args: impl Iterator<Item = OsString>, settings: &Settings) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn resolved(settings: Result<Settings, Error>) -> Settings {
         settings.unwrap_or_else(|error| panic!("{error}"))
@@ -537,9 +538,13 @@ mod tests {
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| OsString::from(value))
         };
-        assert_eq!(default_dir(env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")])), "/x/jig");
-        assert_eq!(default_dir(env(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")])), "/h/.cache/jig");
+        // by their components, as a path joined on Windows has `\\` between them
+        let dir = |vars| PathBuf::from(default_dir(env(vars)));
+        assert_eq!(dir(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")]), Path::new("/x/jig"));
+        assert_eq!(dir(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")]), Path::new("/h/.cache/jig"));
         assert_eq!(default_dir(env(&[])), "");
+        // each absolute, which on Windows has a drive
+        let absolute = |path: &str| std::path::absolute(path).unwrap();
         // each variable overrides its property
         let properties = Properties {
             dir: "/p".into(),
@@ -553,11 +558,11 @@ mod tests {
         };
         let settings = resolved(Settings::resolve(&properties, env(&[])));
         let expected = Settings {
-            dir: Some("/p".into()),
+            dir: Some(absolute("/p")),
             size: 1 << 30,
             remote: Some("ssh://cache".into()),
             push: true,
-            token_file: Some("/t".into()),
+            token_file: Some(absolute("/t")),
             workers: vec!["ssh://worker".into()],
             workers_only: true,
             download_targets: true,
@@ -575,11 +580,11 @@ mod tests {
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
         let expected = Settings {
-            dir: Some("/c".into()),
+            dir: Some(absolute("/c")),
             size: 2 << 20,
             remote: Some("ssh://other".into()),
             push: false,
-            token_file: Some("/t".into()),
+            token_file: Some(absolute("/t")),
             workers: vec!["tcp://a:1".into(), "env jig worker --stdio".into()],
             workers_only: false,
             download_targets: false,

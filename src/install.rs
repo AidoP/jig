@@ -1,7 +1,6 @@
 //! `jig install`, which installs the files recorded in the database, and `jig build --proxy`, which the wrappers it
 //! installs with `--proxy` build with.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::builder::Request;
@@ -91,13 +90,13 @@ fn remove(destination: &Path) -> std::io::Result<()> {
 fn copy(source: &Path, destination: &Path, mode: u32) -> std::io::Result<()> {
     remove(destination)?;
     std::fs::copy(source, destination)?;
-    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))
+    crate::platform::set_mode(destination, mode)
 }
 
 /// Link to a file, which is absolute, so that the link is to what was last built.
 fn link(source: &Path, destination: &Path) -> std::io::Result<()> {
     remove(destination)?;
-    std::os::unix::fs::symlink(std::path::absolute(source)?, destination)
+    crate::platform::link(source, destination)
 }
 
 /// The exit status of `jig build --proxy` when it has reinstalled the wrapper which ran it, which then runs the new
@@ -143,13 +142,13 @@ fn write_proxy(
 ) -> std::io::Result<bool> {
     let script = proxy_script(&std::path::absolute(root)?, jig, prefix, wrapper, &std::path::absolute(source)?);
     let current = std::fs::read_to_string(wrapper).ok();
-    let current_mode = std::fs::symlink_metadata(wrapper).ok().map(|metadata| metadata.permissions().mode() & 0o7777);
+    let current_mode = std::fs::symlink_metadata(wrapper).ok().map(|metadata| crate::platform::mode(&metadata));
     if current.as_ref() == Some(&script) && current_mode == Some(mode) {
         return Ok(false);
     }
     remove(wrapper)?;
     std::fs::write(wrapper, script)?;
-    std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(mode))?;
+    crate::platform::set_mode(wrapper, mode)?;
     Ok(true)
 }
 

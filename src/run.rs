@@ -87,8 +87,7 @@ fn from_root(root: &Path, program: &str) -> PathBuf {
 /// Returns the exit status of a program as jig's own, where one killed by a signal exits as a shell reports it, with
 /// 128 and the signal.
 fn exit_code(status: std::process::ExitStatus) -> ExitCode {
-    use std::os::unix::process::ExitStatusExt;
-    let code = status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1);
+    let code = crate::platform::exit_code(status).unwrap_or(1);
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 

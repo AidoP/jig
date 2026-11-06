@@ -163,7 +163,6 @@ impl Project {
     fn parse_forced(&mut self, file: File, force: bool) -> Option<usize> {
         // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
         // rather than reading every symbolic link in its path, as finding its canonical path would
-        use std::os::unix::fs::MetadataExt;
         let idx = self.files.len();
         // the time the file was processed before, which is the latest again once this one has finished, so that using it
         // without `force` while that time is still being processed is found to be a cycle
@@ -171,7 +170,7 @@ impl Project {
         // a builtin file, such as a profile, is processed each time it is used
         if !file.builtin {
             let id = match std::fs::metadata(&file.path) {
-                Ok(metadata) => FileId::Inode { dev: metadata.dev(), ino: metadata.ino() },
+                Ok(metadata) => crate::platform::file_id(&file.path, &metadata),
                 Err(_) => FileId::Path(file.path.clone()),
             };
             match self.files_idx.entry(id) {
@@ -481,13 +480,7 @@ fn normalize(path: &Path) -> PathBuf {
     normal
 }
 
-/// What identifies a file which has been used, however its path was written.
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum FileId {
-    Inode { dev: u64, ino: u64 },
-    /// The path of a file whose metadata could not be read.
-    Path(PathBuf),
-}
+use crate::platform::FileId;
 
 /// Returns a path with its `.` components removed, and each `..` resolved where it follows a directory which is not a
 /// symbolic link, so that it still names the same file, and does not grow with each `..` in a chain of paths.

@@ -174,10 +174,9 @@ fn parse<'a>(root: &Path, bytes: &'a [u8]) -> Result<database::Database<'a>, Err
 
 /// Returns whether an environment variable the configuration read has changed, or been set or unset, since.
 fn env_changed(database: &database::Database) -> bool {
-    use std::os::unix::ffi::OsStrExt;
     database.env.iter().zip(&database.env_hashes).any(|(name, recorded)| {
         let value = std::env::var_os(name);
-        let current = value.map(|value| generate::env_hash(rig::fnv1a(value.as_bytes()))).unwrap_or_default();
+        let current = value.map(|value| generate::env_hash(rig::fnv1a(value.as_encoded_bytes()))).unwrap_or_default();
         current != *recorded
     })
 }

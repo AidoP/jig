@@ -178,10 +178,11 @@ impl Known {
     /// Returns the toolchain of a sysroot, run with a toolchain if one is given, identifying it with rustc unless it
     /// is known, with the targets whose standard libraries it has now.
     fn toolchain(&mut self, toolchain: Option<&str>, sysroot: &Path) -> Option<rig::worker::Toolchain> {
-        use std::os::unix::fs::MetadataExt;
         let file = if sysroot.join(MANIFEST).is_file() { sysroot.join(MANIFEST) } else { sysroot.join("bin/rustc") };
         let metadata = std::fs::metadata(&file).ok()?;
-        let stamp = format!("{}-{}.{}", metadata.len(), metadata.mtime(), metadata.mtime_nsec());
+        // as Unix's `mtime` and `mtime_nsec` have it, for a file changed since 1970
+        let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let stamp = format!("{}-{}.{}", metadata.len(), modified.as_secs(), modified.subsec_nanos());
         let key = sysroot.display().to_string();
         let found = self.toolchains.get(&key).filter(|fields| fields[0] == stamp).cloned();
         let [_, identity, release_identity, release, host] = if let Some(fields) = found {

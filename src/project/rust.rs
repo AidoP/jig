@@ -74,7 +74,7 @@ impl Crate {
     pub fn output(&self) -> PathBuf {
         match self.kind {
             Kind::Lib => self.dir.join(format!("lib{}.rlib", self.name)),
-            Kind::Bin => self.dir.join(&self.name),
+            Kind::Bin => self.dir.join(format!("{}{}", self.name, self.exe_suffix())),
             // a dynamic library for the host, which configure runs on
             Kind::ProcMacro => self.dir.join(format!(
                 "{}{}{}",
@@ -89,18 +89,22 @@ impl Crate {
     pub fn short_name(&self, host: &str) -> String {
         if self.target == host { self.name.clone() } else { format!("{}@{}", self.name, self.target) }
     }
-    /// The library built again without `panic`, for the test harnesses and procedural macros which link it, which
-    /// unwind.
     /// The metadata of a library, which rustc writes beside it before it has compiled it, which the libraries which use
     /// it are compiled against, so that they start once it is written.
     pub fn metadata(&self) -> PathBuf {
         self.dir.join(format!("lib{}.rmeta", self.name))
     }
+    /// The library built again without `panic`, for the test harnesses and procedural macros which link it, which
+    /// unwind.
     pub fn unwind_output(&self) -> PathBuf {
         self.dir.join("unwind").join(format!("lib{}.rlib", self.name))
     }
     /// The test harness of the crate, built with `--test`.
     pub fn test_harness(&self) -> PathBuf {
-        self.dir.join("test").join(&self.name)
+        self.dir.join("test").join(format!("{}{}", self.name, self.exe_suffix()))
+    }
+    /// The suffix of a program for the crate's target: `.exe` for Windows, as rustc writes one, and none otherwise.
+    fn exe_suffix(&self) -> &'static str {
+        if self.target.contains("-windows") { ".exe" } else { "" }
     }
 }
