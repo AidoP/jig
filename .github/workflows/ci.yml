@@ -8,6 +8,8 @@ on:
 env:
   # the minimum supported Rust version, which the README gives too
   MSRV: "1.97"
+  # a toolchain which is not installed fails at once, rather than rustup downloading it, which in a test may stall
+  RUSTUP_AUTO_INSTALL: "0"
 
 jobs:
   test:
@@ -42,8 +44,18 @@ jobs:
       - name: Build
         run: build/bootstrap/jig build
       - name: Test
-        # every test, including the performance tests, which `jig test` leaves out by their tag
-        run: build/bootstrap/jig test --all
+        # every test, including the performance tests, which `jig test` leaves out by their tag, which take about 10
+        # minutes on the slowest runners, so that a hang stops the job well before GitHub's limit of 6 hours, once what
+        # is still running has been shown
+        timeout-minutes: 30
+        run: |
+          # a second at a time, so that nothing is left once it is stopped
+          (i=0; while [ "$i" -lt 1200 ]; do sleep 1; i=$((i + 1)); done; sh .github/hang-report.sh) &
+          watchdog=$!
+          status=0
+          build/bootstrap/jig test --all || status=$?
+          kill "$watchdog" 2>/dev/null || true
+          exit "$status"
         env:
           # the budgets of the performance tests are for a fast machine, while their scaling is checked regardless
           JIG_PERF_SCALE: ${{ matrix.os == 'ubuntu-24.04-riscv' && '10' || '4' }}
@@ -64,7 +76,15 @@ jobs:
       - name: Bootstrap
         run: ninja -f bootstrap.ninja
       - name: Test
-        run: build/bootstrap/jig test --all
+        timeout-minutes: 30
+        run: |
+          # a second at a time, so that nothing is left once it is stopped
+          (i=0; while [ "$i" -lt 1200 ]; do sleep 1; i=$((i + 1)); done; sh .github/hang-report.sh) &
+          watchdog=$!
+          status=0
+          build/bootstrap/jig test --all || status=$?
+          kill "$watchdog" 2>/dev/null || true
+          exit "$status"
         env:
           JIG_ENGINE: ninja
           JIG_PERF_SCALE: 4
