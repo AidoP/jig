@@ -2449,8 +2449,11 @@ mod tests {
 
     #[test]
     fn sends_edges_to_the_worker_they_finish_soonest_on() {
-        // the edges which copy their inputs take 0.2 s here, while the slow edge holds the one job for 0.3 s
-        let mut build = Build::new("soonest", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
+        // the edges which copy their inputs take 0.1 s here, while the slow edge holds the one job for 0.3 s, as it is
+        // the first to run only if it took longer when it last ran, by enough that the copies, which start a process
+        // more, do not overtake it on a machine which starts them slowly, as with 0.2 s on macOS, where one of them
+        // took the job, and the worker ran only the other
+        let mut build = Build::new("soonest", copied(), &[("a", "0.1\n"), ("b", "0.1\n")]);
         let first = TempCache::new("soonest-first");
         build.options.cache = Some(first.0.clone());
         build.ran(&[]);
