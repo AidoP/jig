@@ -520,15 +520,14 @@ pub struct File {
     pub builtin: bool,
 }
 impl File {
-    /// Read a file, whose lines may end with CRLF, as Git checks files out on Windows, which are read as if they
-    /// ended with LF.
     pub fn read(path: std::path::PathBuf) -> std::io::Result<Self> {
         let data = std::fs::read_to_string(&path)?;
-        let data = if data.contains("\r\n") { data.replace("\r\n", "\n") } else { data };
         Ok(Self::new(path, data))
     }
-    /// A file with its contents, which need not exist.
+    /// A file with its contents, which need not exist, whose lines may end with CRLF, as Git checks files out on
+    /// Windows, as the builtin files, which jig is built with, may too, which are read as if they ended with LF.
     pub fn new(path: PathBuf, data: String) -> Self {
+        let data = if data.contains("\r\n") { data.replace("\r\n", "\n") } else { data };
         Self { data, path, locals: HashMap::new(), active: false, used: None, builtin: false }
     }
     /// The builtin file with the name, such as `msrv` or `profile/<name>`, if there is one.
