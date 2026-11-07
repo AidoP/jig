@@ -1479,14 +1479,20 @@ implementation of that trait, so `generate.rs` doesn't change.
      reads them all.
      - A library which isn't tested doesn't depend on those `.rlib`s, so a chain of libraries is compiled as fast as
        their metadata is written.
-   - **Not done yet:** an edge which runs on a worker reports its early outputs only once it has finished, since
-     the protocol sends what it printed at the end. Its dependents start then, as before.
+   - **On workers** (protocol version 10). A request names the action's early outputs, and the worker reads what it
+     writes with JSON as it runs, as the build does here. Each early output it reports is added to the worker's cache
+     and told at once, by a `MORE` frame of the request, with its hash. The build fetches it then, on a thread of its
+     own, and the edges which need only it start, here or on a worker. One which is left on the worker, as only the
+     targets are fetched, isn't fetched, and is stamped as left at once. It used to be told only once the edge had
+     finished, as the protocol sent what it printed at the end.
    - **Tests.**
      - rig, json: values, escapes, and too deep nesting parsed; what rustc writes read as artifacts, diagnostics and
        other lines.
      - rig, graph: an edge's early outputs saved and loaded. ninja: an early output which isn't an output is an error.
      - rig, exec: an edge which reports its early output, then sleeps, has its dependent finish before it does, while
-       one which needs all of its outputs waits.
+       one which needs all of its outputs waits. The same, run on a worker, with the early output fetched, and then
+       left there, as only the dependent is a target.
+     - rig, worker: a request with early outputs round trips.
      - Integration: the expectations of what `build.ninja` holds now have libraries' externs as `.rmeta`, and a
        program's as `.rlib`. A library whose code takes a while to generate has the library which uses it finish
        before it, and the program after; the warning rustc gave is shown as it would have printed it, with no JSON.

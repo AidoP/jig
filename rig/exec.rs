@@ -228,8 +228,8 @@ enum Message {
     Finished(Finished),
     /// An edge which was sent to a worker, which did not run it, or failed it, given back to run here.
     Returned(Box<Job>),
-    /// An edge has written one of its early outputs, which it reported.
-    Early(usize, NodeId),
+    /// An edge has written one of its early outputs, which it reported, with its stamp if it was left on a worker.
+    Early(usize, NodeId, Option<Stamp>),
 }
 
 /// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and where its
@@ -282,6 +282,8 @@ struct Dispatch {
     remote: Vec<(String, Stamp)>,
     /// The outputs which are left on the worker, rather than fetched.
     leave: Vec<String>,
+    /// The outputs it reports as it writes them, which are fetched as they are.
+    early: Vec<String>,
     fetcher: Arc<Fetcher>,
 }
 /// Outputs left on a worker, by path, with their stamps.
@@ -300,14 +302,16 @@ enum Sent {
 }
 
 impl Dispatch {
-    /// Run the edge on the worker, restoring its outputs.
-    fn run(&self, dir: &Path) -> Sent {
-        match self.try_run(dir) {
+    /// Run the edge on the worker, restoring its outputs, and each of its early outputs as the worker tells of it,
+    /// unless it is left there, which `wrote` is told of, by its path, once it is here, or with its stamp if it is
+    /// left.
+    fn run(&self, dir: &Path, wrote: &(dyn Fn(&str, Option<Stamp>) + Sync)) -> Sent {
+        match self.try_run(dir, wrote) {
             Ok((printed, left)) => Sent::Ran(printed, left),
             Err(sent) => sent,
         }
     }
-    fn try_run(&self, dir: &Path) -> Result<(Vec<u8>, Left), Sent> {
+    fn try_run(&self, dir: &Path, wrote: &(dyn Fn(&str, Option<Stamp>) + Sync)) -> Result<(Vec<u8>, Left), Sent> {
         let mut paths = self.inputs.clone();
         // what was left on workers is fetched to be sent, unless this one has it, or the action which discovers what
         // the edge reads, which runs here, may read it
@@ -367,8 +371,27 @@ impl Dispatch {
             locating: self.locating.clone(),
             inputs,
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
+            early: self.early.clone(),
         };
-        let (executed, ran) = self.worker.execute_timed(dir, &request).map_err(|_| Sent::NotRun)?;
+        // an early output is fetched as it is told of, which is what the edges which need only it wait for, unless it
+        // is left there, when what is here is stale
+        let early = |output: cache::Output| {
+            let full = dir.join(&output.path);
+            if self.leave.contains(&output.path) {
+                let _ = std::fs::remove_file(&full);
+                return wrote(&output.path, Some(Stamp::Remote { hash: output.blob, executable: output.executable }));
+            }
+            if !self.cache.has_blob(&output.blob) {
+                self.worker.fetch_blobs(&self.cache, &[output.blob]);
+            }
+            if let Some(parent) = full.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if self.cache.restore(&output.blob, &full, output.executable).is_ok() {
+                wrote(&output.path, None);
+            }
+        };
+        let (executed, ran) = self.worker.execute_timed(dir, &request, &early).map_err(|_| Sent::NotRun)?;
         if executed.succeeded {
             self.worker.timed(ran, self.took);
         }
@@ -861,7 +884,7 @@ fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeI
 }
 
 /// Whether two paths relative to the build's directory are of the same file, with or without `./` before them.
-fn same_path(lhs: &str, rhs: &str) -> bool {
+pub(crate) fn same_path(lhs: &str, rhs: &str) -> bool {
     let trim = |path: &str| path.trim_start_matches("./").to_string();
     trim(lhs) == trim(rhs)
 }
@@ -1007,8 +1030,17 @@ impl Run<'_, '_> {
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
                     let restored = lookup.and_then(|lookup| lookup.restore(dir));
                     let cached = restored.is_some();
+                    // each early output which is reported is told, as it is, with its stamp if it was left on a worker
+                    let reported_as = |path: &str, left: Option<Stamp>| {
+                        let outputs = early.iter().flat_map(|early| early.iter());
+                        let reported = outputs.filter(|(output, _)| same_path(output, path));
+                        for &(_, node) in reported {
+                            let _ = sender.send(Message::Early(index, node, left));
+                        }
+                    };
+                    let reported = |path: &str| reported_as(path, None);
                     let sent = match &dispatch {
-                        Some(dispatch) if !cached => dispatch.run(dir),
+                        Some(dispatch) if !cached => dispatch.run(dir, &reported_as),
                         _ => Sent::NotRun,
                     };
                     let (mut left, mut lost) = (Vec::new(), Vec::new());
@@ -1056,14 +1088,6 @@ impl Run<'_, '_> {
                     } else {
                         let spawned = |pid| {
                             let _ = sender.send(Message::Spawned(index, pid));
-                        };
-                        // each early output which is reported is told, as it is
-                        let reported = |path: &str| {
-                            let outputs = early.iter().flat_map(|early| early.iter());
-                            let reported = outputs.filter(|(output, _)| same_path(output, path));
-                            for &(_, node) in reported {
-                                let _ = sender.send(Message::Early(index, node));
-                            }
                         };
                         let reports: Option<&dyn Fn(&str)> = early.as_ref().map(|_| &reported as &dyn Fn(&str));
                         let environment = Environment { makeflags, env, inherit: inherit.as_deref(), reports };
@@ -1227,7 +1251,7 @@ impl Run<'_, '_> {
                             }
                         }
                     },
-                    Ok(Message::Early(index, node)) => self.early(index, node),
+                    Ok(Message::Early(index, node, left)) => self.early(index, node, left),
                     Ok(Message::Returned(job)) => {
                         let job = *job;
                         // the worker's job is free, and the edge is not sent to one again
@@ -1481,6 +1505,7 @@ impl Run<'_, '_> {
             discovery,
             remote: self.remote_inputs(index),
             leave: self.leaves(index),
+            early: edge.early().iter().map(|&node| self.graph.path(node).to_string()).collect(),
             fetcher: Arc::clone(&self.fetcher),
         })
     }
@@ -1614,7 +1639,10 @@ impl Run<'_, '_> {
     }
     /// An edge has written an early output, which is stamped afresh, and once it has written each, the edges which
     /// need only them are no longer waiting for it.
-    fn early(&mut self, index: usize, node: NodeId) {
+    fn early(&mut self, index: usize, node: NodeId, left: Option<Stamp>) {
+        if left.is_some() {
+            self.set_remote(self.graph.path(node), left);
+        }
         self.stamps.forget(node);
         let reported = self.reported.entry(index).or_default();
         reported.insert(node);
@@ -3192,6 +3220,52 @@ mod tests {
         assert_eq!(finished[1].1, "warning: unused\n");
         // and once it is up to date, nothing runs
         assert_eq!(build.ran(&[]), Vec::<String>::new());
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
+    fn starts_what_needs_early_outputs_a_worker_wrote() {
+        // as above, but with a while longer to write the rest, run on a worker
+        let artifact = r#"{"$$message_type":"artifact","artifact":"a.meta","emit":"metadata"}"#;
+        let compile = format!("echo meta > a.meta && printf '%s\\n' '{artifact}' >&2 && sleep 2 && echo all > a.out");
+        let graph = graph()
+            .cached("toolchain")
+            .rule("compile", &[("command", &compile)])
+            .early(&["a.meta"])
+            .edge("compile", &["a.out", "|", "a.meta"], &[])
+            .rule("cp", &[("command", "cp $in $out")])
+            .edge("cp", &["b.out"], &["a.meta"])
+            .finish();
+        let mut build = Build::new("early-worker", graph, &[]);
+        build.options.jobs = 4;
+        assert_eq!(build.ran(&[]).len(), 2);
+        remove(&build, &["a.out", "a.meta", "b.out"]);
+        let cache = TempCache::new("early-worker-cache");
+        build.options.cache = Some(cache.0.clone());
+        build.options.workers_only = true;
+        let store = TempCache::new("early-worker-store");
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        assert_eq!(report.remote, 2, "{finished:?}");
+        // what needs only the metadata finishes before what wrote it, which is fetched as the worker tells of it
+        let order: Vec<&str> = finished.iter().map(|(output, _)| output.as_str()).collect();
+        assert_eq!(order, ["b.out", "a.out"]);
+        assert_eq!((build.read("b.out"), build.read("a.out")), ("meta\n".into(), "all\n".into()));
+        assert_eq!(build.ran(&[]), Vec::<String>::new());
+        // with only the targets fetched, the metadata is left there, from which what needs it starts there all the same
+        remove(&build, &["a.out", "a.meta", "b.out"]);
+        build.options.download = Download::Targets;
+        let (cache, store) = (TempCache::new("early-worker-left"), TempCache::new("early-worker-leaves"));
+        build.options.cache = Some(cache.0.clone());
+        build.options.workers = vec![worker(&store, &["toolchain"])];
+        let (report, finished) = build.build(&["b.out"]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        let order: Vec<&str> = finished.iter().map(|(output, _)| output.as_str()).collect();
+        assert_eq!((order, report.remote), (vec!["b.out", "a.out"], 2));
+        assert_eq!(build.read("b.out"), "meta\n");
+        assert!(!build.dir.join("a.meta").exists() && !build.dir.join("a.out").exists());
+        assert_eq!(build.ran(&["b.out"]), Vec::<String>::new());
     }
 
     #[test]
