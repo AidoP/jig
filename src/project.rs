@@ -520,8 +520,11 @@ pub struct File {
     pub builtin: bool,
 }
 impl File {
+    /// Read a file, whose lines may end with CRLF, as Git checks files out on Windows, which are read as if they
+    /// ended with LF.
     pub fn read(path: std::path::PathBuf) -> std::io::Result<Self> {
         let data = std::fs::read_to_string(&path)?;
+        let data = if data.contains("\r\n") { data.replace("\r\n", "\n") } else { data };
         Ok(Self::new(path, data))
     }
     /// A file with its contents, which need not exist.
