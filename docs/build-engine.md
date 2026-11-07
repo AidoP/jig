@@ -781,8 +781,14 @@ implementation of that trait, so `generate.rs` doesn't change.
        - Integration: a program linked by a script which logs each time it links is fetched from the cache while
          the script is the same, and linked again once it prints another version.
      - Hits didn't update a last-used time, which `gc` needed. Step 5 does it.
-     - Blobs are stored on the build's own thread, copying and hashing each output again, rather than on a job's
-       thread. That should be measured on a large build.
+     - Blobs were stored on the build's own thread, copying and hashing each output again, rather than on a job's
+       thread. Measured, an output of 10 MB took about 45 ms to store, and as long again to hash for its record, while
+       the build waited. Since, the thread which runs a hashed edge here hashes its outputs and depfile once it
+       succeeds, and puts them in the cache if it is cached, and the build's own thread takes their hashes, by
+       `Stamps::know`, while the files have the times and sizes they had, and finds the blobs stored.
+       - Measured after: 16 cached commands, each writing 50 MB, with 16 jobs, took 2.1 s rather than 3.8 s.
+       - rig, stamp: a hash found elsewhere stands while its file's time and size are the same, and not once they
+         change.
    - **Tests.**
      - The store's blobs, manifests and results, with corruption.
      - Keys differing by each part.

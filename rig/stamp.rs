@@ -110,14 +110,24 @@ pub struct Stamps<'a> {
     contents: HashMap<String, Stamp>,
     /// The outputs left on workers, by path, whose stamps they have while their files are missing.
     remote: HashMap<String, Stamp>,
+    /// The stamps of the contents of files which were found elsewhere, as the thread which ran an edge hashed its
+    /// outputs, by path, which stand while their files have the times and sizes they had.
+    known: HashMap<String, Stamp>,
 }
 impl<'a> Stamps<'a> {
     /// The stamps of the files of a graph, whose paths are relative to `dir`.
     #[must_use]
     pub fn new(graph: &'a Graph, dir: &Path) -> Self {
         let nodes = vec![None; graph.nodes()];
-        let (paths, contents, remote) = (HashMap::new(), HashMap::new(), HashMap::new());
-        Self { dir: dir.into(), graph, nodes, paths, env: Vec::new(), contents, remote }
+        let (paths, contents, remote, known) = (HashMap::new(), HashMap::new(), HashMap::new(), HashMap::new());
+        Self { dir: dir.into(), graph, nodes, paths, env: Vec::new(), contents, remote, known }
+    }
+    /// The contents of a file were stamped elsewhere, as by the thread which ran the edge which wrote it, which stands
+    /// while it has the time and size it had, rather than it being read again.
+    pub fn know(&mut self, path: &str, stamp: Stamp) {
+        if matches!(stamp, Stamp::Content { .. }) {
+            self.known.insert(path.to_string(), stamp);
+        }
     }
     /// Stamp the outputs left on workers, by path, by these stamps while their files are missing, beside those which
     /// were.
@@ -250,7 +260,8 @@ impl<'a> Stamps<'a> {
         };
         let unchanged =
             |stamp: &Stamp| matches!(*stamp, Stamp::Content { mtime: m, size: s, .. } if (m, s) == (mtime, size));
-        if let Some(&stamp) = self.contents.get(&path).filter(|stamp| unchanged(stamp)) {
+        let found = self.contents.get(&path).or_else(|| self.known.get(&path));
+        if let Some(&stamp) = found.filter(|stamp| unchanged(stamp)) {
             return stamp;
         }
         let reused = recorded.and_then(|(stamp, stamped)| match *stamp {
@@ -317,6 +328,27 @@ mod tests {
         assert!(!again.same(hashed));
         // and without a recorded hash, as without hashing, it is stamped by its time and size
         assert!(matches!(Stamps::new(&graph, &dir).node_as(source, false, None), Stamp::File { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn takes_what_was_hashed_elsewhere() {
+        let dir = std::env::temp_dir().join(format!("rig-stamps-known-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut graph = Graph::new();
+        let out = graph.file("out");
+        std::fs::write(dir.join("out"), "one").unwrap();
+        let Stamp::File { mtime, size } = Stamp::of(&dir.join("out")) else { panic!() };
+        // a hash found by the thread which ran its edge stands while the file has the time and size it had then
+        let mut stamps = Stamps::new(&graph, &dir);
+        let known = Stamp::Content { mtime, size, hash: [7; 32] };
+        stamps.know("out", known);
+        assert_eq!(stamps.node_as(out, true, None), known);
+        // and is not taken once they change
+        std::fs::write(dir.join("out"), "other").unwrap();
+        stamps.forget(out);
+        let Stamp::Content { hash, .. } = stamps.node_as(out, true, None) else { panic!() };
+        assert_eq!(hash, crate::blake3::hash(b"other"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
