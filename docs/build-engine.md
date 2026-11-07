@@ -1521,9 +1521,13 @@ implementation of that trait, so `generate.rs` doesn't change.
      by its contents: the hash it was left with, and the time and size it has here. While it has them, the edge, and
      those which recorded it as left, take its hash as recorded rather than reading it. It used to be hashed on each
      build which compared it, until its edge ran again.
-   - **Not done yet:**
-     - Which worker an edge goes to doesn't count which of them has its inputs already.
-     - What a worker leaves isn't kept from its cache's collection, which loses it.
+   - **Which worker.** Each worker's files from this build, as it wrote or was sent them, are kept apart, so that an
+     edge goes to the worker which has its inputs rather than one which would be sent them. They were kept together,
+     which counted a file one worker had as on each of them.
+   - **Keeping what was left.** A worker which is asked which blobs it's missing marks those it has as used. Each
+     build with workers asks them about every file left on them, on a thread of its own, which keeps those files from
+     their caches' collection while builds go on using them. What is left on a worker no build asks about is still
+     collected in time, and is lost.
    - **Tests.**
      - rig, stamp: a missing file left on a worker has the stamp it was left with, and the same as its contents once
        it's here.
@@ -1534,6 +1538,8 @@ implementation of that trait, so `generate.rs` doesn't change.
        and both are up to date. With a new worker, an edge here which reads it has it built again, by another pass,
        and fetches it, which its record then has by its contents. A target which an earlier build left is built again
        once no worker has it.
+     - rig, exec: an edge which reads a large file one of two workers alike wrote goes to that worker. What was left
+       on a worker, marked as used long ago, is marked as used again by a build which has nothing to run.
      - jig: `JIG_DOWNLOAD` overrides `download`, and what isn't `all` or `targets` is an error.
      - Integration: a library which another uses, and a program, built only for a worker, with the program asked for.
        The libraries and their metadata are left there, and are up to date. A default build fetches the libraries, the
