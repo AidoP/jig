@@ -511,6 +511,14 @@ impl Fetcher {
             cache.restore(&hash, &full, executable).is_ok()
         })
     }
+    /// Returns the files which were fetched.
+    fn fetched(&self) -> Vec<String> {
+        let Ok(fetched) = self.fetched.lock() else {
+            return Vec::new();
+        };
+        let fetched = fetched.iter().filter(|(_, once)| once.get() == Some(&true));
+        fetched.map(|(path, _)| path.clone()).collect()
+    }
     /// Fetch files left on workers, on as many threads at once, returning those which none has any longer.
     fn fetch_all(&self, files: &[(String, Stamp)], threads: usize) -> Vec<String> {
         let lost = |files: &[(String, Stamp)]| -> Vec<String> {
@@ -722,6 +730,7 @@ fn build_once(
     if ran.is_ok() && !run.report.interrupted {
         run.fetch_targets();
     }
+    run.record_fetched();
     // what was added to the cache is pushed to the remote cache before the build ends
     if let Some(cache) = &options.cache {
         cache.wait_for_pushes();
@@ -1529,6 +1538,42 @@ impl Run<'_, '_> {
         }
         for path in self.fetcher.fetch_all(&files, self.options.jobs.max(1)) {
             self.lose(&path);
+        }
+    }
+    /// Record what was fetched in the records of the edges which left it, by its contents, with the hash it was left
+    /// with and the time and size it has now, so that it is not hashed again on each build which compares it.
+    fn record_fetched(&mut self) {
+        let mut records: HashMap<&str, crate::state::Record> = HashMap::new();
+        for path in self.fetcher.fetched() {
+            let Some(edge) = self.graph.node(&path).and_then(|node| self.graph.producer(node)) else {
+                continue;
+            };
+            let key = plan::first_output(self.graph, edge);
+            let record = match records.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::hash_map::Entry::Vacant(entry) => match self.state.get(key) {
+                    Some(record) => entry.insert(record.clone()),
+                    None => continue,
+                },
+            };
+            // unless its edge ran here since, which recorded it afresh
+            let Some((_, stamp)) = record.outputs.iter_mut().find(|(output, _)| *output == path) else {
+                continue;
+            };
+            let Stamp::Remote { hash, .. } = *stamp else {
+                continue;
+            };
+            if let Stamp::File { mtime, size } = Stamp::of(&self.options.dir.join(&path)) {
+                *stamp = Stamp::Content { mtime, size, hash };
+            }
+        }
+        for (key, record) in records {
+            if self.state.get(key) == Some(&record) {
+                continue;
+            }
+            if let Err(error) = self.state.record(record) {
+                self.error.get_or_insert(error);
+            }
         }
     }
     /// Returns the early outputs of an edge, by their paths, if it has any.
@@ -3016,6 +3061,9 @@ mod tests {
         let order: Vec<&str> = finished.iter().map(|(output, _)| output.as_str()).collect();
         assert_eq!(order, ["mid", "here"]);
         assert_eq!(build.read("here"), "b\n");
+        // what was fetched is recorded by its contents, so that it is not hashed again
+        let fetched = build.state.get("mid").unwrap().outputs[0].1;
+        assert!(matches!(fetched, Stamp::Content { hash, .. } if hash == crate::blake3::hash(b"b\n")), "{fetched:?}");
         // what was fetched is the same as was left, so nothing is out of date
         assert_eq!(build.ran(&[]), Vec::<String>::new());
         build.write("a.c", "c\n");

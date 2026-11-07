@@ -1517,18 +1517,23 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Once the build has run, it's planned and run again, which builds the lost output again, and then what needed
        it, up to three times. `Report::lost` counts them.
    - **jig.** The property `download`, `'all'` or `'targets'`, or `JIG_DOWNLOAD`, recorded in `.jig`.
+   - **What was fetched.** Once the build has run, the record of the edge which left a file that was fetched has it
+     by its contents: the hash it was left with, and the time and size it has here. While it has them, the edge, and
+     those which recorded it as left, take its hash as recorded rather than reading it. It used to be hashed on each
+     build which compared it, until its edge ran again.
    - **Not done yet:**
-     - A file fetched later is hashed on each build which compares it, as its record has only its hash, until its
-       edge runs again.
      - Which worker an edge goes to doesn't count which of them has its inputs already.
      - What a worker leaves isn't kept from its cache's collection, which loses it.
    - **Tests.**
      - rig, stamp: a missing file left on a worker has the stamp it was left with, and the same as its contents once
        it's here.
      - rig, state: stamps of what was left saved and loaded, and found by `remote_outputs`.
+     - rig, plan: a file which was fetched, and differs from the hash recorded for it without its time or size
+       showing it, is up to date, as it isn't read, until it changes.
      - rig, exec: only for workers, an edge's output which another reads there is left there, with its depfile here,
        and both are up to date. With a new worker, an edge here which reads it has it built again, by another pass,
-       and fetches it. A target which an earlier build left is built again once no worker has it.
+       and fetches it, which its record then has by its contents. A target which an earlier build left is built again
+       once no worker has it.
      - jig: `JIG_DOWNLOAD` overrides `download`, and what isn't `all` or `targets` is an error.
      - Integration: a library which another uses, and a program, built only for a worker, with the program asked for.
        The libraries and their metadata are left there, and are up to date. A default build fetches the libraries, the
