@@ -232,6 +232,7 @@ impl Workers {
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
             inputs,
             outputs: Vec::new(),
+            early: Vec::new(),
         };
         let executed = worker.execute(&self.root, &request).map_err(|refused| match refused {
             rig::worker::Refused::Toolchain => format!("{name} refused the test"),

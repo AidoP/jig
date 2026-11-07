@@ -185,6 +185,9 @@ pub struct Request {
     pub inputs: Vec<Input>,
     /// The files it writes, relative to the build's directory, which are sent back, if it writes them.
     pub outputs: Vec<String>,
+    /// Those of its outputs which it reports as it writes them, as rustc reports its metadata with JSON, which are told
+    /// as they are, before it finishes.
+    pub early: Vec<String>,
 }
 
 /// What an action did on a worker: whether it succeeded, and its outputs and what it printed, as the blobs of a
@@ -234,6 +237,7 @@ impl Request {
             bytes.push(u8::from(input.executable));
         }
         push_strs(&mut bytes, &self.outputs);
+        push_strs(&mut bytes, &self.early);
         bytes
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
@@ -260,8 +264,8 @@ impl Request {
             Some(Input { path, blob, executable })
         });
         let inputs = inputs.collect::<Option<Vec<_>>>()?;
-        let outputs = p.strs()?;
-        let request = Self { identity, release, install, target, action, env, locating, inputs, outputs };
+        let (outputs, early) = (p.strs()?, p.strs()?);
+        let request = Self { identity, release, install, target, action, env, locating, inputs, outputs, early };
         p.0.is_empty().then_some(request)
     }
     /// The blobs of its inputs, each once.
@@ -389,15 +393,22 @@ impl Executor {
     /// If the toolchain is not one of the worker's, a path does not lead from the build's directory, an input is not
     /// in the cache, or the directory to run it in cannot be made.
     pub fn execute(&self, cache: &Cache, request: &Request) -> Result<Executed, Refused> {
-        self.execute_with(cache, request, &|_| ())
+        self.execute_with(cache, request, &|_| (), &|_| ())
     }
     /// Run an action, as [`Self::execute`] does, telling `spawned` the id of its process, which leads its process
-    /// group, once it has started, so that it can be interrupted.
+    /// group, once it has started, so that it can be interrupted, and `wrote` each of its early outputs, once it is in
+    /// the cache, as the action reports it.
     ///
     /// # Errors
     ///
     /// As for [`Self::execute`].
-    pub fn execute_with(&self, cache: &Cache, request: &Request, spawned: &dyn Fn(u32)) -> Result<Executed, Refused> {
+    pub fn execute_with(
+        &self,
+        cache: &Cache,
+        request: &Request,
+        spawned: &dyn Fn(u32),
+        wrote: &dyn Fn(Output),
+    ) -> Result<Executed, Refused> {
         let toolchain = self.toolchain(request).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
@@ -440,8 +451,26 @@ impl Executor {
         let given = request.env.iter().filter(|(name, _)| !chosen.contains(&name.as_str()));
         let mut env: Vec<_> = given.cloned().collect();
         env.extend(toolchain.env.iter().cloned());
+        // each early output it reports is added to the cache and told, as it is
+        let within = build.display().to_string();
+        let reported = |path: &str| {
+            let path = path.strip_prefix(&within).map_or(path, |path| path.trim_start_matches(['/', '\\']));
+            for early in request.early.iter().filter(|early| crate::exec::same_path(early, path)) {
+                let full = build.join(early);
+                let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
+                    continue;
+                };
+                let Ok(hash) = crate::blake3::hash_file(&full) else {
+                    continue;
+                };
+                if cache.put_file(&full, &hash).is_ok() {
+                    wrote(Output { path: early.clone(), blob: hash, executable: crate::sys::is_executable(&metadata) });
+                }
+            }
+        };
+        let reports = (!request.early.is_empty()).then_some(&reported as &dyn Fn(&str));
         let environment =
-            crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating), reports: None };
+            crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating), reports };
         let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, spawned);
         let mut outputs = Vec::new();
         for path in &request.outputs {
@@ -521,7 +550,8 @@ mod tests {
             env: vec![("B".into(), "2".into())],
             locating: vec!["PATH".into()],
             inputs: vec![Input { path: "../src/lib.rs".into(), blob, executable: true }],
-            outputs: vec!["out/lib.rlib".into()],
+            outputs: vec!["out/lib.rlib".into(), "out/lib.rmeta".into()],
+            early: vec!["out/lib.rmeta".into()],
         };
         assert_eq!(Request::decode(&request.encode()), Some(request.clone()));
         let shell = Request { action: Action::Shell("true".into()), ..request };
@@ -579,6 +609,7 @@ mod tests {
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
             outputs: Vec::new(),
+            early: Vec::new(),
         };
         // without an installer, or a name, it is refused
         assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
@@ -651,6 +682,7 @@ mod tests {
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
             outputs: Vec::new(),
+            early: Vec::new(),
         };
         let printed = |request: &Request| {
             let executed = executor.execute(&cache, request).unwrap();
@@ -696,6 +728,7 @@ mod tests {
             locating: vec!["PATH".into()],
             inputs: vec![input(&cache, "../src/a.txt", "a\n"), input(&cache, "sub/b.txt", "b\n")],
             outputs: vec!["out/joined".into(), "out/unwritten".into()],
+            early: Vec::new(),
         };
         let executed = executor.execute(&cache, &request).unwrap();
         assert!(executed.succeeded);
@@ -736,6 +769,7 @@ mod tests {
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
             outputs: Vec::new(),
+            early: Vec::new(),
         };
         let executed = executor.execute(&cache, &request).unwrap();
         assert!(executed.succeeded, "{}", String::from_utf8_lossy(&cache.read_blob(&executed.entry.printed).unwrap()));
@@ -758,6 +792,7 @@ mod tests {
             locating: Vec::new(),
             inputs: Vec::new(),
             outputs: vec!["out".into()],
+            early: Vec::new(),
         };
         let other = Request { identity: "other".into(), ..request.clone() };
         assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));

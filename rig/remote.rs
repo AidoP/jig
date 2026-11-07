@@ -41,7 +41,9 @@
 //! - `EXECUTE`, with a [`crate::worker::Request`], is replied to by a worker with `FOUND`, whether the action
 //!   succeeded, `1` or `0`, and its result as a cache stores one, whose blobs the worker has, `NOT_FOUND` if it does
 //!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
-//!   that requests for blobs are answered while they run.
+//!   that requests for blobs are answered while they run. Before it, each of the action's early outputs which it
+//!   reports, as rustc reports its metadata, is told as it is, once the worker has its blob, by a frame of the kind
+//!   `MORE` with the id of the request, and the output's hash, whether it is executable, `1` or `0`, and its path.
 //! - `GET_CAPABILITIES` is replied to by a worker with `FOUND` and its [`crate::worker::Capabilities`].
 //! - `CANCEL`, which is not replied to, has a worker interrupt the actions it runs for the client, as when the client's
 //!   build is interrupted, and kill them a second later if they have not stopped, and run no more of them. It does so
@@ -74,7 +76,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -880,10 +882,11 @@ impl Remote {
     /// If the worker does not have the toolchain, which it is not asked again, or could not run the action, as when an
     /// input changed as it was sent, or the connection failed, after which the worker is not used again.
     pub fn execute(&self, dir: &std::path::Path, request: &Request) -> Result<Executed, Refused> {
-        self.execute_timed(dir, request).map(|(executed, _)| executed)
+        self.execute_timed(dir, request, &|_| ()).map(|(executed, _)| executed)
     }
     /// Run an action on the server, as [`Self::execute`] does, returning too how long it took to run, from when it was
-    /// sent until its reply came, once its inputs were sent.
+    /// sent until its reply came, once its inputs were sent, and telling `wrote` each of its early outputs as the
+    /// worker tells it, on a thread of its own, before it returns.
     ///
     /// # Errors
     ///
@@ -892,6 +895,7 @@ impl Remote {
         &self,
         dir: &std::path::Path,
         request: &Request,
+        wrote: &(dyn Fn(crate::cache::Output) + Sync),
     ) -> Result<(Executed, std::time::Duration), Refused> {
         let failed = || Refused::Error(self.error().unwrap_or_else(|| "the worker cannot be reached".into()));
         let connection = self.connection().ok_or_else(failed)?;
@@ -920,7 +924,16 @@ impl Remote {
         }
         self.measured(bytes, sending.elapsed());
         let running = std::time::Instant::now();
-        let reply = connection.send(EXECUTE, &request.encode()).and_then(|receiver| receiver.recv().ok());
+        // the early outputs it tells of are given to `wrote` on a thread of their own, as they may be fetched, until
+        // the reply comes, which drops what sends them
+        let (notices, told) = std::sync::mpsc::channel::<Vec<u8>>();
+        let sink: Sink = Box::new(move |notice: &[u8]| {
+            let _ = notices.send(notice.to_vec());
+        });
+        let reply = std::thread::scope(|scope| {
+            scope.spawn(move || told.iter().filter_map(|notice| decode_output(&notice)).for_each(wrote));
+            connection.send_to(EXECUTE, &request.encode(), sink).and_then(|receiver| receiver.recv().ok())
+        });
         let ran = running.elapsed();
         match reply {
             Some((FOUND, payload)) => Executed::decode(&payload).map(|executed| (executed, ran)).ok_or_else(|| {
@@ -1380,8 +1393,9 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                             crate::sys::signal_group(pid, crate::sys::SIGKILL);
                         }
                     };
+                    let wrote = |output: crate::cache::Output| reply(MORE, id, &encode_output(&output));
                     let executed = crate::worker::Request::decode(&payload).map(|request| {
-                        let executed = executor.execute_with(cache, &request, &spawned);
+                        let executed = executor.execute_with(cache, &request, &spawned, &wrote);
                         if let Ok(mut groups) = groups.lock() {
                             groups.remove(&id);
                         }
@@ -1447,6 +1461,24 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
         read
     })?;
     written.into_inner().unwrap_or(Ok(()))
+}
+
+/// Encode an early output of an action as a worker tells it: its hash, whether it is executable, and its path.
+fn encode_output(output: &crate::cache::Output) -> Vec<u8> {
+    [output.blob.as_slice(), &[u8::from(output.executable)], output.path.as_bytes()].concat()
+}
+
+/// Decode an early output of an action as a worker tells it, or `None` if it is not valid.
+fn decode_output(bytes: &[u8]) -> Option<crate::cache::Output> {
+    let (blob, rest) = bytes.split_at_checked(32)?;
+    let (&executable, path) = rest.split_first()?;
+    let executable = match executable {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let path = String::from_utf8(path.to_vec()).ok()?;
+    Some(crate::cache::Output { path, blob: blob.try_into().ok()?, executable })
 }
 
 /// Send a blob as the reply to a request, by `reply`, in parts, as it is read, checking it against its hash, and
@@ -1675,6 +1707,7 @@ mod tests {
             locating: vec!["PATH".into()],
             inputs: vec![Input { path: "in".into(), blob, executable: false }],
             outputs: vec!["out".into()],
+            early: Vec::new(),
         };
         // a cache which is not a worker runs nothing, and does not take blobs
         let plain = cache("not-a-worker");
