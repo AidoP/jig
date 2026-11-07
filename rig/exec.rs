@@ -249,6 +249,9 @@ struct Job {
     early: Option<Arc<Vec<(String, NodeId)>>>,
     /// The inputs it reads which were left on workers, which are fetched before it runs here.
     fetch: Vec<(String, Stamp)>,
+    /// What the thread which runs it here stamps by their contents once it has succeeded, rather than the build's own
+    /// thread: its outputs and depfile, if it is hashed, and the cache they are put in, if it is cached.
+    stamp: Option<Arc<(Vec<String>, Option<Cache>)>>,
 }
 
 /// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
@@ -525,6 +528,28 @@ impl Fetcher {
     }
 }
 
+/// Stamp files an edge wrote by their contents, relative to the build's directory, and add them to a cache if one is
+/// given, returning the stamps of those which are files. A file which cannot be read is left for the build's own thread
+/// to stamp.
+fn stamp_outputs(dir: &Path, paths: &[String], cache: Option<&Cache>) -> Vec<(String, Stamp)> {
+    let mut stamped = Vec::new();
+    for path in paths {
+        let full = dir.join(path);
+        let Stamp::File { mtime, size } = Stamp::of(&full) else {
+            continue;
+        };
+        let Ok(hash) = crate::blake3::hash_file(&full) else {
+            continue;
+        };
+        // which it is only an aid to, so a file which is not added is added once it is stored
+        if let Some(cache) = cache {
+            let _ = cache.put_file(&full, &hash);
+        }
+        stamped.push((path.clone(), Stamp::Content { mtime, size, hash }));
+    }
+    stamped
+}
+
 /// An edge which has finished.
 struct Finished {
     /// The index of the edge in the plan.
@@ -541,6 +566,8 @@ struct Finished {
     left: Vec<(String, Stamp)>,
     /// The inputs it reads which were left on workers which no longer have them, so that it did not run.
     lost: Vec<String>,
+    /// Its outputs and depfile, stamped by their contents by the thread which ran it, if it is hashed.
+    stamped: Vec<(String, Stamp)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -905,7 +932,7 @@ impl Run<'_, '_> {
             move || {
                 // the lock is held while waiting for a job, which the other threads wait for in turn
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
-                    let Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch } = job;
+                    let Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
                     // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
@@ -940,7 +967,7 @@ impl Run<'_, '_> {
                     if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
                         let mark = dispatch.mark().filter(|_| failed_there);
                         let (lookup, dispatch) = (None, None);
-                        let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch };
+                        let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp };
                         let _ = sender.send(Message::Returned(Box::new(job)));
                         continue;
                     }
@@ -948,6 +975,7 @@ impl Run<'_, '_> {
                     if !cached && !remote && dispatch.is_none() {
                         lost = fetcher.fetch_all(&fetch, 1);
                     }
+                    let mut ran_here = false;
                     let (outcome, output) = if !lost.is_empty() {
                         (Outcome::Error(format!("{} were left on workers which no longer have them", lost.join(" "))),
                             Vec::new())
@@ -970,13 +998,22 @@ impl Run<'_, '_> {
                         };
                         let reports: Option<&dyn Fn(&str)> = early.as_ref().map(|_| &reported as &dyn Fn(&str));
                         let environment = Environment { makeflags, env, inherit: inherit.as_deref(), reports };
+                        ran_here = true;
                         run_command(&action, dir, console, &environment, &spawned)
+                    };
+                    // what it wrote is hashed, and added to the cache, here, rather than by the build's own thread
+                    let stamped = match stamp.as_deref() {
+                        Some((paths, cache)) if ran_here && outcome.succeeded() => {
+                            stamp_outputs(dir, paths, cache.as_ref())
+                        },
+                        _ => Vec::new(),
                     };
                     if outcome.succeeded() && let Some((cache, key)) = &mark {
                         cache.mark_local(key);
                     }
                     let duration = clock.elapsed();
-                    let finished = Finished { index, outcome, output, start, duration, cached, remote, left, lost };
+                    let finished =
+                        Finished { index, outcome, output, start, duration, cached, remote, left, lost, stamped };
                     let _ = sender.send(Message::Finished(finished));
                 }
             }
@@ -1024,7 +1061,7 @@ impl Run<'_, '_> {
                         let outcome = Outcome::Interrupted;
                         let finished = Finished { index: job.index, outcome, output: Vec::new(), start: now,
                             duration: Duration::ZERO, cached: false, remote: false, left: Vec::new(),
-                            lost: Vec::new() };
+                            lost: Vec::new(), stamped: Vec::new() };
                         self.finish(finished, observer);
                     }
                 }
@@ -1100,8 +1137,9 @@ impl Run<'_, '_> {
                     // a thread for each job takes it, as no more run than there are jobs
                     let early = self.early_outputs(index);
                     let fetch = self.remote_inputs(index);
-                    let mark = None;
-                    let _ = jobs.send(Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch });
+                    let (mark, stamp) = (None, self.stamp_outputs(index));
+                    let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp };
+                    let _ = jobs.send(job);
                 }
                 // the build goes on while an edge waits for a worker which is connecting
                 if self.progress.running == 0 && !self.waiting_for_workers() {
@@ -1358,6 +1396,18 @@ impl Run<'_, '_> {
             fetcher: Arc::clone(&self.fetcher),
         })
     }
+    /// Returns what the thread which runs an edge here stamps by their contents once it succeeds: its outputs and
+    /// depfile, if it is hashed, and the cache they are put in, if it is cached, or `None` if it is not hashed.
+    fn stamp_outputs(&self, index: usize) -> Option<Arc<(Vec<String>, Option<Cache>)>> {
+        let edge = self.graph.edge(self.edges[index]);
+        if !edge.hashed() {
+            return None;
+        }
+        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let paths = outputs.chain(edge.depfile()).map(String::from).collect();
+        let cache = self.options.cache.as_ref().filter(|_| edge.cache().is_some() && edge.pool() != Pool::Console);
+        Some(Arc::new((paths, cache.cloned())))
+    }
     /// Returns the inputs of a started edge, declared and discovered when it last ran, which were left on workers,
     /// with their stamps.
     fn remote_inputs(&mut self, index: usize) -> Vec<(String, Stamp)> {
@@ -1531,7 +1581,11 @@ impl Run<'_, '_> {
         observer.started(self.graph, edge, &self.reasons[index], self.progress);
     }
     fn finish(&mut self, finished: Finished, observer: &mut dyn Observer) {
-        let Finished { index, mut outcome, output, start, mut duration, cached, remote, left, lost } = finished;
+        let Finished { index, mut outcome, output, start, mut duration, cached, remote, left, lost, stamped } =
+            finished;
+        for (path, stamp) in stamped {
+            self.stamps.know(&path, stamp);
+        }
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.started.remove(&index);
