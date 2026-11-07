@@ -1,0 +1,3 @@
+# text files are checked out with LF on every platform, as jig reads them, rather than with CRLF, as Git for Windows
+# checks them out by default
+* text=auto eol=lf
