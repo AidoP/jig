@@ -91,6 +91,32 @@ jobs:
           JIG_ENGINE: ninja
           JIG_PERF_SCALE: 4
 
+  windows-native:
+    # rig and jig built and tested on Windows itself, for what Wine is not, as console events, job objects, locking
+    # files and paths, with MSVC, while the integration tests, which make symbolic links, set modes and run commands
+    # which are POSIX shell, are left out until they are ported
+    name: test (stable, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git's bash, which runs `bootstrap.sh`
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+      - name: Bootstrap
+        run: sh bootstrap.sh
+      - name: Test
+        timeout-minutes: 30
+        run: build/bootstrap/jig test rig jig
+
   windows:
     # rig and jig built for Windows with MinGW, and their tests run with Wine, as they are developed, linted as well,
     # while those whose commands are POSIX shell are ignored there
