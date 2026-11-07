@@ -461,6 +461,22 @@ pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Ve
     nodes.filter(|&node| graph.producer(node).is_some()).collect()
 }
 
+/// Returns the stamp an input was recorded with, as its hash is reused by: that which the edge which read it recorded,
+/// or if it was left on a worker, and has been fetched since, that which the edge which left it recorded once it was,
+/// with the time and size it was fetched with.
+fn fetched_as<'a>(graph: &Graph, state: &'a State, path: &str, stamp: &'a Stamp) -> &'a Stamp {
+    let Stamp::Remote { hash, .. } = stamp else {
+        return stamp;
+    };
+    let producer = graph.node(path).and_then(|node| graph.producer(node));
+    let record = producer.and_then(|edge| state.get(first_output(graph, edge)));
+    let output = record.and_then(|record| record.outputs.iter().find(|(output, _)| output == path));
+    match output {
+        Some((_, fetched @ Stamp::Content { hash: fetched_hash, .. })) if fetched_hash == hash => fetched,
+        _ => stamp,
+    }
+}
+
 /// Returns why an edge must run, or `None` if it is up to date, where `rebuilt` is whether an edge which produces one
 /// of its inputs runs, and so changes the input.
 pub(crate) fn reason(
@@ -495,8 +511,9 @@ pub(crate) fn reason(
         return Some(Reason::CommandChanged);
     }
     let hashed = edge.hashed();
-    // a file which was left on a worker is compared by its contents once it is here
-    let hashed_as = |stamp: &Stamp| hashed || stamp.is_remote();
+    // a file which was left on a worker is compared by its contents once it is here, as is one which was fetched since,
+    // whose edge recorded it by them then
+    let hashed_as = |stamp: &Stamp| hashed || stamp.hash().is_some();
     for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
         let now = stamps.node_as(output, hashed_as(stamp), Some((stamp, finished(record))));
         if !now.exists() {
@@ -514,12 +531,14 @@ pub(crate) fn reason(
         return Some(Reason::InputRebuilt(graph.path(input).into()));
     }
     for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
-        if !stamps.node_as(node, hashed_as(stamp), Some((stamp, record.start))).same(*stamp) {
+        let recorded = fetched_as(graph, state, path, stamp);
+        if !stamps.node_as(node, hashed_as(stamp), Some((recorded, record.start))).same(*stamp) {
             return Some(Reason::InputChanged(path.clone()));
         }
     }
     for (path, stamp) in &record.discovered {
-        if !stamps.path_as(path, hashed_as(stamp), Some((stamp, finished(record)))).same(*stamp) {
+        let recorded = fetched_as(graph, state, path, stamp);
+        if !stamps.path_as(path, hashed_as(stamp), Some((recorded, finished(record)))).same(*stamp) {
             return Some(Reason::DiscoveredChanged(path.clone()));
         }
     }
@@ -783,6 +802,30 @@ mod tests {
         let output = std::fs::read(build.dir.join("a.o")).unwrap();
         std::fs::write(build.dir.join("a.o"), output).unwrap();
         assert_eq!(build.plan(&["a.o"]).unwrap(), []);
+    }
+
+    #[test]
+    fn reuses_the_hash_of_what_was_fetched() {
+        let graph = cc().edge("cc", &["a.o"], &["a.c"]).edge("cc", &["app"], &["a.o"]).finish();
+        let mut build = Build::new("fetched", graph, &["a.c"]);
+        build.run(&["app"], &[]);
+        // as if `a.o` was left on a worker, which `app` read there, and fetched since, which its edge recorded by the
+        // hash it was left with, and the time and size it was fetched with
+        let left = crate::blake3::hash(b"left");
+        let Stamp::File { mtime, size } = Stamp::of(&build.dir.join("a.o")) else { panic!() };
+        let mut producer = build.state.get("a.o").unwrap().clone();
+        producer.outputs[0].1 = Stamp::Content { mtime, size, hash: left };
+        let mut consumer = build.state.get("app").unwrap().clone();
+        consumer.inputs[0].1 = Stamp::Remote { hash: left, executable: false };
+        build.state.record(producer).unwrap();
+        build.state.record(consumer).unwrap();
+        // while it has that time and size, its hash is taken as it was recorded, rather than it being read, which would
+        // find it differs
+        assert_eq!(build.plan(&["app"]).unwrap(), []);
+        // once it changes, it is read
+        build.write("a.o", "changed");
+        let reasons = build.plan(&["a.o"]).unwrap();
+        assert_eq!(reasons, [("a.o".into(), Reason::OutputModified("a.o".into()))]);
     }
 
     #[test]
