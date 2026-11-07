@@ -770,7 +770,7 @@ implementation of that trait, so `generate.rs` doesn't change.
      - Undoing an edit fetches it in 0.05 s.
      - After the build directory is removed, configuring and fetching it takes 0.16 s.
      - A second checkout missed, as rustc was given the absolute paths of sources, until step 2.
-   - **Not done yet.**
+   - **Gaps, since filled.**
      - The linker wasn't part of the identity, though linked edges are cached. Since, what links, a program or a test
        harness, is given `JIG_LINKER`, which rustc doesn't read, as the linker's name and what identifies it: the file
        it is, and what it prints for `--version`. The variable is part of the command, and so of its key in the cache,
