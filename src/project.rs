@@ -54,6 +54,8 @@ pub struct Project {
     pub files: Vec<File>,
     /// Files read by expressions, which the configuration depends on as well as `files`.
     pub dependencies: Vec<PathBuf>,
+    /// What identifies each linker which links what is built, by its name as a crate gives it, which generating finds.
+    pub linkers: HashMap<String, String>,
     /// Paths which expressions found were missing, which the configuration would depend on if they existed.
     pub missing: Vec<PathBuf>,
     /// Environment variables which expressions read, each with a hash of its value, or `None` if it was not set, so
@@ -114,6 +116,7 @@ impl Project {
             root,
             files: Vec::new(),
             dependencies: Vec::new(),
+            linkers: HashMap::new(),
             missing: Vec::new(),
             env: Vec::new(),
             files_idx: HashMap::new(),

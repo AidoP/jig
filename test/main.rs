@@ -1467,6 +1467,52 @@ fn environment_variables_reconfigure() {
 }
 
 #[test]
+fn caches_what_links_by_its_linker() {
+    if !rig_engine() {
+        return;
+    }
+    // a program linked by a linker which logs each time it links, and is identified by what it prints of its version
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-linker-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let linker = |version: &str| {
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; exit; fi\n\
+             echo linked >> \"$(dirname \"$0\")/links\"\nexec cc \"$@\"\n"
+        )
+    };
+    let project = Project::new("linker-cache", &[
+        ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n    codegen/linker './cc.sh'\n"),
+        ("app.rs", "fn main() {}\n"),
+    ]);
+    let write_linker = |version: &str| {
+        let path = project.dir.join("cc.sh");
+        std::fs::write(&path, linker(version)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_linker("one");
+    let app = project.dir.join(format!("build/{}/app", project.host()));
+    let build = || {
+        let mut command = jig_command();
+        let output = command.arg("build").env("JIG_CACHE", &cache).current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    };
+    let links = || std::fs::read_to_string(project.dir.join("links")).unwrap_or_default().lines().count();
+    build();
+    assert_eq!(links(), 1);
+    // what it linked is fetched from the cache, by the same linker
+    std::fs::remove_file(&app).unwrap();
+    build();
+    assert_eq!(links(), 1);
+    // but not by another, which configures the project again, as it depends on the linker
+    write_linker("two");
+    std::fs::remove_file(&app).unwrap();
+    build();
+    assert_eq!(links(), 2);
+    assert!(app.is_file());
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn rig_fetches_from_the_cache() {
     if !rig_engine() {
         return;
@@ -4764,7 +4810,7 @@ panic: abort, strip: symbols",
     assert_contains(output.build(&format!("{host}/{prefix}forced{suffix}")), "-C lto=thin");
     // the profiles are part of jig, so the configuration does not depend on them as files
     let depfile = project.depfile();
-    assert!(depfile.starts_with("build.ninja: ../Jig reconfigure.stamp"), "{depfile}");
+    assert!(depfile.starts_with("build.ninja: ../Jig ") && !depfile.contains("profile"), "{depfile}");
 }
 
 #[test]

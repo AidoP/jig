@@ -32,11 +32,13 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     write_reconfigure_stamp(&build_dir)?;
     write_target_specs(&project.targets, &build_dir, project.toolchain.as_deref())?;
     write_generated_files(&project.generated)?;
-    write_depfile(&project, &at, &build_dir, engine.file())?;
 
     let installed = project.installed();
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
+    // the linkers are identified, and depended on, before the depfile is written
+    identify_linkers(&mut project, &crates);
+    write_depfile(&project, &at, &build_dir, engine.file())?;
     let units = units(&project, &crates, sysroot, &build_dir);
     let path = build_dir.join(engine.file());
     let mut graph: Box<dyn Graph> = match engine {
@@ -657,7 +659,10 @@ fn write_graph(
             leading.push(format!("--emit=metadata={}", path.display()));
             leading.extend(["--error-format=json", "--json=artifacts,diagnostic-rendered-ansi"].map(String::from));
         }
-        let exec = rust.exec("rustc", &leading, crate_flags, None);
+        let mut exec = rust.exec("rustc", &leading, crate_flags, None);
+        if linked {
+            exec.env.extend(linker_env(&codegen, &c.target, project));
+        }
         let placement = placement(unit, units, project, linked);
         let early: Vec<&Path> = metadata.iter().map(PathBuf::as_path).collect();
         graph.edge(&Edge {
@@ -690,7 +695,8 @@ fn write_graph(
             let mut test_flags = link(&harness_flags);
             test_flags.plain(&["--test"]);
             let harness = at.path(&c.test_harness());
-            let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &harness), &test_flags, None);
+            let mut exec = rust.exec("rustc", &rustc_emit(&tmpdir, &harness), &test_flags, None);
+            exec.env.extend(linker_env(&codegen, &c.target, project));
             graph.edge(&Edge {
                 rule: "rustc",
                 outputs: &[&harness],
@@ -1333,6 +1339,60 @@ fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> ri
     let any_host = unit.kind != Kind::ProcMacro && !uses_proc_macro && (!linked || lld);
     let builtin = project.target(&unit.target).is_some_and(|target| !target.is_custom());
     rig::Placement { any_host, target: builtin.then(|| unit.target.clone()), tags: unit.worker_tags.clone() }
+}
+
+/// The variable which gives a command which links what identifies its linker, so that its result in the cache, whose
+/// key the command is part of, is not that of another linker. rustc does not read it.
+const LINKER_VARIABLE: &str = "JIG_LINKER";
+
+/// Returns the linker a crate is linked by, by its name as its codegen options give it, `cc` by default, or `None` if
+/// it is `rust-lld`, which is part of the toolchain, and so of its identity.
+fn linker_of(codegen: &[String], target: &str) -> Option<String> {
+    let given = codegen.iter().rev().find_map(|option| option.strip_prefix("linker="));
+    let linker = given.unwrap_or(if target.contains("-msvc") { "link.exe" } else { "cc" });
+    let lld = Path::new(linker).file_stem().is_some_and(|name| name == "rust-lld");
+    (!lld).then(|| linker.to_string())
+}
+
+/// Find what identifies the linker of each crate which links, as a program or a test harness: the file it is, and
+/// what it prints of its version, which the configuration depends on, so that it is configured again when the linker
+/// changes.
+fn identify_linkers(project: &mut Project, crates: &[Crate]) {
+    for c in crates.iter().filter(|c| c.kind != Kind::Lib || c.test) {
+        let Some(linker) = linker_of(&codegen(c, project), &c.target) else {
+            continue;
+        };
+        if project.linkers.contains_key(&linker) {
+            continue;
+        }
+        let path = if linker.contains('/') {
+            Some(PathBuf::from(&linker))
+        } else {
+            // without depending on `PATH`, which would configure the project again whenever it changes
+            let search = std::env::var_os("PATH").unwrap_or_default();
+            std::env::split_paths(&search).find_map(|dir| crate::platform::program_in(&dir, &linker))
+        };
+        let identity = match path.and_then(|path| std::fs::canonicalize(path).ok()) {
+            Some(path) => {
+                project.depend(path.clone());
+                let version = std::process::Command::new(&path).arg("--version").output();
+                let version = version.map(|output| [output.stdout, output.stderr].concat()).unwrap_or_default();
+                let mut key = rig::cache::Key::new("linker");
+                key.part(path.display().to_string().as_bytes()).part(&version);
+                rig::cache::hex(&key.finish())[..16].to_string()
+            },
+            None => "missing".into(),
+        };
+        project.linkers.insert(linker, identity);
+    }
+}
+
+/// Returns the variable which gives a command which links what identifies its linker, if it has one which is not part
+/// of the toolchain.
+fn linker_env(codegen: &[String], target: &str, project: &Project) -> Option<(String, String)> {
+    let linker = linker_of(codegen, target)?;
+    let identity = project.linkers.get(&linker)?;
+    Some((LINKER_VARIABLE.to_string(), format!("{linker} {identity}")))
 }
 
 /// Returns the codegen options of a crate, followed by the linker of its target, unless the crate sets its own linker or

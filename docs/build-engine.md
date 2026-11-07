@@ -771,7 +771,15 @@ implementation of that trait, so `generate.rs` doesn't change.
      - After the build directory is removed, configuring and fetching it takes 0.16 s.
      - A second checkout missed, as rustc was given the absolute paths of sources, until step 2.
    - **Not done yet.**
-     - The linker isn't part of the identity, though linked edges are cached.
+     - The linker wasn't part of the identity, though linked edges are cached. Since, what links, a program or a test
+       harness, is given `JIG_LINKER`, which rustc doesn't read, as the linker's name and what identifies it: the file
+       it is, and what it prints for `--version`. The variable is part of the command, and so of its key in the cache,
+       while the identity of the toolchain, which workers are matched by, is as it was. The configuration depends on
+       the linker's file, so a new linker configures it again, but not on `PATH`, by which it is found, so that
+       finding another linker by another `PATH` needs it to be configured again. `rust-lld` is part of the
+       toolchain, so needs none.
+       - Integration: a program linked by a script which logs each time it links is fetched from the cache while
+         the script is the same, and linked again once it prints another version.
      - Hits didn't update a last-used time, which `gc` needed. Step 5 does it.
      - Blobs are stored on the build's own thread, copying and hashing each output again, rather than on a job's
        thread. That should be measured on a large build.
