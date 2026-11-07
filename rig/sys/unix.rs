@@ -107,6 +107,16 @@ impl Drop for Interrupts {
     }
 }
 
+/// Fill a buffer with random bytes from the system, from `/dev/urandom`.
+///
+/// # Errors
+///
+/// If it cannot be read.
+pub fn random(buffer: &mut [u8]) -> std::io::Result<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")?.read_exact(buffer)
+}
+
 /// Have a command lead a process group of its own, which it and the processes it starts are in, so that they are
 /// signalled together.
 pub fn new_group(command: &mut std::process::Command) {

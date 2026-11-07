@@ -44,6 +44,14 @@ struct ScreenBufferInfo {
     maximum: Coord,
 }
 
+#[link(name = "bcrypt")]
+unsafe extern "system" {
+    fn BCryptGenRandom(algorithm: Handle, buffer: *mut u8, length: u32, flags: u32) -> i32;
+}
+
+/// The flag of `BCryptGenRandom` which uses the system's preferred generator, without an algorithm.
+const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn SetConsoleCtrlHandler(handler: Option<unsafe extern "system" fn(u32) -> Bool>, add: Bool) -> Bool;
@@ -107,6 +115,20 @@ pub fn terminal_width(fd: c_int) -> Option<usize> {
     }
     let width = i32::from(info.window.right) - i32::from(info.window.left) + 1;
     usize::try_from(width).ok().filter(|&width| width > 0)
+}
+
+/// Fill a buffer with random bytes from the system's generator, as `BCryptGenRandom` gives them.
+///
+/// # Errors
+///
+/// If the buffer is larger than it takes at once, or it fails.
+pub fn random(buffer: &mut [u8]) -> std::io::Result<()> {
+    let length = u32::try_from(buffer.len()).map_err(std::io::Error::other)?;
+    // SAFETY: the buffer is writable for its length, and no algorithm is given, as the flag has the system choose
+    let status = unsafe {
+        BCryptGenRandom(std::ptr::null_mut(), buffer.as_mut_ptr(), length, BCRYPT_USE_SYSTEM_PREFERRED_RNG)
+    };
+    if status == 0 { Ok(()) } else { Err(std::io::Error::other(format!("BCryptGenRandom failed: {status:#x}"))) }
 }
 
 /// The signal which interrupted a build, or `0`.
@@ -342,8 +364,14 @@ mod tests {
             group_started(child.id());
             std::thread::sleep(Duration::from_millis(500));
             let signalled = Instant::now();
-            // which a Ctrl-Break event, or where there is no console, its job, ends, as killing it does
+            // which a Ctrl-Break event interrupts, or where there is no console, ends its job, as killing it does, but
+            // which `ping` takes as asking for its statistics so far, so that, as the build does, its job is ended if
+            // it goes on a second later
             signal_group(child.id(), signal);
+            std::thread::sleep(Duration::from_secs(1));
+            if child.try_wait().unwrap().is_none() {
+                signal_group(child.id(), SIGKILL);
+            }
             let status = child.wait().unwrap();
             group_ended(child.id());
             assert!(!status.success(), "{signal}");

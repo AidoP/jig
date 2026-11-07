@@ -13,3 +13,15 @@ pub use unix::*;
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn gives_random_bytes() {
+        let (mut a, mut b) = ([0; 32], [0; 32]);
+        super::random(&mut a).unwrap();
+        super::random(&mut b).unwrap();
+        // which are, by chance, neither all zero nor the same twice
+        assert!(a != [0; 32] && a != b);
+    }
+}

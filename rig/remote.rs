@@ -1156,7 +1156,7 @@ fn proof(token: &[u8], nonce: &[u8]) -> Hash {
 /// Returns a random nonce, from the system's source of random bytes.
 fn nonce() -> std::io::Result<[u8; 32]> {
     let mut nonce = [0; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut nonce)?;
+    crate::sys::random(&mut nonce)?;
     Ok(nonce)
 }
 
