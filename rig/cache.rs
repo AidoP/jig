@@ -747,8 +747,9 @@ impl Cache {
         let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified());
         let due = modified.as_ref().is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed >= every));
         if modified.is_err() || due {
-            // marked first, so that builds which finish at once do not each collect it
-            let _ = std::fs::write(&path, "");
+            // marked first, so that builds which finish at once do not each collect it, by the time, which writing
+            // nothing to the file does not change on Windows
+            let _ = std::fs::File::create(&path).and_then(|file| file.set_modified(std::time::SystemTime::now()));
         }
         due.then(|| self.gc(max))
     }
