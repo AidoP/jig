@@ -479,7 +479,8 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Left for later.**
      - Children share rig's process group, so Ctrl-C reaches them. Process groups, with forwarding of signals, are
        step 4.
-     - A smart terminal's single updating status line is not done yet.
+     - A smart terminal's single updating status line was not done at first. Since, a terminal shows a line for each
+       command running at once, updated in place, as ninja does, and a summary once the build is done.
      - Priority by critical path is phase 3; edges are started in plan order for now.
 4. **Done:** `rig/sys.rs`, the jobserver and batched stat.
    - **Process groups and signals.** Each command except a console one leads its own process group.
@@ -771,7 +772,7 @@ implementation of that trait, so `generate.rs` doesn't change.
      - A second checkout missed, as rustc was given the absolute paths of sources, until step 2.
    - **Not done yet.**
      - The linker isn't part of the identity, though linked edges are cached.
-     - Hits don't update a last-used time, which `gc` will need.
+     - Hits didn't update a last-used time, which `gc` needed. Step 5 does it.
      - Blobs are stored on the build's own thread, copying and hashing each output again, rather than on a job's
        thread. That should be measured on a large build.
    - **Tests.**
@@ -1515,8 +1516,9 @@ implementation of that trait, so `generate.rs` doesn't change.
        The libraries and their metadata are left there, and are up to date. A default build fetches the libraries, the
        same as built here, without building them again. Once the worker no longer has them, and the library which
        uses the other changes, the other is built again, and the program runs.
-4. **Started:** up-to-date builds, measured first. The step was a resident daemon, which would watch the filesystem
-   so that a no-op build doesn't stat every file. Measuring a no-op build first showed stat isn't most of it.
+4. **Done, without the daemon:** up-to-date builds, measured first. The step was a resident daemon, which would watch
+   the filesystem so that a no-op build doesn't stat every file. Measuring a no-op build first showed stat isn't most
+   of it, so the step loads and plans faster instead, and the daemon was decided against.
    - **What a no-op build costs.** With 20,000 custom commands, 60,000 files, a 5.7 MB `graph` and a 2.3 MB state log,
      `jig build` with nothing to do took 270 ms:
      - loading the graph, about 55 ms, twice: once to bring the graph up to date, and again for the build;
@@ -1637,11 +1639,24 @@ implementation of that trait, so `generate.rs` doesn't change.
      - **The ninja engine** is refused on Windows, with `JIG_ENGINE=ninja`, as ninja runs its commands with a shell.
      - **CI.** A Linux job installs Wine, MinGW and the target, configures the target as the README shows in
        `Jig.local`, runs `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu`, and lints for both.
-     - **Not done yet:**
-       - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell, and
-         build with a `rustc` which Wine runs only once it's the Windows-hosted one;
-       - `jig install --proxy`, whose wrappers are shell scripts;
-       - and a `windows-latest` runner, for what Wine isn't.
+   - **Done: tested on Windows itself.**
+     - **CI.** `windows-latest` and `windows-11-arm`, with MSVC, bootstrap with `bootstrap.sh` in Git's bash and run
+       `jig test rig jig`, for what Wine isn't.
+     - **Line endings.** Git for Windows checks text files out with CRLF by default, which jig doesn't read, as `Jig`
+       and the builtin files jig is built with failed to configure there. `.gitattributes` has every text file
+       checked out with LF, rather than jig reading CRLF.
+     - **A random nonce.** The nonce a server challenges a client's token with was read from `/dev/urandom`, which
+       Wine passes through, but Windows doesn't have, so a server there refused every client. `sys::random` reads
+       `/dev/urandom` on Unix, and calls `BCryptGenRandom` on Windows.
+     - **Marking a collected cache.** Writing nothing to its mark doesn't change the mark's time on Windows, so the cache
+       would be collected after every build once a day had passed. The time is set instead.
+     - **Interrupting `ping`.** The test of ending a group interrupts `ping`, which takes Ctrl-Break as asking for its
+       statistics, so it ends its job a second later if it goes on, as a build does.
+     - **Tests.** rig, sys: random bytes, neither all zero nor the same twice.
+   - **Not done yet:**
+     - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell;
+     - `jig install --proxy`, whose wrappers are shell scripts;
+     - and defaults which assume Unix, as the install prefix, `/usr/local`.
 
 ## Risks
 
