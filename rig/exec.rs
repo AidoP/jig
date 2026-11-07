@@ -649,6 +649,7 @@ fn build_once(
         }
     }
     let priority = critical_paths(graph, state, &edges, &dependents);
+    let estimates = if options.workers.is_empty() { HashMap::new() } else { estimates(graph, state) };
     let mut run = Run {
         graph,
         state,
@@ -690,6 +691,7 @@ fn build_once(
         released: HashSet::new(),
         started: HashMap::new(),
         on_workers: HashSet::new(),
+        estimates,
         wanted,
         left,
         fetcher,
@@ -753,6 +755,33 @@ fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
         }
     }
     wanted
+}
+
+/// Returns, for each toolchain, by its identity, how long the cached edges with it which have run took, and the size of
+/// their outputs, each the median of them, by which an edge which has not run is estimated.
+fn estimates(graph: &Graph, state: &State) -> HashMap<String, (Duration, u64)> {
+    let mut found: HashMap<&str, (Vec<u32>, Vec<u64>)> = HashMap::new();
+    for (id, edge) in graph.edges().enumerate() {
+        let Some(identity) = edge.cache() else {
+            continue;
+        };
+        let id = EdgeId(u32::try_from(id).unwrap_or(u32::MAX));
+        let Some(record) = state.get(plan::first_output(graph, id)) else {
+            continue;
+        };
+        let (took, sizes) = found.entry(identity).or_default();
+        took.push(record.duration);
+        sizes.push(record.outputs.iter().map(|(_, stamp)| stamp.size()).sum());
+    }
+    let median = |values: &mut Vec<u64>| {
+        values.sort_unstable();
+        values[values.len() / 2]
+    };
+    let estimates = found.into_iter().map(|(identity, (took, mut sizes))| {
+        let mut took: Vec<u64> = took.into_iter().map(u64::from).collect();
+        (identity.to_string(), (Duration::from_millis(median(&mut took)), median(&mut sizes)))
+    });
+    estimates.collect()
 }
 
 /// Returns the priority of each edge in the plan: how long it took when it last ran, in milliseconds, or one if it has
@@ -899,6 +928,9 @@ struct Run<'g, 's> {
     started: HashMap<usize, Instant>,
     /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
     on_workers: HashSet<String>,
+    /// For each toolchain, by its identity, how long the cached edges with it which have run took, and the size of
+    /// their outputs, each the median of them, by which an edge which has not run is estimated, if there are workers.
+    estimates: HashMap<String, (Duration, u64)>,
     /// The files which are fetched if they were left on workers.
     wanted: HashSet<NodeId>,
     /// The outputs left on workers, by path, with their stamps, while their files are missing, which the threads which
@@ -1265,7 +1297,7 @@ impl Run<'_, '_> {
                 continue;
             }
             // the worker it would finish soonest on, by sending it, and running it there
-            let took = self.took(index);
+            let took = self.estimated(index);
             let there = |worker: usize| {
                 let link = self.options.workers[worker].link();
                 self.sending(index, link).saturating_add(link.running(took))
@@ -1304,12 +1336,29 @@ impl Run<'_, '_> {
     /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
     /// worker is missing, sending them, running the edge, and fetching its outputs.
     fn sending(&self, index: usize, link: crate::remote::Link) -> Duration {
+        let sent = |(path, stamp): &(String, Stamp)| if self.on_workers.contains(path) { 0 } else { stamp.size() };
         let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
-            return Duration::MAX;
+            // one which has not run sends its declared inputs, as they are, and fetches outputs of the size of those
+            // of the edges with its toolchain, if it has one and they have run
+            let identity = self.graph.edge(self.edges[index]).cache().unwrap_or_default();
+            let Some(&(_, outputs)) = self.estimates.get(identity) else {
+                return Duration::MAX;
+            };
+            let inputs: u64 = self.inputs.get(&index).into_iter().flatten().map(sent).sum();
+            return link.time(inputs.saturating_add(outputs), 4);
         };
         let files = previous.inputs.iter().chain(&previous.discovered).chain(&previous.outputs);
-        let bytes = files.filter(|(path, _)| !self.on_workers.contains(path)).map(|(_, stamp)| stamp.size()).sum();
-        link.time(bytes, 4)
+        link.time(files.map(sent).sum(), 4)
+    }
+    /// Returns how long an edge is estimated to take: as it took when it last ran, or if it has not run, as the edges
+    /// with its toolchain which have run took, or nothing if none has.
+    fn estimated(&self, index: usize) -> Duration {
+        let edge = self.edges[index];
+        if self.state.get(plan::first_output(self.graph, edge)).is_some() {
+            return self.took(index);
+        }
+        let identity = self.graph.edge(edge).cache().unwrap_or_default();
+        self.estimates.get(identity).map_or(Duration::ZERO, |&(took, _)| took)
     }
     /// Returns the identity of the toolchain of an edge which may run on a worker: a cached edge which is not in the
     /// console pool, which inherits only the variables which locate its tools, and which has run before, so that the
@@ -2735,6 +2784,40 @@ mod tests {
         let worker = Arc::into_inner(worker(cache, &["toolchain"])).unwrap().with_link(link);
         assert!(worker.capabilities().is_ok());
         Arc::new(worker)
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
+    fn estimates_what_has_not_run_by_what_has() {
+        // edges of a toolchain, two of which have run, with the slow edge, which has too
+        let cc = "cat $in > $out && echo \"$out: $in\" > $out.d";
+        let graph = |all: bool| {
+            let graph = graph()
+                .rule("slow", &[("command", SLOW)])
+                .edge("slow", &["slow"], &[])
+                .cached("toolchain")
+                .rule("cc", &[("command", cc), ("depfile", "$out.d"), ("discover", "echo \"$out: $in\" > $out.d")])
+                .edge("cc", &["a.o"], &["a.c"])
+                .edge("cc", &["b.o"], &["b.c"]);
+            if all { graph.edge("cc", &["c.o"], &["c.c"]).finish() } else { graph.finish() }
+        };
+        let files = [("a.c", "a\n"), ("b.c", "b\n"), ("c.c", "c\n")];
+        let mut build = Build::new("estimates", graph(false), &files);
+        let first = TempCache::new("estimates-first");
+        build.options.cache = Some(first.0.clone());
+        build.ran(&[]);
+        // with one job, which the slow edge holds, the edge which has not run, which would wait for it, as it is
+        // estimated to take as long as those which have, and to send as little, goes to the worker
+        build.graph = graph(true);
+        build.options.jobs = 1;
+        let store = TempCache::new("estimates-store");
+        let link = crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9, speed: 1.0 };
+        build.options.workers = vec![linked(&store, link)];
+        remove(&build, &["slow"]);
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!((report.ran, report.remote), (2, 1), "{finished:?}");
+        assert_eq!(build.read("c.o"), "c\n");
     }
 
     #[test]
