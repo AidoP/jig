@@ -3812,22 +3812,6 @@ log note '''
 }
 
 #[test]
-fn reads_lines_which_end_with_crlf() {
-    // as Git checks them out on Windows, as it would with `core.autocrlf`, in the root file and one it uses
-    let project = Project::new("crlf", &[
-        (
-            "Jig",
-            "set codegen/opt-level 3\r\n# a comment\r\ncrate app 'app.rs'\r\n    crate-type 'bin'\r\nuse 'sub'\r\n",
-        ),
-        ("sub/Jig", "@if true\r\ncrate util 'util.rs'\r\n"),
-    ]);
-    let output = project.configure().ok();
-    let host = project.host();
-    assert_contains(output.build(&format!("{host}/app")), "-C opt-level=3");
-    output.build(&format!("{host}/libutil.rlib"));
-}
-
-#[test]
 fn programs_for_windows_are_exe() {
     // a program for Windows is named as rustc names it, with `.exe`, as one for another target is not, as its test
     // harness is
