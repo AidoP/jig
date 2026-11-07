@@ -1446,13 +1446,17 @@ implementation of that trait, so `generate.rs` doesn't change.
      - If the action fails, or lists a path which doesn't lead from the build's directory, the edge is given back to
        run here, which shows why.
      - What the worker's run discovers is recorded once its outputs are restored, as a local run's would be.
-   - **Not done yet:** with no record of how long an edge took, its cost isn't estimated. It goes to a worker when
-     the wait for a job here isn't known either, or the build is only for workers, and otherwise runs here.
+   - **Estimating what hasn't run.** An edge with no record is estimated by the cached edges of its toolchain which
+     have run: it takes as long as the median of them took, and writes as much as the median of them wrote. It sends
+     its declared inputs, less those the workers already have from this build. With no such edge to go by, it goes to
+     a worker only when the wait for a job here isn't known either, or the build is only for workers.
    - **Tests.**
      - rig, graph: an edge's discovery saved and loaded.
      - rig, exec: in a first build only for workers, an edge whose rule discovers that it reads `extra.h` is sent
        with it, and runs there. One whose discovery fails runs here. What ran there is recorded, and runs again when
        `extra.h` changes.
+     - rig, exec: while the one job here is held by a slow edge, an edge which hasn't run is estimated by one of its
+       toolchain which has, and is sent to a worker rather than waiting.
      - Integration: a fresh checkout's first build only for workers runs all six commands there, `mod inner;` among
        what is found. Its libraries are the same, byte for byte, as another checkout's built here.
 2. **Done:** pipelining (graph format version 8).
