@@ -604,6 +604,7 @@ pub fn build(
     observer: &mut dyn Observer,
 ) -> Result<Report, Error> {
     let mut total = Report::default();
+    let keeping = keep_left(state, options);
     for _ in 0..PASSES {
         let report = build_once(graph, state, options, targets, observer);
         let report = match report {
@@ -625,8 +626,32 @@ pub fn build(
             break;
         }
     }
+    if let Some(keeping) = keeping {
+        let _ = keeping.join();
+    }
     observer.done();
     Ok(total)
+}
+
+/// Ask the workers, on a thread of its own, which of the files left on them they are missing, which has those which
+/// have them keep them from their caches' collection, as they were used, while the build goes on.
+fn keep_left(state: &State, options: &Options) -> Option<std::thread::JoinHandle<()>> {
+    if options.workers.is_empty() {
+        return None;
+    }
+    let mut blobs: Vec<Hash> = state.remote_outputs().values().filter_map(|stamp| stamp.hash().copied()).collect();
+    if blobs.is_empty() {
+        return None;
+    }
+    blobs.sort_unstable();
+    blobs.dedup();
+    let workers = options.workers.clone();
+    let keep = move || {
+        for worker in workers.iter().filter(|worker| worker.usable()) {
+            let _ = worker.missing(&blobs);
+        }
+    };
+    Some(std::thread::spawn(keep))
 }
 
 /// Plan and run a build once.
@@ -698,7 +723,8 @@ fn build_once(
         reported: HashMap::new(),
         released: HashSet::new(),
         started: HashMap::new(),
-        on_workers: HashSet::new(),
+        on_workers: vec![HashSet::new(); options.workers.len()],
+        sent_to: HashMap::new(),
         estimates,
         wanted,
         left,
@@ -935,8 +961,10 @@ struct Run<'g, 's> {
     released: HashSet<(usize, usize)>,
     /// When each running edge started.
     started: HashMap<usize, Instant>,
-    /// The files the workers have from this build, as they wrote or were sent them, which are not sent again.
-    on_workers: HashSet<String>,
+    /// The files each worker has from this build, as it wrote or was sent them, which are not sent to it again.
+    on_workers: Vec<HashSet<String>>,
+    /// The worker each edge which was sent to one was sent to, until it finishes.
+    sent_to: HashMap<usize, usize>,
     /// For each toolchain, by its identity, how long the cached edges with it which have run took, and the size of
     /// their outputs, each the median of them, by which an edge which has not run is estimated, if there are workers.
     estimates: HashMap<String, (Duration, u64)>,
@@ -1309,7 +1337,7 @@ impl Run<'_, '_> {
             let took = self.estimated(index);
             let there = |worker: usize| {
                 let link = self.options.workers[worker].link();
-                self.sending(index, link).saturating_add(link.running(took))
+                self.sending(index, worker, link).saturating_add(link.running(took))
             };
             let candidates = (0..self.options.workers.len())
                 .filter(|&worker| free(self, worker) && self.runs(index, worker));
@@ -1341,11 +1369,12 @@ impl Run<'_, '_> {
         let record = self.state.get(plan::first_output(self.graph, self.edges[index]));
         record.map_or(Duration::ZERO, |record| Duration::from_millis(u64::from(record.duration)))
     }
-    /// Returns how long it is estimated to take to send an edge to a worker over a link, and fetch its outputs: its
+    /// Returns how long it is estimated to take to send an edge to a worker over its link, and fetch its outputs: its
     /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
     /// worker is missing, sending them, running the edge, and fetching its outputs.
-    fn sending(&self, index: usize, link: crate::remote::Link) -> Duration {
-        let sent = |(path, stamp): &(String, Stamp)| if self.on_workers.contains(path) { 0 } else { stamp.size() };
+    fn sending(&self, index: usize, worker: usize, link: crate::remote::Link) -> Duration {
+        let has = &self.on_workers[worker];
+        let sent = |(path, stamp): &(String, Stamp)| if has.contains(path) { 0 } else { stamp.size() };
         let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
             // one which has not run sends its declared inputs, as they are, and fetches outputs of the size of those
             // of the edges with its toolchain, if it has one and they have run
@@ -1423,7 +1452,8 @@ impl Run<'_, '_> {
             return None;
         }
         // what it is sent, the worker has
-        self.on_workers.extend(inputs.iter().cloned());
+        self.on_workers[worker].extend(inputs.iter().cloned());
+        self.sent_to.insert(index, worker);
         let mut env = self.options.env.clone();
         for name in edge.pass_env() {
             if let Some(value) = std::env::var_os(name) {
@@ -1683,6 +1713,7 @@ impl Run<'_, '_> {
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.started.remove(&index);
+        let sent_to = self.sent_to.remove(&index);
         // an edge which needed what was lost has not run, and runs in the next pass, once what it needs has
         if !lost.is_empty() {
             self.progress.running -= 1;
@@ -1704,9 +1735,9 @@ impl Run<'_, '_> {
             return;
         }
         // what a worker wrote, it has
-        if remote {
+        if let Some(worker) = sent_to.filter(|_| remote) {
             let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
-            self.on_workers.extend(outputs.chain(data.depfile()).map(String::from));
+            self.on_workers[worker].extend(outputs.chain(data.depfile()).map(String::from));
         }
         self.progress.running -= 1;
         self.progress.finished += 1;
@@ -2824,6 +2855,42 @@ mod tests {
             .finish()
     }
 
+    #[test]
+    #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
+    fn sends_edges_to_the_worker_which_has_their_inputs() {
+        // an edge which writes a large file, which only the second worker runs, and one which reads it, which either
+        // may run
+        let graph = graph()
+            .cached("large")
+            .rule("large", &[("command", "head -c 4000000 /dev/zero > $out && cat $in >> $out")])
+            .edge("large", &["large"], &["seed"])
+            .cached("toolchain")
+            .rule("count", &[("command", "wc -c < $in > $out")])
+            .edge("count", &["count"], &["large"])
+            .finish();
+        let mut build = Build::new("has-inputs", graph, &[("seed", "s\n")]);
+        assert_eq!(build.ran(&[]), ["large", "count"]);
+        remove(&build, &["large", "count"]);
+        let cache = TempCache::new("has-inputs-cache");
+        build.options.cache = Some(cache.0.clone());
+        build.options.workers_only = true;
+        // over links alike, slow enough that sending the large file would take a while
+        let link = crate::remote::Link { latency: Duration::ZERO, bytes_per_second: 1e6, speed: 1.0 };
+        let linked = |cache: &TempCache, identities: &[&str]| {
+            let worker = Arc::into_inner(worker(cache, identities)).unwrap().with_link(link);
+            assert!(worker.capabilities().is_ok());
+            Arc::new(worker)
+        };
+        let (first, second) = (TempCache::new("has-inputs-first"), TempCache::new("has-inputs-second"));
+        build.options.workers = vec![linked(&first, &["toolchain"]), linked(&second, &["large", "toolchain"])];
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{report:?} {finished:?}");
+        assert_eq!(report.remote, 2, "{finished:?}");
+        // what reads the large file runs on the worker which wrote it, rather than the first which would be sent it
+        let counted = crate::blake3::hash(build.read("count").as_bytes());
+        assert!(second.0.has_blob(&counted) && !first.0.has_blob(&counted));
+    }
+
     /// A worker over a link which is assumed to be as given.
     fn linked(cache: &TempCache, link: crate::remote::Link) -> Arc<Remote> {
         let worker = Arc::into_inner(worker(cache, &["toolchain"])).unwrap().with_link(link);
@@ -3050,7 +3117,12 @@ mod tests {
         assert_eq!(build.read("top"), "b\nb\n");
         assert_eq!(build.read("mid.d"), "mid: a.c\n");
         assert!(!build.dir.join("mid").exists());
+        // what was left is kept from the worker's collection, as each build with it marks it as used
+        let blob = store.0.blob_path(&crate::blake3::hash(b"b\n"));
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        std::fs::File::options().write(true).open(&blob).unwrap().set_modified(old).unwrap();
         assert_eq!(build.ran(&["top"]), Vec::<String>::new());
+        assert!(std::fs::metadata(&blob).unwrap().modified().unwrap() > old);
         // once no worker has it, what reads it here has it built again first, and is left on the new worker until it
         // is fetched
         let fresh = TempCache::new("leaves-fresh");

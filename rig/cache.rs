@@ -237,6 +237,15 @@ impl Cache {
     pub fn has_blob(&self, hash: &Hash) -> bool {
         self.blob_path(hash).is_file()
     }
+    /// Whether the cache has a blob, which is made the latest used if it does, so that it is kept from collection.
+    pub(crate) fn use_blob(&self, hash: &Hash) -> bool {
+        let path = self.blob_path(hash);
+        let has = path.is_file();
+        if has {
+            touch(&path);
+        }
+        has
+    }
     /// Add a file to the cache as a blob, whose contents have the hash, unless the cache has it.
     ///
     /// # Errors

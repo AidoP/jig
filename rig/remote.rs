@@ -31,7 +31,8 @@
 //! - `GET_RESULTS`, with a number of second keys, is replied to with `FOUND`, the index of the first key whose result
 //!   the server has, with every blob it refers to, and the result as it is stored, or `NOT_FOUND`, so that every set of
 //!   inputs an edge may have discovered is looked up at once.
-//! - `MISSING`, with a number of hashes, is replied to with `MISSING` and those of them the server does not have.
+//! - `MISSING`, with a number of hashes, is replied to with `MISSING` and those of them the server does not have. Those
+//!   it has are made the latest used, so that they are kept from its collection.
 //! - `PUT_BLOB`, with a hash and the blob, `PUT_RESULT`, with a key and the result as it is stored, and
 //!   `ADD_TO_MANIFEST`, with a key and the inputs and environment variables an edge discovered, as two lists of
 //!   strings, are replied to with `OK`, or `ERROR` with why, as when the server does not take pushes, or what was sent
@@ -1501,7 +1502,7 @@ fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (
             return error("an invalid list of keys");
         };
         if kind == MISSING {
-            return (MISSING, hashes(&keys.into_iter().filter(|blob| !cache.has_blob(blob)).collect::<Vec<_>>()));
+            return (MISSING, hashes(&keys.into_iter().filter(|blob| !cache.use_blob(blob)).collect::<Vec<_>>()));
         }
         let first = keys.iter().enumerate().find_map(|(index, key)| Some((index, cache.raw_result(key)?)));
         return found(first.map(|(index, result)| [(index as u32).to_le_bytes().as_slice(), &result].concat()));
