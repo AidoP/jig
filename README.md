@@ -928,7 +928,8 @@ target bluemetal-riscv64
   date, so that ninja, which is regenerating it there, stops. The rest of the previous build directory is kept
 - `target`: the target triple for crates without a `target` attribute, initially the host
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
-  `/usr/local` by default
+  `/usr/local` by default, or on Windows, where a user's own programs go, `%LOCALAPPDATA%\Programs`, which needs no
+  administrator
 - `test-tags`: the tags of the tests `jig test` runs without names or tags, beside the tests without tags, as a list,
   which is empty by default
 - `change-detection`: how rig finds that a file has changed, `'timestamp'` by default, by its modification time and

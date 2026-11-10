@@ -1688,10 +1688,13 @@ implementation of that trait, so `generate.rs` doesn't change.
      - **Interrupting `ping`.** The test of ending a group interrupts `ping`, which takes Ctrl-Break as asking for its
        statistics, so it ends its job a second later if it goes on, as a build does.
      - **Tests.** rig, sys: random bytes, neither all zero nor the same twice.
+   - **Done: the install prefix.** `install-prefix` is `/usr/local` on Unix, and on Windows, where a user's own
+     programs go, `%LOCALAPPDATA%\Programs`, which needs no administrator, from `USERPROFILE` without it. The variable
+     is one of the configuration's, so it configures the project again when it changes.
+     - jig, platform: the prefix on each platform, from the variables given.
    - **Not done yet:**
      - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell;
-     - `jig install --proxy`, whose wrappers are shell scripts;
-     - and defaults which assume Unix, as the install prefix, `/usr/local`.
+     - and `jig install --proxy`, whose wrappers are shell scripts.
 
 ## Risks
 

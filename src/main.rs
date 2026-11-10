@@ -291,6 +291,7 @@ fn declare_builtins(
 ) {
     let target_list = targets.iter().map(|target| project::Data::Str(target.clone())).collect();
     let cache_dir = cache::default_dir(|name| project.read_env(name));
+    let install_prefix = platform::install_prefix(|name| project.read_env(name));
     let builtins = [
         (
             project::Property::new("rustc/sysroot".into(), project::Type::String)
@@ -316,8 +317,11 @@ fn declare_builtins(
         ),
         (
             project::Property::new("install-prefix".into(), project::Type::String)
-                .info("the directory `jig install` installs in, unless it is given another"),
-            "/usr/local".into(),
+                .info(
+                    "the directory `jig install` installs in, unless it is given another: `/usr/local` on Unix, and \
+                     `%LOCALAPPDATA%\\Programs` on Windows",
+                ),
+            install_prefix,
         ),
         (
             project::Property::new("change-detection".into(), project::Type::String).info(
