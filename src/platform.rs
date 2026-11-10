@@ -1,8 +1,9 @@
 //! What jig does differently on each platform: file modes, links, what identifies a file, the programs in a directory,
-//! and how a program which was ended by a signal exits.
+//! how a program which was ended by a signal exits, and where `jig install` installs by default.
 //!
 //! On Windows, files have no modes, a link which cannot be made, as making one needs a privilege, is a copy, a file is
-//! identified by its canonical path, and a program is found with the extensions Windows runs it by.
+//! identified by its canonical path, a program is found with the extensions Windows runs it by, and what is installed
+//! goes where a user's own programs do.
 
 use std::path::{Path, PathBuf};
 
@@ -126,6 +127,24 @@ pub fn inode(metadata: &std::fs::Metadata) -> u64 {
     0
 }
 
+/// Returns the directory `jig install` installs in by default, with `read` reading an environment variable:
+/// `/usr/local` on Unix, and on Windows, where programs a user installs for themselves go, which needs no
+/// administrator, `%LOCALAPPDATA%\Programs`.
+#[cfg(unix)]
+pub fn install_prefix(read: impl FnMut(&str) -> Option<std::ffi::OsString>) -> String {
+    let _ = read;
+    "/usr/local".into()
+}
+#[cfg(windows)]
+pub fn install_prefix(mut read: impl FnMut(&str) -> Option<std::ffi::OsString>) -> String {
+    let set = |value: Option<std::ffi::OsString>| value.filter(|value| !value.is_empty()).map(PathBuf::from);
+    let local = set(read("LOCALAPPDATA")).or_else(|| set(read("USERPROFILE")).map(|home| home.join("AppData/Local")));
+    match local {
+        Some(local) => local.join("Programs").display().to_string(),
+        None => r"C:\Program Files".into(),
+    }
+}
+
 /// Returns the exit code of a program, or if a signal ended it, as on Unix, 128 and the signal, as a shell reports it.
 #[cfg(unix)]
 pub fn exit_code(status: std::process::ExitStatus) -> Option<i32> {
@@ -155,6 +174,22 @@ pub fn create_program(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installs_where_the_platform_does() {
+        let env = |vars: &'static [(&str, &str)]| {
+            move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| value.into())
+        };
+        if cfg!(windows) {
+            let local = install_prefix(env(&[("LOCALAPPDATA", r"C:\Users\a\AppData\Local"), ("USERPROFILE", "x")]));
+            assert_eq!(Path::new(&local), Path::new(r"C:\Users\a\AppData\Local\Programs"));
+            let home = install_prefix(env(&[("LOCALAPPDATA", ""), ("USERPROFILE", r"C:\Users\a")]));
+            assert_eq!(Path::new(&home), Path::new(r"C:\Users\a\AppData\Local\Programs"));
+            assert_eq!(install_prefix(env(&[])), r"C:\Program Files");
+        } else {
+            assert_eq!(install_prefix(env(&[("LOCALAPPDATA", "x")])), "/usr/local");
+        }
+    }
 
     #[test]
     fn finds_programs_and_identifies_files() {
