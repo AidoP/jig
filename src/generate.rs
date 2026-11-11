@@ -1357,8 +1357,8 @@ fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> ri
 /// key the command is part of, is not that of another linker. rustc does not read it.
 const LINKER_VARIABLE: &str = "JIG_LINKER";
 
-/// Whether a program is given by its path, relative to the file which gives it, rather than found by its name, as it has
-/// a separator, which on Windows may be `\` as well as `/`, as a path joined there has.
+/// Whether a program is given by its path, relative to the file which gives it, rather than found by its name, as it
+/// has a separator, which on Windows may be `\` as well as `/`, as a path joined there has.
 fn is_path(program: &str) -> bool {
     program.contains('/') || (cfg!(windows) && program.contains('\\'))
 }
