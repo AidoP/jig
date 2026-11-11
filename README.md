@@ -310,10 +310,11 @@ info, are remapped to be relative to the project root, as `src/main.rs`, or `bui
 build directory, with the project root as the working directory of debug info, so that what they write does not depend
 on where the project is, and a build in another directory is the same. Custom commands, tests and `run` run from the
 project root, so their paths are relative to it as usual.
-Ninja cannot write a line break, so a path in `build.ninja`, such as an input, an output, a crate or a linker script,
-or an argument of a command, such as an `env` value or a codegen option, cannot contain one, which is the error
-`newline-in-path` or `newline-in-argument`. A path cannot be empty either, as it would be the directory it is relative
-to, which is the error `empty-path`.
+A path, such as an input, an output, a crate or a linker script, cannot contain a line break, as neither a depfile nor
+`build.ninja` can write one, which is the error `newline-in-path`. rig runs a command with its arguments as they are,
+so an argument, such as an `env` value or a codegen option, can contain one, while with ninja, which writes each
+command on a line, it cannot, which is the error `newline-in-argument`. A path cannot be empty either, as it would be
+the directory it is relative to, which is the error `empty-path`.
 
 
 ### Statements

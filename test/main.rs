@@ -2881,6 +2881,33 @@ build out.bin: custom ../a.dts ../b.dtsi ../c.dtsi
 
 #[cfg_attr(windows, ignore = "it reads `build.ninja`, which jig does not generate on Windows")]
 #[test]
+fn line_breaks_in_arguments() {
+    if !rig_engine() {
+        return;
+    }
+    // rig runs a program with its arguments and variables as they are, line breaks and all
+    let project = Project::new("line-breaks", &[
+        ("Jig", "\
+declare text
+    default '''
+        a
+        b
+    '''
+crate app 'app.rs'
+    crate-type 'bin'
+    env [TEXT: text]
+"),
+        ("app.rs", "fn main() { print!(\"{}\", env!(\"TEXT\")); }\n"),
+    ]);
+    project.configure().ok();
+    let host = project.host();
+    let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let ran = Command::new(project.dir.join(format!("build/{host}/app{EXE}"))).output().unwrap();
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "a\nb");
+}
+
+#[test]
 fn unwritable_paths() {
     // ninja cannot write a newline, in a path or a command
     let project = Project::new("unwritable-paths", &[("Jig", "\
@@ -2903,16 +2930,29 @@ crate lib 'lib.rs'
     env [X: broken]
     codegen/llvm-args broken
 ")]);
-    project.configure().failed()
-        .stderr("error[newline-in-path]: path \"build/a\\nb\" contains a newline, which ninja cannot write\n --> Jig:7:12")
-        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:10:11")
-        .stderr("error[newline-in-path]: path \"a\\nb.rs\" contains a newline, which ninja cannot write\n  --> Jig:12:11")
-        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:15:13")
-        .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:16:17")
-        .stderr("error[newline-in-argument]: command arguments cannot contain a newline\n  --> Jig:17:9")
-        .stderr("error[newline-in-argument]: command arguments cannot contain a newline\n  --> Jig:18:23")
-        .stderr("configuration failed with 7 errors");
-    assert!(!project.dir.join("build/build.ninja").exists());
+    // a path, which a depfile cannot have either, with either engine
+    let paths = |output: &Output| {
+        output
+            .stderr("error[newline-in-path]: path \"build/a\\nb\" contains a newline, which ninja cannot write\n --> Jig:7:12")
+            .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:10:11")
+            .stderr("error[newline-in-path]: path \"a\\nb.rs\" contains a newline, which ninja cannot write\n  --> Jig:12:11")
+            .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:15:13")
+            .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:16:17");
+    };
+    // and an argument, only with ninja, which writes a command on a line, rather than rig, which runs it as it is
+    if !cfg!(windows) {
+        let output = project.configure_with(&[("JIG_ENGINE", "ninja")]).failed();
+        paths(&output);
+        output
+            .stderr("error[newline-in-argument]: command arguments cannot contain a newline with ninja, which cannot write it\n  --> Jig:17:9")
+            .stderr("error[newline-in-argument]: command arguments cannot contain a newline with ninja, which cannot write it\n  --> Jig:18:23")
+            .stderr("configuration failed with 7 errors");
+        assert!(!project.dir.join("build/build.ninja").exists());
+    }
+    let output = project.configure_with(&[("JIG_ENGINE", "rig")]).failed();
+    paths(&output);
+    output.stderr("configuration failed with 5 errors");
+    assert!(!output.stderr.contains("newline-in-argument"), "{}", output.stderr);
 
     // nor is an empty path one, as it would be the directory it is relative to
     let project = Project::new("empty-paths", &[("Jig", "\

@@ -216,6 +216,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
+    project.line_breaks = configured::Engine::from_env()? == configured::Engine::Rig;
     // which toolchain rustup's proxies run, as rustc was asked of above, so that the project is configured again when it
     // changes, and the toolchain is identified afresh
     project.read_env("RUSTUP_TOOLCHAIN");
