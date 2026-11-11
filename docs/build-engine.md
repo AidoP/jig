@@ -662,7 +662,14 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Left for step 3: line breaks.** Lifting the restriction on line breaks waits for step 3. rig's configure edge
      still has `build.ninja` as its output, so `build.ninja` can't yet be left out for a graph which ninja can't
      express.
-3. **Deferred:** configuring natively, and line breaks.
+3. **Done: line breaks in arguments. Deferred: configuring natively, and line breaks in paths.**
+   - **Since: arguments.** Once only the engine's own file was generated, rig's generator edge produced `graph` rather
+     than `build.ninja`, so a graph which ninja can't express no longer has to be written for it. jig refuses a line
+     break in a command's argument, an `env` value or a codegen option, `newline-in-argument`, only with
+     `JIG_ENGINE=ninja`, as `Project::line_breaks` says, and rig runs the command with it as it is. A path still can't
+     have one, `newline-in-path`, with either engine, as neither rustc's dep-info nor rig's own depfile can write it.
+     - Integration: a crate whose `env` has a line break builds with rig, and its program prints it as it was. A
+       project with one in an argument fails to configure only with ninja, and with paths with one, with both.
    - **What it would do.**
      - Replace `reconfigure.stamp` with inputs of rig's generator edge for missing paths.
      - Run the configure edge in jig's own process rather than as a `jig generate` subprocess.
