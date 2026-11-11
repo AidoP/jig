@@ -110,15 +110,18 @@ impl Rig<'_> {
         let file = file_id(&path);
         Ok((self.graph()?, self.state()?, file))
     }
+    /// The variables a build gives what it runs, beside those it inherits, by which it stamps the variables an edge
+    /// read: the toolchain the project is configured with.
+    fn env(&self) -> Vec<(String, String)> {
+        self.toolchain.map(|toolchain| ("RUSTUP_TOOLCHAIN".into(), toolchain.into())).into_iter().collect()
+    }
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }
     /// The options of a build, with the cache, unless it is off, as the project was configured.
     fn options(&self) -> Result<rig::exec::Options, Error> {
         let mut options = rig::exec::Options::new(self.build_dir);
-        if let Some(toolchain) = self.toolchain {
-            options.env.push(("RUSTUP_TOOLCHAIN".into(), toolchain.into()));
-        }
+        options.env.extend(self.env());
         // rustup's proxies, such as `rustc`, find the toolchain with these, and `RUSTUP_TOOLCHAIN` chooses it, which is
         // identified by its contents instead, as it was when the project was configured, which it is again when the
         // variable changes, so that a cached command runs the toolchain it is identified by, rather than rustup's default
@@ -206,7 +209,7 @@ impl Rig<'_> {
             Err(Error::Rig(rig::Error::Locked(_))) => return Ok(false),
             Err(error) => return Err(error),
         };
-        let mut stamps = rig::Stamps::new(&graph, self.build_dir);
+        let mut stamps = rig::Stamps::new(&graph, self.build_dir).with_env(&self.env());
         let planned = match rig::plan::plan(&graph, &state, &mut stamps, targets) {
             Ok(plan) => Ok(plan.is_empty()),
             Err(rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_)) => Ok(false),
@@ -287,6 +290,9 @@ impl Builder for Rig<'_> {
         self.run(&targets, &options, console, request.output)
     }
     fn regenerate(&self, quiet: bool, output: Output) -> Result<(), Error> {
+        if self.regenerate_here(quiet, output)? {
+            return Ok(());
+        }
         let console = Console { quiet, verbose: false };
         if self.run(&[rig_graph::FILE], &self.options()?, console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
@@ -299,6 +305,71 @@ impl Builder for Rig<'_> {
 }
 
 impl Rig<'_> {
+    /// Bring the graph up to date in this process, rather than by running `jig generate`, if it is only the edge which
+    /// generates it which is out of date, and its configure tool is the `jig` which is running, returning whether it
+    /// did. Otherwise, as when the project builds the tool which configures it, which is built first, rig builds it.
+    ///
+    /// The graph and state which were loaded to plan it are left for the build which follows, with the edge recorded as
+    /// up to date in the state, as rig records an edge it runs.
+    fn regenerate_here(&self, quiet: bool, output: Output) -> Result<bool, Error> {
+        let (graph, mut state, file) = match self.loaded() {
+            Ok(loaded) => loaded,
+            Err(Error::Rig(rig::Error::Locked(_))) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let path = self.build_dir.join(rig_graph::FILE);
+        let leave = |graph, state, file| {
+            if let Ok(mut loaded) = LOADED.lock() {
+                *loaded = Some(Loaded { path: path.clone(), file, graph, state });
+            }
+        };
+        let mut stamps = rig::Stamps::new(&graph, self.build_dir).with_env(&self.env());
+        let planned = rig::plan::plan(&graph, &state, &mut stamps, &[rig_graph::FILE]);
+        drop(stamps);
+        let Ok(plan) = planned else {
+            leave(graph, state, file);
+            return Ok(false);
+        };
+        if plan.is_empty() {
+            leave(graph, state, file);
+            return Ok(true);
+        }
+        let generator = graph.node(rig_graph::FILE).and_then(|node| graph.producer(node));
+        let generated = match plan.edges.as_slice() {
+            [(edge, _)] if Some(*edge) == generator => generated_by(&graph, *edge),
+            _ => None,
+        };
+        let Some((dir, input, toolchain)) = generated else {
+            leave(graph, state, file);
+            return Ok(false);
+        };
+        if !quiet {
+            let line = format!("[1/1] CONFIGURE {}\n", rig_graph::FILE);
+            let _ = match output {
+                Output::Stdout => std::io::Write::write_all(&mut std::io::stdout(), line.as_bytes()),
+                Output::Stderr => std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes()),
+            };
+        }
+        // the graph is not freed, as the process ends soon after, and is loaded again once it is written
+        std::mem::forget(graph);
+        // from the project root, as the edge runs it, which the configuration's paths are relative to
+        let cwd = std::env::current_dir().map_err(|error| Error::Read(".".into(), error))?;
+        std::env::set_current_dir(&dir).map_err(|error| Error::Read(dir.clone(), error))?;
+        let generated = crate::generate(input, toolchain.as_deref());
+        let restored = std::env::set_current_dir(&cwd).map_err(|error| Error::Read(cwd, error));
+        generated?;
+        restored?;
+        // the edge is recorded as up to date, unless the graph was written elsewhere, as the build directory changed
+        let written = file_id(&path);
+        if written == file {
+            drop(state);
+            return Ok(true);
+        }
+        let graph = self.graph()?;
+        record_generator_in(&graph, self.build_dir, &mut state, &self.env())?;
+        leave(graph, state, written);
+        Ok(true)
+    }
     /// Show what would run, and why, without running it.
     fn dry_run(&self, targets: &[&str], output: Output) -> Result<bool, Error> {
         use std::io::Write;
@@ -329,19 +400,58 @@ impl Rig<'_> {
 ///
 /// Nothing is recorded if the state is in use, as when rig runs the edge itself, and records it once it has run.
 pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Error> {
+    let mut state = match rig::state::State::open(&build_dir.join(STATE)) {
+        Ok(state) => state,
+        Err(rig::Error::Locked(_)) => return Ok(()),
+        Err(error) => return Err(Error::Rig(error)),
+    };
+    // as the edge which ran `jig generate` gives it its variables, which it inherits then
+    record_generator_in(graph, build_dir, &mut state, &[])
+}
+
+/// Returns how the edge which generates the graph runs the configure tool, if it is the `jig` which is running: the
+/// directory it runs in, the root build file, and the toolchain, if it is given one.
+fn generated_by(graph: &rig::Graph, edge: rig::EdgeId) -> Option<(PathBuf, PathBuf, Option<String>)> {
+    let data = graph.edge(edge);
+    let rig::EdgeKind::Command(rig::Action::Exec(exec)) = data.kind() else {
+        return None;
+    };
+    let running = crate::configured::jig().ok()?;
+    if !data.generator() || !crate::configured::same_file(Path::new(&exec.program), &running) {
+        return None;
+    }
+    let (toolchain, input) = generate_args(&exec.args)?;
+    Some((PathBuf::from(exec.dir.as_ref()?), input.into(), toolchain))
+}
+
+/// Returns the toolchain and the root build file of the arguments of `jig [+<toolchain>] generate <input>`, or `None`
+/// if they are not those.
+fn generate_args(args: &[String]) -> Option<(Option<String>, &str)> {
+    let (toolchain, args) = match args.split_first()? {
+        (first, rest) if first.starts_with('+') => (Some(first[1..].to_string()), rest),
+        _ => (None, args),
+    };
+    match args {
+        [generate, input] if generate == "generate" => Some((toolchain, input)),
+        _ => None,
+    }
+}
+
+/// Record the edge which generates the graph as up to date in a state which is open.
+fn record_generator_in(
+    graph: &rig::Graph,
+    build_dir: &Path,
+    state: &mut rig::state::State,
+    env: &[(String, String)],
+) -> Result<(), Error> {
     let Some(node) = graph.node(rig_graph::FILE) else {
         return Ok(());
     };
     let Some(edge) = graph.producer(node).filter(|&edge| graph.edge(edge).generator()) else {
         return Ok(());
     };
-    let mut state = match rig::state::State::open(&build_dir.join(STATE)) {
-        Ok(state) => state,
-        Err(rig::Error::Locked(_)) => return Ok(()),
-        Err(error) => return Err(Error::Rig(error)),
-    };
-    let mut stamps = rig::Stamps::new(graph, build_dir);
-    let inputs = rig::plan::input_stamps(graph, &state, edge, &mut stamps);
+    let mut stamps = rig::Stamps::new(graph, build_dir).with_env(env);
+    let inputs = rig::plan::input_stamps(graph, state, edge, &mut stamps);
     let discovered = match graph.edge(edge).depfile() {
         Some(depfile) => {
             let path: PathBuf = build_dir.join(depfile);
@@ -371,5 +481,17 @@ mod tests {
         assert_eq!(args.targets, ["a", "-b"]);
         assert!(matches!(parse(&["-t", "deps"]), Err(Error::RigArgument(arg)) if arg == "-t"));
         assert!(matches!(parse(&["-j", "x"]), Err(Error::RigArgument(arg)) if arg == "-j x"));
+    }
+
+    #[test]
+    fn reads_how_the_graph_is_generated() {
+        let args = |args: &[&str]| args.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(generate_args(&args(&["generate", "Jig"])), Some((None, "Jig")));
+        let toolchain = args(&["+nightly", "generate", "sub/Jig"]);
+        assert_eq!(generate_args(&toolchain), Some((Some("nightly".into()), "sub/Jig")));
+        // what is not how jig generates it is left to rig to run
+        assert_eq!(generate_args(&args(&["build"])), None);
+        assert_eq!(generate_args(&args(&["generate", "Jig", "extra"])), None);
+        assert_eq!(generate_args(&args(&["+nightly"])), None);
     }
 }

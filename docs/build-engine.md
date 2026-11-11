@@ -662,7 +662,9 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **Left for step 3: line breaks.** Lifting the restriction on line breaks waits for step 3. rig's configure edge
      still has `build.ninja` as its output, so `build.ninja` can't yet be left out for a graph which ninja can't
      express.
-3. **Done: line breaks in arguments. Deferred: configuring natively, and line breaks in paths.**
+3. **Done: configuring natively, and line breaks in arguments. Not done, as it can't be: line breaks in paths.**
+   It was deferred at first, as it would have needed rig's generator edge reworked, which was since done when only the
+   engine's own file was generated, so that it produces `graph` rather than `build.ninja`.
    - **Since: arguments.** Once only the engine's own file was generated, rig's generator edge produced `graph` rather
      than `build.ninja`, so a graph which ninja can't express no longer has to be written for it. jig refuses a line
      break in a command's argument, an `env` value or a codegen option, `newline-in-argument`, only with
@@ -670,20 +672,26 @@ implementation of that trait, so `generate.rs` doesn't change.
      have one, `newline-in-path`, with either engine, as neither rustc's dep-info nor rig's own depfile can write it.
      - Integration: a crate whose `env` has a line break builds with rig, and its program prints it as it was. A
        project with one in an argument fails to configure only with ninja, and with paths with one, with both.
-   - **What it would do.**
-     - Replace `reconfigure.stamp` with inputs of rig's generator edge for missing paths.
-     - Run the configure edge in jig's own process rather than as a `jig generate` subprocess.
-     - Write `build.ninja` only when ninja can express the graph, so that paths with line breaks work under rig.
-   - **Why it is deferred.** What it would replace already works for both engines:
-     - the stamp, for missing paths and for the configuration's environment variables;
-     - the configure subprocess, which runs only when the configuration changes;
-     - the line-break check, which rejects what ninja can't write, and is rarely met.
-
-     Doing it natively saves one process when the configuration changes, and allows line breaks in paths. That is
-     little for a rework of how both engines regenerate, since rig's generator edge would have to produce `graph`
-     rather than `build.ninja`.
-   - **When to revisit.** When something else needs rig's generator edge reworked, such as a resident daemon, or
-     dropping the ninja engine.
+   - **Since: missing paths and variables, without the stamp.** With rig, `graph.d` lists the paths the
+     configuration found missing, and the variables it read as `# env-dep:` lines, as rustc writes them, which rig
+     takes as the generator edge's inputs, as it does a crate's. So `Configured::locate` no longer checks them, or
+     touches `reconfigure.stamp`, for rig, whose plan finds a created path or a changed variable itself. ninja takes
+     neither, so for it the stamp is touched as before.
+     - Integration: with rig, `graph.d` lists a path found missing, and a variable read, and creating the path
+       regenerates the graph without touching the stamp.
+   - **Since: in jig's own process.** `Rig::regenerate` plans `graph` first. If only the generator edge is out of
+     date, and the program it runs is the `jig` which is running, jig generates the graph itself, from the project
+     root, with the toolchain the edge gives, rather than running `jig generate`, and records the edge in the state it
+     holds, which with the new graph is left for the build which follows. Otherwise, as when a project builds the jig
+     which configures it, which must be built first, rig runs the edge as before.
+     - A failure shows the configuration's diagnostics and that it failed, without rig's `FAILED: graph` and the
+       command.
+     - The variables an edge read are stamped, when the graph is planned or the edge is recorded, with the toolchain
+       rig gives what it runs, as when it ran the subprocess, so that `RUSTUP_TOOLCHAIN` isn't taken as changed.
+     - Measured: a project of one crate reconfigures in 62 ms rather than 69 ms, of which most is the four times the
+       configuration runs rustc.
+     - jig, rig_builder: the toolchain and root build file read from the edge's arguments, and what isn't how jig
+       generates the graph left to rig.
 
 ### Phase 3: hashing and early cutoff
 
