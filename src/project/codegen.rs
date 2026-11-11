@@ -217,8 +217,8 @@ impl Project {
             },
             (data, _) => Some(vec![data.coerce_string()]),
         };
-        // the options are arguments of rustc
-        if values.as_ref().is_some_and(|values| values.iter().any(|value| has_line_break(value))) {
+        // the options are arguments of rustc, which ninja writes on a line
+        if !self.line_breaks && values.as_ref().is_some_and(|values| values.iter().any(|value| has_line_break(value))) {
             self.diagnostics.push(Diagnostic {
                 span: Some(operand.span),
                 message: Message::NewlineInArgument,

@@ -505,7 +505,9 @@ impl core::fmt::Display for Message {
             Self::RepeatedAttribute(name) => write!(f, "attribute {name:?} cannot be repeated"),
             Self::MissingAttribute(name) => write!(f, "missing required attribute {name:?}"),
             Self::RedeclareCustom { item, name, .. } => write!(f, "redeclaration of {item} {name:?}"),
-            Self::NewlineInArgument => write!(f, "command arguments cannot contain a newline"),
+            Self::NewlineInArgument => {
+                write!(f, "command arguments cannot contain a newline with ninja, which cannot write it")
+            },
             Self::EmptyPath => write!(f, "a path cannot be empty"),
             // with the newline escaped, as the message is on one line
             Self::NewlineInPath(path) => {

@@ -499,7 +499,7 @@ impl Project {
             }
             for argument in operand.data.spread() {
                 // an argument is written to `build.ninja` on a single line
-                if has_line_break(&argument) {
+                if !self.line_breaks && has_line_break(&argument) {
                     self.diagnostics.push(Diagnostic {
                         span: Some(operand.span),
                         message: Message::NewlineInArgument,

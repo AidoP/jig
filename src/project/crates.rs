@@ -338,8 +338,8 @@ impl Project {
                 return None;
             }
             let value = value.coerce_string();
-            // the variables are part of the command which runs rustc
-            if has_line_break(&value) {
+            // the variables are part of the command which runs rustc, which ninja writes on a line
+            if !self.line_breaks && has_line_break(&value) {
                 self.diagnostics.push(Diagnostic {
                     span: Some(operand.span),
                     message: Message::NewlineInArgument,
