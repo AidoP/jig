@@ -13,9 +13,20 @@ pub fn mode(metadata: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     metadata.permissions().mode() & 0o7777
 }
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub fn mode(metadata: &std::fs::Metadata) -> u32 {
     if metadata.permissions().readonly() { 0o444 } else { 0o644 }
+}
+
+/// Whether a file has permissions, as Unix modes, as [`set_mode`] gives them, which on Windows is whether it is
+/// read-only, as it would be with them.
+#[cfg(unix)]
+pub fn has_mode(metadata: &std::fs::Metadata, mode: u32) -> bool {
+    self::mode(metadata) == mode
+}
+#[cfg(windows)]
+pub fn has_mode(metadata: &std::fs::Metadata, mode: u32) -> bool {
+    metadata.permissions().readonly() == (mode & 0o222 == 0)
 }
 
 /// Give a file permissions, as Unix modes, of which Windows takes only whether it is written by none.

@@ -432,7 +432,7 @@ impl Executor {
         std::fs::create_dir_all(&build).map_err(|failure| failed("create", &build, failure))?;
         // the directory is as the commands find it, once symbolic links are followed, as on macOS, where `/var` is one,
         // so that the remapping of the build's directory, which the marker gives, matches the paths rustc writes
-        let build = std::fs::canonicalize(&build).map_err(|failure| failed("find", &build, failure))?;
+        let build = crate::sys::canonicalize(&build).map_err(|failure| failed("find", &build, failure))?;
         for input in &request.inputs {
             let path = build.join(&input.path);
             if let Some(parent) = path.parent() {

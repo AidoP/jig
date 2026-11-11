@@ -36,6 +36,7 @@ pub mod worker;
 pub use graph::{Action, Edge, EdgeId, EdgeKind, EdgeRef, Exec, Graph, NodeId, Placement, Pool};
 pub use stamp::{Stamp, Stamps, stamps_of};
 pub use state::fnv1a;
+pub use sys::canonicalize;
 
 /// An error from building, saving or loading a graph, or running a build.
 #[derive(Debug)]

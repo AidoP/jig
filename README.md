@@ -141,19 +141,19 @@ if they are given a different toolchain. Without rustup, a toolchain cannot be s
 ./build/bootstrap/jig +nightly build
 ```
 
-With rig, the results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from
-it rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or `~/.cache/jig`, by
-default, and `'off'` turns it off, usually set in the user's configuration. The `JIG_CACHE` environment variable
-overrides it, relative to the working directory, while a `JIG_CACHE` which is empty or `off` turns it off. They are
-read as the project is configured. A crate which is built again with what it was built with before, such as once a change to it is undone, or another
-branch is checked out and back, or once the build directory is removed, is restored from the cache, with what rustc
-printed. The cache is found by the contents of each crate's sources, the crates it uses and the variables it read, and
-by the identity of the toolchain, from `rustc -vV` and the files rustup writes when it installs or updates it, so
-that the project is configured again when the toolchain is updated in place. Turning the cache on or off configures
-the project again too. The cache is shared between checkouts of a project in different directories, as what rustc is
-given and writes does not depend on where the project is. A crate or command which is cached runs in a hermetic
-environment, inheriting only the variables it passes on, with `pass-env`, and those which locate tools. The cache has
-no effect with ninja.
+With rig, the results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from it
+rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or on Windows,
+`%LOCALAPPDATA%\jig\cache`, or `~/.cache/jig`, by default, and `'off'` turns it off, usually set in the user's
+configuration. The `JIG_CACHE` environment variable overrides it, relative to the working directory, while a `JIG_CACHE`
+which is empty or `off` turns it off. They are read as the project is configured. A crate which is built again with what
+it was built with before, such as once a change to it is undone, or another branch is checked out and back, or once the
+build directory is removed, is restored from the cache, with what rustc printed. The cache is found by the contents of
+each crate's sources, the crates it uses and the variables it read, and by the identity of the toolchain, from `rustc
+-vV` and the files rustup writes when it installs or updates it, so that the project is configured again when the
+toolchain is updated in place. Turning the cache on or off configures the project again too. The cache is shared between
+checkouts of a project in different directories, as what rustc is given and writes does not depend on where the project
+is. A crate or command which is cached runs in a hermetic environment, inheriting only the variables it passes on, with
+`pass-env`, and those which locate tools. The cache has no effect with ninja.
 
 `jig cache stats` shows where the cache is and what it holds, `jig cache gc [--max-size <size>]` removes what was used
 longest ago until it is no larger than a size, such as `512M` or `10G`, and `jig cache clear` removes everything in it.
@@ -260,13 +260,13 @@ even where the host can run them.
 
 ### The user's configuration
 
-What belongs to the user or the machine rather than a project, such as rig's cache, is set in the user's
-configuration, `$XDG_CONFIG_HOME/jig/config`, or `~/.config/jig/config`, or the file the `JIG_CONFIG` environment
-variable gives, while a `JIG_CONFIG` which is empty or `off` turns it off. It is a file of the same statements as
-`Jig`, which is processed before a project's own, as if the project began with a `use` of it, so that a project can
-read what it sets, and set it again. Paths in it are relative to it, as in any file. A project depends on it, so it is
-configured again when it changes, or once it is created. `jig cache` and `jig serve`, which have no project, process
-it alone, where the builtin properties of the toolchain are empty if rustc cannot be run.
+What belongs to the user or the machine rather than a project, such as rig's cache, is set in the user's configuration,
+`$XDG_CONFIG_HOME/jig/config`, or on Windows, `%APPDATA%\jig\config`, or `~/.config/jig/config`, or the file the
+`JIG_CONFIG` environment variable gives, while a `JIG_CONFIG` which is empty or `off` turns it off. It is a file of the
+same statements as `Jig`, which is processed before a project's own, as if the project began with a `use` of it, so that
+a project can read what it sets, and set it again. Paths in it are relative to it, as in any file. A project depends on
+it, so it is configured again when it changes, or once it is created. `jig cache` and `jig serve`, which have no
+project, process it alone, where the builtin properties of the toolchain are empty if rustc cannot be run.
 
 ```
 # ~/.config/jig/config
@@ -284,7 +284,10 @@ directory, and is the `install-prefix` property, relative to the project root, w
 With `--proxy`, a program, which is a binary crate or the output of a custom command with an executable `install-mode`,
 is installed as a wrapper which runs `jig build --proxy <prefix> <wrapper>`, then runs the program with the wrapper's
 arguments, so that it is rebuilt when it is out of date. Any other file is installed as a symbolic link to its output.
-The wrapper runs the `jig` which installed it, writing the build's output to stderr.
+The wrapper runs the `jig` which installed it, writing the build's output to stderr. It is a shell script on Unix,
+and on Windows, a program which does as the script does, compiled once for the project, with its toolchain, in its build
+directory, with what it wraps after its end. A wrapper which is running when it is reinstalled is renamed, as Windows
+does not remove a program which is running, to `<wrapper>.old0` and so on, which the next reinstall removes.
 
 `jig build --proxy` brings the configuration up to date, finds the program installed at the wrapper in the prefix, and
 builds it quietly, which with ninja needs ninja 1.11 or later. If the configuration or the program is out of date,
@@ -939,7 +942,8 @@ target bluemetal-riscv64
   of the file system's clock of being hashed, as it may have changed again without its time showing it. ninja always
   uses timestamps
 - `cache/dir`, `cache/size`, `cache/remote` and `cache/push`: rig's cache, as described for it, usually set in the user's
-  configuration: its directory, `$XDG_CACHE_HOME/jig` or `~/.cache/jig` by default, or `'off'`; the size it is
+  configuration: its directory, `$XDG_CACHE_HOME/jig`, `%LOCALAPPDATA%\jig\cache` on Windows, or
+  `~/.cache/jig` by default, or `'off'`; the size it is
   collected down to, `'10G'` by default; the remote cache it is in front of, empty by default; and whether it pushes
   to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE`, `JIG_CACHE_SIZE`,
   `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH`

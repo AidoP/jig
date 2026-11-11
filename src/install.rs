@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::builder::Request;
 use crate::configured::{Configured, Output};
+#[cfg(unix)]
 use crate::generate::shell_quote;
 use crate::project::{self, Message, Severity};
 use crate::{Error, database};
@@ -48,7 +49,7 @@ pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
         let installed = match (proxy, file.program) {
             (false, _) => copy(&source, &destination, file.mode).map(|()| copies += 1),
             (true, true) => {
-                write_proxy(&project.root, &jig, &prefix, &destination, &source, file.mode).map(|_| wrappers += 1)
+                write_proxy(&project, &jig, &prefix, &destination, &source, file.mode).map(|_| wrappers += 1)
             },
             (true, false) => link(&source, &destination).map(|()| links += 1),
         };
@@ -108,6 +109,7 @@ pub const REINSTALLED: u8 = 75;
 ///
 /// The paths are absolute, and the wrapper is identified by its prefix and its own path, which `jig` finds its program
 /// by. The build's output is written to stderr, so that the program's output is its own.
+#[cfg(unix)]
 fn proxy_script(root: &Path, jig: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> String {
     let quote = |path: &Path| shell_quote(&path.display().to_string());
     format!(
@@ -128,26 +130,115 @@ fn proxy_script(root: &Path, jig: &Path, prefix: &Path, wrapper: &Path, source: 
     )
 }
 
+/// Returns the wrapper for a program, as [`proxy_script`] is on Unix: the executable compiled from
+/// `proxy_wrapper.rs`, followed by what it wraps, as it reads it, which builds the program then runs it.
+#[cfg(windows)]
+fn proxy_executable(
+    project: &Configured,
+    root: &Path,
+    jig: &Path,
+    prefix: &Path,
+    wrapper: &Path,
+    source: &Path,
+) -> std::io::Result<Vec<u8>> {
+    let paths = [root, jig, prefix, wrapper, source].map(|path| path.display().to_string());
+    if paths.iter().any(|path| path.contains('\n')) {
+        return Err(std::io::Error::other("a path of the wrapper has a line break"));
+    }
+    let lines = paths.join("\n");
+    let mut bytes = std::fs::read(compiled_wrapper(project)?)?;
+    bytes.extend_from_slice(lines.as_bytes());
+    bytes.extend_from_slice(&u32::try_from(lines.len()).map_err(std::io::Error::other)?.to_le_bytes());
+    bytes.extend_from_slice(PROXY_MAGIC);
+    Ok(bytes)
+}
 
-/// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written.
+/// What ends a wrapper on Windows, after what it wraps.
+#[cfg(windows)]
+const PROXY_MAGIC: &[u8; 8] = b"JIGPROXY";
+
+/// The source of the wrapper on Windows.
+#[cfg(windows)]
+const PROXY_WRAPPER: &str = include_str!("proxy_wrapper.rs");
+
+/// Returns the wrapper on Windows, compiled once for a project, with its toolchain, in its build directory, by the hash
+/// of its source, so that a new `jig` with another compiles it again.
+#[cfg(windows)]
+fn compiled_wrapper(project: &Configured) -> std::io::Result<PathBuf> {
+    let name = format!("jig-proxy-{:016x}", rig::fnv1a(PROXY_WRAPPER.as_bytes()));
+    let exe = project.build_dir.join(format!("{name}.exe"));
+    if exe.is_file() {
+        return Ok(exe);
+    }
+    let source = project.build_dir.join(format!("{name}.rs"));
+    std::fs::write(&source, PROXY_WRAPPER)?;
+    let tmp = project.build_dir.join(format!("{name}.{}.exe", std::process::id()));
+    let mut rustc = std::process::Command::new("rustc");
+    if let Some(toolchain) = &project.toolchain {
+        rustc.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
+    // small, and without the C runtime's library, which MSVC links to otherwise
+    let flags = ["-Copt-level=s", "-Cstrip=symbols", "-Cpanic=abort", "-Ctarget-feature=+crt-static"];
+    rustc.args(["--edition=2024", "--crate-name=jig_proxy"]).args(flags).arg("-o");
+    let output = rustc.arg(&tmp).arg(&source).current_dir(&project.root).output()?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(std::io::Error::other(format!("failed to compile the wrapper: {}", stderr.trim())));
+    }
+    std::fs::rename(&tmp, &exe)?;
+    Ok(exe)
+}
+
+/// Move a wrapper which may be running out of the way, as Windows does not remove a program which is running, but
+/// renames it, to be removed by the next install which finds it no longer running.
+#[cfg(windows)]
+fn set_aside(wrapper: &Path) -> std::io::Result<()> {
+    if !wrapper.exists() {
+        return Ok(());
+    }
+    let aside = |n: u32| {
+        let mut name = wrapper.as_os_str().to_owned();
+        name.push(format!(".old{n}"));
+        PathBuf::from(name)
+    };
+    for n in 0..16 {
+        let old = aside(n);
+        // one which is still running is not removed, and the next name is tried
+        if remove(&old).is_ok() {
+            return std::fs::rename(wrapper, old);
+        }
+    }
+    remove(wrapper)
+}
+
+/// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written: a shell script
+/// on Unix, and on Windows, an executable which does as the script does.
 ///
 /// Returns whether it was written.
 fn write_proxy(
-    root: &Path,
+    project: &Configured,
     jig: &Path,
     prefix: &Path,
     wrapper: &Path,
     source: &Path,
     mode: u32,
 ) -> std::io::Result<bool> {
-    let script = proxy_script(&std::path::absolute(root)?, jig, prefix, wrapper, &std::path::absolute(source)?);
-    let current = std::fs::read_to_string(wrapper).ok();
-    let current_mode = std::fs::symlink_metadata(wrapper).ok().map(|metadata| crate::platform::mode(&metadata));
-    if current.as_ref() == Some(&script) && current_mode == Some(mode) {
+    let (root, source) = (std::path::absolute(&project.root)?, std::path::absolute(source)?);
+    #[cfg(unix)]
+    let contents = proxy_script(&root, jig, prefix, wrapper, &source).into_bytes();
+    #[cfg(windows)]
+    let contents = proxy_executable(project, &root, jig, prefix, wrapper, &source)?;
+    let current = std::fs::read(wrapper).ok();
+    let has_mode = std::fs::symlink_metadata(wrapper).is_ok_and(|metadata| crate::platform::has_mode(&metadata, mode));
+    if current.as_ref() == Some(&contents) && has_mode {
         return Ok(false);
     }
+    #[cfg(unix)]
     remove(wrapper)?;
-    std::fs::write(wrapper, script)?;
+    #[cfg(windows)]
+    set_aside(wrapper)?;
+    std::fs::write(wrapper, contents)?;
     crate::platform::set_mode(wrapper, mode)?;
     Ok(true)
 }
@@ -227,7 +318,7 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
         Ok(jig) => jig,
         Err(error) => return Err(Error::Install(source, wrapper.into(), error)),
     };
-    match write_proxy(&project.root, &jig, prefix, wrapper, &source, file.mode) {
+    match write_proxy(&project, &jig, prefix, wrapper, &source, file.mode) {
         Ok(reinstalled) => Ok(reinstalled),
         Err(error) => Err(Error::Install(source, wrapper.into(), error)),
     }

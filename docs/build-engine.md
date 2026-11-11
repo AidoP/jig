@@ -1692,9 +1692,35 @@ implementation of that trait, so `generate.rs` doesn't change.
      programs go, `%LOCALAPPDATA%\Programs`, which needs no administrator, from `USERPROFILE` without it. The variable
      is one of the configuration's, so it configures the project again when it changes.
      - jig, platform: the prefix on each platform, from the variables given.
-   - **Not done yet:**
-     - the integration tests, which make symbolic links, set modes, and run commands which are POSIX shell;
-     - and `jig install --proxy`, whose wrappers are shell scripts.
+   - **Done: the user's directories.** The cache is `%LOCALAPPDATA%\jig\cache` on Windows, and the user's
+     configuration `%APPDATA%\jig\config`, after the XDG variables, which are still taken first, and before `HOME`,
+     which Windows doesn't usually set.
+     - jig, cache and config: each on Windows, and on Unix, where those variables aren't read.
+   - **Done: `jig install --proxy` on Windows.** A shell script isn't run there, so a wrapper is a program, written in
+     Rust, `src/proxy_wrapper.rs`, which jig carries as its source. It's compiled once for a project, with its
+     toolchain, into its build directory, by the hash of its source, and each wrapper is a copy, with what it wraps
+     after its end, which Windows ignores as it runs it: the root, `jig`, the prefix, the wrapper and the program, then
+     their length and a magic number. It runs `jig build --proxy` with its stdout on stderr, then the program, or itself
+     again once reinstalled, and exits as the program does, leaving Ctrl-C to it.
+     - **Reinstalling a running wrapper.** Windows doesn't remove a program which is running, but renames it, so the
+       wrapper is renamed to `<wrapper>.old0` and so on, which a later reinstall removes once it's no longer running.
+     - **Modes.** A file's mode was compared as Unix has it, which Windows doesn't, so a wrapper was always written
+       again, and ran the new one, which wrote itself again. `platform::has_mode` compares what Windows has of a mode,
+       whether a file is read-only, which generated files are compared by too.
+     - Integration: a wrapper, on each platform, runs its program with its arguments, from elsewhere, builds it again
+       once it changes, is reinstalled while it runs once the program moves, then is up to date, and exits as the
+       program does.
+   - **Done: paths as they are written.** `std::fs::canonicalize` gives a verbatim path on Windows, `\\?\C:\...`,
+     which shares no prefix with the project's root, so that sources were given to rustc by their absolute paths, and
+     a crate's key in the cache differed between checkouts. `rig::canonicalize` gives such a path as it's usually
+     written, while Windows takes it so, and jig and rig's workers use it.
+     - rig, sys: a canonical path, which isn't verbatim.
+   - **Done: the integration tests on Windows,** natively in CI, with coreutils on `PATH`, as Git for Windows has them,
+     and nightly. The harness runs `jig.exe`, has programs end in `.exe`, takes the paths jig shows with `\` as with
+     `/`, and finds `env` by `PATH`. Those which read `build.ninja` are ignored, as jig doesn't generate it there, and
+     those which make symbolic links, set modes or run POSIX shell are ignored there, or built only on Unix: 106 run
+     there of 186. Under Wine, with uutils, 100 of them pass, while two need `echo`, three nightly, and one takes rustc
+     to start as quickly as it does natively.
 
 ## Risks
 
