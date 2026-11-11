@@ -51,6 +51,32 @@ impl Project {
     /// rustup finds its toolchains in `HOME` unless `RUSTUP_HOME` is set, so it is kept where `HOME` is replaced.
     fn configure_with(&self, env: &[(&str, &str)]) -> Output {
         let configure = configure_path();
+        let output = self
+            .jig_with(env)
+            .args(["generate", "Jig"])
+            .output()
+            .unwrap_or_else(|error| panic!("failed to run {configure:?}: {error}"));
+        let chosen = env.iter().any(|&(name, _)| name == "JIG_ENGINE");
+        // rig's graph is configured without `build.ninja`, which is configured too, where ninja is, so that the tests
+        // of ninja can read it, once rig's graph is, which it does not change
+        if rig_engine() && !chosen && !cfg!(windows) {
+            let _ = self.jig_with(env).args(["generate", "Jig"]).env("JIG_ENGINE", "ninja").output();
+        }
+        // and rig's graph is configured with ninja's, so that what is built can be read from it, with `jig graph`
+        if !rig_engine() && !chosen {
+            let _ = self.jig_with(env).args(["generate", "Jig"]).env("JIG_ENGINE", "rig").output();
+        }
+        let graph = if output.status.success() { self.graph_with(env) } else { String::new() };
+        Output {
+            success: output.status.success(),
+            stderr: String::from_utf8(output.stderr).unwrap(),
+            ninja: self.ninja(),
+            graph,
+        }
+    }
+    /// Returns `jig`, run from the project with environment variables, with `RUSTUP_HOME` where `HOME` is replaced,
+    /// as rustup finds its toolchains in `HOME` without it.
+    fn jig_with(&self, env: &[(&str, &str)]) -> Command {
         let mut command = jig_command();
         if env.iter().any(|&(name, _)| name == "HOME")
             && std::env::var_os("RUSTUP_HOME").is_none()
@@ -58,30 +84,22 @@ impl Project {
         {
             command.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
         }
-        let output = command
-            .args(["generate", "Jig"])
-            .envs(env.iter().copied())
-            .current_dir(&self.dir)
-            .output()
-            .unwrap_or_else(|error| panic!("failed to run {configure:?}: {error}"));
-        // rig's graph is configured without `build.ninja`, which is configured too, so that what is built can be read
-        // from it, once rig's graph is, which it does not change
-        if rig_engine() && !env.iter().any(|&(name, _)| name == "JIG_ENGINE") {
-            let mut ninja = jig_command();
-            if env.iter().any(|&(name, _)| name == "HOME")
-                && std::env::var_os("RUSTUP_HOME").is_none()
-                && let Some(home) = std::env::var_os("HOME")
-            {
-                ninja.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
-            }
-            ninja.args(["generate", "Jig"]).envs(env.iter().copied()).env("JIG_ENGINE", "ninja");
-            let _ = ninja.current_dir(&self.dir).output();
+        command.envs(env.iter().copied()).current_dir(&self.dir);
+        command
+    }
+    /// Returns rig's graph, as `jig graph` shows it, with the project directory and the flags which remap the paths
+    /// rustc writes left out, as [`Self::ninja`] leaves them out of `build.ninja`.
+    fn graph_with(&self, env: &[(&str, &str)]) -> String {
+        let chosen = env.iter().find(|&&(name, _)| name == "JIG_ENGINE").map(|&(_, engine)| engine);
+        if chosen.is_some_and(|engine| engine != "rig") {
+            return String::new();
         }
-        Output {
-            success: output.status.success(),
-            stderr: String::from_utf8(output.stderr).unwrap(),
-            ninja: self.ninja(),
-        }
+        let output = self.jig_with(env).arg("graph").env("JIG_ENGINE", "rig").output().unwrap();
+        let graph = String::from_utf8(output.stdout).unwrap();
+        let dir = self.dir.display().to_string();
+        let graph = without_graph_remaps(&graph).replace(&format!("{dir}/"), "");
+        // and on Windows, as the paths jig gives rustc have `\`
+        if cfg!(windows) { graph.replace(&format!("{dir}\\"), "") } else { graph }
     }
     /// Run `configure check` for a label, returning stdout and stderr.
     #[track_caller]
@@ -129,6 +147,30 @@ fn rebased(project: &Project, path: &Path) -> String {
     let mut relative = "../".repeat(from.len() - shared);
     relative.push_str(&to[shared..].iter().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"));
     relative
+}
+
+/// Returns the statement of an edge which produces an output, with what is under it, in rig's graph as `jig graph`
+/// shows it, or in `build.ninja`, which have the same form.
+#[track_caller]
+fn statement<'a>(text: &'a str, output: &str) -> &'a str {
+    // a library has its metadata as an implicit output, after `|`
+    let found = |prefix: String| text.find(&prefix);
+    let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} |"))) else {
+        panic!("no statement for {output:?}:\n{text}");
+    };
+    let rest = &text[start..];
+    &rest[..rest.find("\n\n").unwrap_or(rest.len())]
+}
+
+/// Returns rig's graph, as `jig graph` shows it, without the flags which remap the paths rustc writes, each followed by
+/// a space, as [`without_remaps`] leaves them out of `build.ninja`.
+fn without_graph_remaps(graph: &str) -> String {
+    let graph = graph.replace(" -C link-arg=-Wl,-oso_prefix,.", "");
+    let words = graph.split(' ').filter(|word| {
+        let word = word.trim_start_matches('\'');
+        !word.starts_with("--remap-path-prefix=")
+    });
+    words.collect::<Vec<_>>().join(" ")
 }
 
 /// Returns `build.ninja` without the flags which remap the paths rustc writes, each quoted and followed by a space, and
@@ -209,6 +251,8 @@ struct Output {
     success: bool,
     stderr: String,
     ninja: String,
+    /// rig's graph, as `jig graph` shows it, once it was configured, with what [`Project::graph_with`] leaves out.
+    graph: String,
 }
 impl Output {
     /// Assert that configuration succeeded, returning the output for further checks.
@@ -231,20 +275,15 @@ impl Output {
         assert!(found, "stderr does not contain {expected:?}:\n{}", self.stderr);
         self
     }
-    /// Returns the `build` statement for an output, including its variables.
+    /// Returns the statement of rig's graph, as `jig graph` shows it, of the edge which produces an output, with what
+    /// is under it.
     #[track_caller]
     fn build(&self, output: &str) -> &str {
-        // a library has its metadata as an implicit output, after `|`
-        let found = |prefix: String| self.ninja.find(&prefix);
-        let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} |"))) else {
-            panic!("no build statement for {output:?}:\n{}", self.ninja);
-        };
-        let rest = &self.ninja[start..];
-        &rest[..rest.find("\n\n").unwrap_or(rest.len())]
+        statement(&self.graph, output)
     }
-    /// Returns the outputs of the crates' `build` statements, rather than their checks.
+    /// Returns the outputs of the crates' statements, rather than their checks.
     fn outputs(&self) -> Vec<&str> {
-        let outputs = self.ninja.lines().filter_map(|line| line.strip_prefix("build ")?.split([':', ' ']).next());
+        let outputs = self.graph.lines().filter_map(|line| line.strip_prefix("build ")?.split([':', ' ']).next());
         outputs.filter(|output| Path::new(output).extension().is_some_and(|extension| extension == "rlib")).collect()
     }
 }
@@ -280,6 +319,15 @@ fn slashed(text: &str) -> String {
 }
 
 /// Assert that text contains `needle`, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
+/// Assert that a statement of rig's graph, as `jig graph` shows it, has a line, and a part of its command, each as it is,
+/// or with the paths shown with `\\` on Windows taken as with `/`.
+#[track_caller]
+fn assert_statement(statement: &str, line: &str, command: &str) {
+    assert_contains(statement, line);
+    let found = statement.lines().find_map(|line| line.strip_prefix("    command = "));
+    assert_contains(&format!("{} ", found.unwrap_or_default()), command);
+}
+
 #[track_caller]
 fn assert_contains(haystack: &str, needle: &str) {
     let found = haystack.contains(needle) || slashed(haystack).contains(needle);
@@ -326,7 +374,7 @@ fn target_defaults_to_host() {
     let host = project.host();
     let output = project.configure().ok();
     let build = output.build(&format!("{host}/libapp.rlib"));
-    assert_contains(build, "crate-name = app");
+    assert_contains(build, " --crate-name=app ");
     assert_contains(build, &format!("--target={host}"));
     assert_contains(build, &format!("-L dependency={host}"));
 }
@@ -362,7 +410,7 @@ fn crate_default_path() {
     ]);
     let host = project.host();
     let output = project.configure().ok();
-    assert_contains(output.build(&format!("{host}/libutil2.rlib")), ": rustc ../lib/util2/lib.rs");
+    assert_contains(output.build(&format!("{host}/libutil2.rlib")), ": command ../lib/util2/lib.rs\n");
 }
 
 #[cfg_attr(windows, ignore = "it reads `build.ninja`, which jig does not generate on Windows")]
@@ -2775,15 +2823,21 @@ custom tool
     ]);
     make_executable(&project.dir.join("sub/tool.sh"), &project.dir.join("sub/tool.sh"));
     let output = project.configure().ok();
-    // `input` and `output` are the paths, and the arguments are quoted for `sh`, with `$` escaped for ninja
+    // `input` and `output` are the paths, as the arguments of the program, run from the project root
     assert_contains(output.build("../out/copy.txt"), "\
+build ../out/copy.txt: command ../sub/in.txt
+    description = CUSTOM copy
+    command = cd .. && sh -c 'cat \"$1\" > \"$2\"; echo \"a  b\" >> \"$2\"' sh sub/in.txt out/copy.txt");
+    // which ninja has quoted for `sh`, with `$` escaped for it
+    assert_contains(statement(&output.ninja, "../out/copy.txt"), "\
 build ../out/copy.txt: custom ../sub/in.txt
     command-line = 'sh' '-c' 'cat \"$$1\" > \"$$2\"; echo \"a  b\" >> \"$$2\"' 'sh' 'sub/in.txt' 'out/copy.txt'
     name = copy");
     // a program which is a path is relative to the file, and a dependency
     assert_contains(output.build("../out/tool.txt"), "\
-build ../out/tool.txt: custom | ../sub/tool.sh
-    command-line = './sub/tool.sh' 'out/tool.txt' 'a b' '8'");
+build ../out/tool.txt: command | ../sub/tool.sh
+    description = CUSTOM tool
+    command = cd .. && ./sub/tool.sh out/tool.txt 'a b' 8");
     // a command's outputs can be built by its name
     assert_contains(&output.ninja, "\nbuild custom/copy: phony ../out/copy.txt\n");
     let ninja = jig_command().args(["build", "custom/copy", "custom/tool"]).current_dir(&project.dir).output().unwrap();
@@ -2890,8 +2944,9 @@ custom pack
     // each item of a list is a separate argument
     output.stderr("note: -O,dtb,a b,\n");
     assert_contains(output.build("out.bin"), "\
-build out.bin: custom ../a.dts ../b.dtsi ../c.dtsi
-    command-line = 'tool' '-O' 'dtb' '-o' 'build/out.bin' 'a.dts' 'b.dtsi' 'c.dtsi'");
+build out.bin: command ../a.dts ../b.dtsi ../c.dtsi
+    description = CUSTOM pack
+    command = cd .. && tool -O dtb -o build/out.bin a.dts b.dtsi c.dtsi");
 }
 
 #[test]
@@ -3458,18 +3513,17 @@ log note '{app.doc} {plain.doc}'
     output.stderr("note: true false\n");
     // the crate is documented as it is checked, with the metadata of the crates it uses, which its documentation is
     // built again when its sources change, as is the crate's own
-    assert_contains(&output.ninja, &format!("\
-build {host}/doc/app/index.html: rustdoc ../app.rs | {host}/check/libutil.rmeta {host}/check/libapp.rmeta
-    crate-name = app
-    crate-type = bin
-    flags = --target={host} -L dependency={host}/check --extern util={host}/check/libutil.rmeta --cfg 'fancy'
-    outdir = {host}/doc
-"));
-    assert_contains(&output.ninja, &format!("\nbuild doc/app: phony {host}/doc/app/index.html\n"));
-    assert_contains(&output.ninja, "\nbuild doc: phony doc/app doc/util\n");
+    let doc = output.build(&format!("{host}/doc/app/index.html"));
+    assert_contains(doc, &format!(
+        "build {host}/doc/app/index.html: command ../app.rs | {host}/check/libutil.rmeta {host}/check/libapp.rmeta\n",
+    ));
+    assert_contains(doc, &format!(" rustdoc --color=always --out-dir={host}/doc --crate-type=bin --crate-name=app "));
+    assert_contains(doc, &format!(" -L dependency={host}/check --extern util={host}/check/libutil.rmeta --cfg fancy "));
+    assert_contains(&output.graph, &format!("\nbuild doc/app: phony {host}/doc/app/index.html\n"));
+    assert_contains(&output.graph, "\nbuild doc: phony doc/app doc/util\n");
     // and without defaults, it is built with everything else
-    assert!(output.ninja.lines().any(|line| line.starts_with("default ") && line.contains(" doc/util")), "{}", output.ninja);
-    assert!(!output.ninja.contains("doc/plain"), "{}", output.ninja);
+    assert!(output.graph.lines().any(|line| line.starts_with("default ") && line.contains(" doc/util")), "{}", output.graph);
+    assert!(!output.graph.contains("doc/plain"), "{}", output.graph);
 
     // the crates for a target are documented together, so they link to each other
     let run = jig_command().args(["build", "doc"]).current_dir(&project.dir).output().unwrap();
@@ -3499,21 +3553,22 @@ log note clippy/
     let output = project.configure().ok();
     output.stderr("note: must_use_candidate: allow, needless-return: deny, pedantic: warn\n");
     // a crate is linted as it is checked, with the levels set where it is declared, where groups are given first
-    assert_contains(&output.ninja, &format!("\
-build {host}/lint/libapp.rmeta | {host}/lint/app.txt: clippy ../app.rs | {host}/check/libutil.rmeta
-    crate-name = app
-    crate-type = bin
-    flags = --target={host} -L dependency={host}/check --extern util={host}/check/libutil.rmeta \
--W clippy::pedantic -A clippy::must_use_candidate -D clippy::needless_return
-"));
-    assert_contains(output.build(&format!("{host}/lint/libutil.rmeta | {host}/lint/util.txt")), "\
--W clippy::pedantic -A clippy::must_use_candidate\n");
-    assert_contains(&output.ninja, "\nbuild lint: phony lint/app lint/util\n");
+    let app = output.build(&format!("{host}/lint/libapp.rmeta"));
+    assert_contains(app, &format!(
+        "build {host}/lint/libapp.rmeta | {host}/lint/app.txt: command ../app.rs | {host}/check/libutil.rmeta\n",
+    ));
+    assert_contains(app, &format!("\
+ --crate-type=bin --crate-name=app --edition=2024 --target={host} -L dependency={host}/check \
+--extern util={host}/check/libutil.rmeta -W clippy::pedantic -A clippy::must_use_candidate -D clippy::needless_return \
+../app.rs 2> {host}/lint/app.txt\n"));
+    assert_contains(output.build(&format!("{host}/lint/libutil.rmeta")), "\
+ -W clippy::pedantic -A clippy::must_use_candidate ../util.rs 2>");
+    assert_contains(&output.graph, "\nbuild lint: phony lint/app lint/util\n");
     // and again when any of its sources change, which rustc lists
-    assert_contains(&output.ninja, "--emit=dep-info=$out.d --crate-type=$crate-type");
-    assert_contains(&output.ninja, "\n    description = CLIPPY $out\n    deps = gcc\n    depfile = $out.d\n");
+    assert_contains(app, &format!(" --emit=dep-info={host}/lint/libapp.rmeta.d "));
+    assert_contains(app, &format!("\n    depfile = {host}/lint/libapp.rmeta.d\n"));
     // the lints are not built without targets, as the checks are not
-    assert!(!output.ninja.lines().any(|line| line.starts_with("default ") && line.contains("lint/")), "{}", output.ninja);
+    assert!(!output.graph.lines().any(|line| line.starts_with("default ") && line.contains("lint/")), "{}", output.graph);
 
     let lint = |names: &[&str]| {
         let output = jig_command().arg("lint").args(names).current_dir(&project.dir).output().unwrap();
@@ -3903,11 +3958,8 @@ target my-kernel
     assert_contains(&spec, "\n  \"metadata\": {\n");
     assert!(spec.ends_with(",\n  \"disable-redzone\": true,\n  \"os\": \"bluemetal\"\n}\n"), "{spec}");
     // crates for the target use its specification
-    assert_contains(output.build("my-kernel/libkernel.rlib"), "\
-build my-kernel/libkernel.rlib | my-kernel/libkernel.rmeta: rustc ../kernel.rs | targets/my-kernel.json
-    crate-name = kernel
-    crate-type = lib
-    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel");
+    assert_statement(output.build("my-kernel/libkernel.rlib"), "\
+build my-kernel/libkernel.rlib | my-kernel/libkernel.rmeta: command ../kernel.rs | targets/my-kernel.json\n", "--crate-type=lib --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
 
     // an unchanged specification is not written again, as every crate for the target depends on it
     let modified = std::fs::metadata(project.dir.join("build/targets/my-kernel.json")).unwrap().modified().unwrap();
@@ -4160,10 +4212,10 @@ target riscv64gc-unknown-none-elf
     let host = project.host();
     let output = project.configure_with(NIGHTLY).ok();
     // a builtin target keeps its specification, but can be tested
-    assert_contains(output.build("riscv64gc-unknown-none-elf/test/app"), "\
-    flags = --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf --test");
-    assert_contains(&output.ninja, "\nbuild test/app@riscv64gc-unknown-none-elf: phony riscv64gc-unknown-none-elf/test/app\n");
-    assert_contains(&output.ninja, &format!("\nbuild test/app: phony {host}/test/app\n"));
+    assert_statement(output.build("riscv64gc-unknown-none-elf/test/app"), "", "\
+ --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf --test ");
+    assert_contains(&output.graph, "\nbuild test/app@riscv64gc-unknown-none-elf: phony riscv64gc-unknown-none-elf/test/app\n");
+    assert_contains(&output.graph, &format!("\nbuild test/app: phony {host}/test/app{EXE}\n"));
     assert!(!project.dir.join("build/targets").exists());
 }
 
@@ -4200,38 +4252,23 @@ log note '{my-kernel.link-script} {riscv64gc-unknown-none-elf.link-script} {my-k
     // a path is relative to the file, and a reference is to what is built
     output.stderr("note: kernel/link.x build/generated.x other.x\n");
     // the script is passed to the linker, rather than written to the specification, and what is linked depends on it
-    assert_contains(output.build("my-kernel/kernel"), "\
-build my-kernel/kernel: rustc ../kernel.rs | targets/my-kernel.json ../kernel/link.x
-    crate-name = kernel
-    crate-type = bin
-    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x\n");
+    assert_statement(output.build("my-kernel/kernel"), "\
+build my-kernel/kernel: command ../kernel.rs | targets/my-kernel.json ../kernel/link.x\n", "--crate-type=bin --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x ");
     let spec = std::fs::read_to_string(project.dir.join("build/targets/my-kernel.json")).unwrap();
     assert!(!spec.contains("link.x"), "{spec}");
     // a library is not linked, but its test harness is
-    assert_contains(output.build("my-kernel/libutil.rlib"), "\
-build my-kernel/libutil.rlib | my-kernel/libutil.rmeta: rustc ../util.rs | targets/my-kernel.json
-    crate-name = util
-    crate-type = lib
-    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel\n");
-    assert_contains(output.build("my-kernel/test/util"), "\
-build my-kernel/test/util: rustc ../util.rs | targets/my-kernel.json ../kernel/link.x
-    crate-name = util
-    crate-type = lib
-    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test\n");
+    assert_statement(output.build("my-kernel/libutil.rlib"), "\
+build my-kernel/libutil.rlib | my-kernel/libutil.rmeta: command ../util.rs | targets/my-kernel.json\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
+    assert_statement(output.build("my-kernel/test/util"), "\
+build my-kernel/test/util: command ../util.rs | targets/my-kernel.json ../kernel/link.x\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test ");
     // nor is a check
     assert_eq!(output.ninja.matches("-C link-arg=-T../kernel/link.x").count(), 2, "{}", output.ninja);
     // a crate's own replaces its target's
-    assert_contains(output.build("my-kernel/other"), "\
-build my-kernel/other: rustc ../other.rs | targets/my-kernel.json ../other.x
-    crate-name = other
-    crate-type = bin
-    flags = --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x\n");
+    assert_statement(output.build("my-kernel/other"), "\
+build my-kernel/other: command ../other.rs | targets/my-kernel.json ../other.x\n", "--crate-type=bin --crate-name=other --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x ");
     // a builtin target can have one with `override`, which is built first when it is generated
-    assert_contains(output.build("riscv64gc-unknown-none-elf/app"), "\
-build riscv64gc-unknown-none-elf/app: rustc ../app.rs | generated.x
-    crate-name = app
-    crate-type = bin
-    flags = --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x\n");
+    assert_statement(output.build("riscv64gc-unknown-none-elf/app"), "\
+build riscv64gc-unknown-none-elf/app: command ../app.rs | generated.x\n", "--crate-type=bin --crate-name=app --edition=2024 --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x ");
 }
 
 #[test]
@@ -4463,13 +4500,13 @@ pub fn answer(_: TokenStream) -> TokenStream { \"42\".parse().unwrap() }
     let output = project.configure().ok();
     let answer = format!("{host}/{}answer{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX);
     // a procedural macro is for the host target, even when another is the default, and is used by any target
-    assert_contains(output.build(&answer), &format!("\
-    crate-type = proc-macro
-    flags = --target={host} -L dependency={host} --extern proc_macro"));
+    assert_statement(output.build(&answer), "", &format!(
+        " --crate-type=proc-macro --crate-name=answer --edition=2024 --target={host} -L dependency={host} --extern proc_macro ",
+    ));
     assert_contains(output.build("riscv64gc-unknown-none-elf/libkernel.rlib"), &format!(
         "--extern answer={answer}",
     ));
-    assert_contains(output.build(&format!("{host}/app")), "crate-type = bin");
+    assert_contains(output.build(&format!("{host}/app{EXE}")), " --crate-type=bin ");
     // the binary is built and runs, using the procedural macro directly and through a library
     let built = jig_command().args(["build", &format!("{host}/app{EXE}")]).current_dir(&project.dir).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stdout));
@@ -4668,7 +4705,7 @@ log note core.target == target
     // a crate is also referred to by its name alone, for the target in effect where it is referred to
     output.stderr(&format!("note: build/{host}/libcore.rlib true build/{host}/libcore.rlib\n"));
     output.stderr("note: true\n  --> Jig:23:10");
-    assert_contains(output.build("kernel.bin"), "build kernel.bin: custom riscv64gc-unknown-none-elf/libkernel.rlib");
+    assert_contains(output.build("kernel.bin"), "build kernel.bin: command riscv64gc-unknown-none-elf/libkernel.rlib\n");
 }
 
 #[test]
@@ -4765,18 +4802,18 @@ custom c
     let host = project.host();
     let output = project.configure().ok();
     // an output is named after its command, in the build directory, unless it is replaced
-    assert_contains(output.build("apples"), "build apples: custom\n    command-line = 'touch' 'build/apples'");
+    assert_contains(output.build("apples"), "build apples: command\n    description = CUSTOM apples\n    command = cd .. && touch build/apples");
     output.stderr("note: build/pears build/data\n");
     // the paths of a crate or custom command are not resolved again, relative to the file which refers to them
-    assert_contains(output.build("example"), &format!(
-        "build example: custom {host}/tool\n    command-line = 'cat' 'build/{host}/tool' 'build/example'",
-    ));
-    assert_contains(output.build("b"), &format!(
-        "build b: custom | {host}/tool\n    command-line = './build/{host}/tool' 'build/b'",
-    ));
+    let example = output.build("example");
+    assert_contains(example, &format!("build example: command {host}/tool{EXE}\n"));
+    assert_statement(example, "", &format!(" && cat build/{host}/tool{EXE} build/example "));
+    let b = output.build("b");
+    assert_contains(b, &format!("build b: command | {host}/tool{EXE}\n"));
+    assert_statement(b, "", &format!("cd .. && ./build/{host}/tool{EXE} build/b "));
     // a path outside the project leads out of the build directory
     let absolute = rebased(&project, Path::new("/tmp/absolute"));
-    assert_contains(output.build(&absolute), &format!("build {absolute}: custom pears data ../sub/local.txt"));
+    assert_contains(output.build(&absolute), &format!("build {absolute}: command pears data ../sub/local.txt\n"));
 }
 
 #[cfg_attr(windows, ignore = "its commands are POSIX shell")]
@@ -4887,10 +4924,12 @@ log note '{codegen/opt-level} {codegen/opt-level.info}'
     let output = project.configure().ok();
     // the options are those set where the crate is declared, and are also used to check and lint it
     let kernel = format!("\
-    flags = --target={host} -L dependency={host} -C debug-assertions=true -C link-arg=-Tlink.x -C link-arg=-static \
--C 'llvm-args=-a -b c' -C opt-level=s");
-    assert_contains(output.build(&format!("{host}/kernel")), &kernel);
-    assert_eq!(output.ninja.matches("-C 'llvm-args=-a -b c' -C opt-level=s").count(), 3, "{}", output.ninja);
+ --target={host} -L dependency={host} -C debug-assertions=true -C link-arg=-Tlink.x -C link-arg=-static \
+-C 'llvm-args=-a -b c' -C opt-level=s ");
+    assert_statement(output.build(&format!("{host}/kernel{EXE}")), "", &kernel);
+    let commands = output.graph.lines().filter(|line| line.starts_with("    command = "));
+    let options = commands.filter(|command| command.contains("-C 'llvm-args=-a -b c' -C opt-level=s"));
+    assert_eq!(options.count(), 3, "{}", output.graph);
     assert_contains(output.build(&format!("{host}/libother.rlib")), "-C opt-level=3");
     // an attribute replaces the property for the crate, where the last is used
     assert_contains(output.build(&format!("{host}/libfast.rlib")), "-C 'llvm-args=-a -b c' -C opt-level=1 -C target-feature=+a,-b");
@@ -6093,8 +6132,8 @@ log note '{aarch64-unknown-linux-musl.linker} {aarch64-unknown-linux-musl.linker
     let output = project.configure().ok();
     // the linker of a builtin target is given to the crates for it, where a path is relative to the file
     output.stderr("note: rust-lld ld.lld tools/ld.lld\n");
-    assert_contains(output.build("aarch64-unknown-linux-musl/app"), "\
-    flags = --target=aarch64-unknown-linux-musl -L dependency=aarch64-unknown-linux-musl -C linker=rust-lld -C linker-flavor=ld.lld");
+    assert_statement(output.build("aarch64-unknown-linux-musl/app"), "", "\
+ --target=aarch64-unknown-linux-musl -L dependency=aarch64-unknown-linux-musl -C linker=rust-lld -C linker-flavor=ld.lld ");
     assert_contains(output.build("riscv64gc-unknown-linux-musl/app"), " -C linker=../tools/ld.lld");
     // unless a crate has its own, as a linker and its flavor go together
     let own = output.build("aarch64-unknown-linux-musl/own");
@@ -6424,7 +6463,11 @@ log note '{len(codegen/aarch64-unknown-none/)} {codegen/{host-target}/lto.info}'
 ")]);
     let host = project.host();
     let output = project.configure_with(NIGHTLY).ok();
-    let flags = |output_path: &str| output.build(output_path).lines().find(|line| line.contains("flags =")).unwrap().to_string();
+    // the flags of a crate's command, which its root module follows
+    let flags = |output_path: &str| {
+        let command = output.build(output_path).lines().find_map(|line| line.strip_prefix("    command = ")).unwrap();
+        command[..command.rfind(' ').unwrap()].to_string()
+    };
     // the options for a target replace the others for its crates
     assert!(flags(&format!("{host}/libapp.rlib")).ends_with(" -C opt-level=3"), "{}", flags(&format!("{host}/libapp.rlib")));
     assert!(flags("riscv64gc-unknown-none-elf/libapp.rlib").ends_with(" -C debuginfo=1 -C opt-level=2"));
