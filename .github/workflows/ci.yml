@@ -110,7 +110,7 @@ jobs:
       - name: Install the toolchains
         # the tests of custom targets use nightly as well
         run: |
-          rustup toolchain install stable nightly --profile minimal
+          rustup toolchain install stable nightly --profile minimal --component clippy
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Bootstrap
         run: sh bootstrap.sh
