@@ -302,7 +302,8 @@ and inputs is fetched instead of run.
 - **What is cached.** By default: rustc, rustdoc, clippy and check edges, whose inputs are complete because of their
   depfiles.
   - A `custom` command is cached only with a `cache` attribute, since jig can't know it is pure.
-  - Generator, console and test edges are never cached.
+  - Generator, console and test edges are never cached. A test isn't assumed to be pure: it may read the network,
+    the clock, or files it doesn't declare, and a test which passed once may fail when it runs again.
   - Cached diagnostics are replayed, so `jig lint` and `jig check` show the same output on a hit.
 - **Maintenance.** `jig cache stats`, `jig cache gc [--max-size]` (least recently used first, by a last-used time each
   hit updates) and `jig cache clear`. Blobs are verified against their hash when read, so a corrupt cache causes a
@@ -892,8 +893,8 @@ implementation of that trait, so `generate.rs` doesn't change.
    - **jig.** `pass-env`, a name or a list of them, is an attribute of `custom` and of `crate`. A crate's applies to its
      rustc, check, clippy and rustdoc edges, and it can be read as `<crate>.pass-env`. ninja passes on every variable
      and tracks none.
-   - **Tests are left for phase 6.** They aren't edges and aren't cached, so `pass-env` on a `test` waits for running
-     tests on workers, where it will make them hermetic.
+   - **Not for tests.** They aren't edges, and are never cached, as a test isn't assumed to be pure, so `pass-env`
+     isn't an attribute of a `test`, which inherits every variable.
    - **Checked.** jig builds itself and runs rig's tests hermetically, with `JIG_CACHE` set.
    - **Tests.**
      - rig, hermeticity: a cached edge sees only the locating and passed variables, and those the build gives. One
@@ -1416,7 +1417,8 @@ implementation of that trait, so `generate.rs` doesn't change.
        program headers doesn't count.
      - Tests: ELF files of 64 and 32 bits, with and without an interpreter, and cut short. Which hosts run which
        targets, linked statically or not.
-   - **Not done, as it isn't here either:** a test which runs on a worker isn't cached.
+   - **Not cached, by design:** a test which runs on a worker runs each time, as one here does, since a test isn't
+     assumed to be pure.
 
 6. **Done:** builds only for workers (database version 25).
    - **`Options::workers_only`.** An edge which a worker may run waits for one rather than running here, whatever the
