@@ -2894,7 +2894,6 @@ build out.bin: custom ../a.dts ../b.dtsi ../c.dtsi
     command-line = 'tool' '-O' 'dtb' '-o' 'build/out.bin' 'a.dts' 'b.dtsi' 'c.dtsi'");
 }
 
-#[cfg_attr(windows, ignore = "it reads `build.ninja`, which jig does not generate on Windows")]
 #[test]
 fn line_breaks_in_arguments() {
     if !rig_engine() {
@@ -2946,9 +2945,13 @@ crate lib 'lib.rs'
     codegen/llvm-args broken
 ")]);
     // a path, which a depfile cannot have either, with either engine
+    // as `{:?}` shows the separator jig joins the build directory with, which is `\\` on Windows
+    let separator = if cfg!(windows) { "\\\\" } else { "/" };
     let paths = |output: &Output| {
         output
-            .stderr("error[newline-in-path]: path \"build/a\\nb\" contains a newline, which ninja cannot write\n --> Jig:7:12")
+            .stderr(&format!(
+                "error[newline-in-path]: path \"build{separator}a\\nb\" contains a newline, which ninja cannot write\n --> Jig:7:12",
+            ))
             .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:10:11")
             .stderr("error[newline-in-path]: path \"a\\nb.rs\" contains a newline, which ninja cannot write\n  --> Jig:12:11")
             .stderr("error[newline-in-path]: path \"a\\nb\" contains a newline, which ninja cannot write\n  --> Jig:15:13")
