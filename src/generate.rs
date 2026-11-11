@@ -1099,7 +1099,7 @@ fn rustc_flags(
     flags.plain(&["-L", &format!("dependency={}", search.display())]);
     for option in codegen {
         let option = match option.strip_prefix("linker=") {
-            Some(linker) if linker.contains('/') => format!("linker={}", at.path(Path::new(linker)).display()),
+            Some(linker) if is_path(linker) => format!("linker={}", at.path(Path::new(linker)).display()),
             _ => option.clone(),
         };
         flags.codegen(&option);
@@ -1357,6 +1357,12 @@ fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> ri
 /// key the command is part of, is not that of another linker. rustc does not read it.
 const LINKER_VARIABLE: &str = "JIG_LINKER";
 
+/// Whether a program is given by its path, relative to the file which gives it, rather than found by its name, as it has
+/// a separator, which on Windows may be `\` as well as `/`, as a path joined there has.
+fn is_path(program: &str) -> bool {
+    program.contains('/') || (cfg!(windows) && program.contains('\\'))
+}
+
 /// Returns the linker a crate is linked by, by its name as its codegen options give it, `cc` by default, or `None` if
 /// it is `rust-lld`, which is part of the toolchain, and so of its identity.
 fn linker_of(codegen: &[String], target: &str) -> Option<String> {
@@ -1377,7 +1383,7 @@ fn identify_linkers(project: &mut Project, crates: &[Crate]) {
         if project.linkers.contains_key(&linker) {
             continue;
         }
-        let path = if linker.contains('/') {
+        let path = if is_path(&linker) {
             Some(PathBuf::from(&linker))
         } else {
             // without depending on `PATH`, which would configure the project again whenever it changes

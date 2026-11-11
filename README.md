@@ -316,6 +316,22 @@ so an argument, such as an `env` value or a codegen option, can contain one, whi
 command on a line, it cannot, which is the error `newline-in-argument`. A path cannot be empty either, as it would be
 the directory it is relative to, which is the error `empty-path`.
 
+`jig graph` shows rig's graph of the project, once it is up to date, for reading what it builds and how, as each of its
+commands, or with outputs, only those which produce them. Each is a statement as ninja writes them, with its outputs,
+`command` or `phony` for an alias, and its inputs, with `|` before the implicit ones and `||` before those which are
+order-only, followed by a line for each of what it has: its `description`, its `command` line, as `-v` shows it, its
+`depfile`, the `discover` command which writes the depfile without building, the `early` outputs it reports as it writes
+them, the variables it passes on with `pass-env`, the `console` pool, the identity it is `cache`d by, the `target`,
+`tags` and `any-host` of the workers which may run it, and whether it is a `generator`, `restat` or `hashed`. Its paths
+are relative to the build directory, with `/` between their components on every platform. `--json` shows the same as
+JSON, an object of `edges` and `defaults`, with each command's program, arguments, variables, directory and file for
+stderr apart, for tools. It is a stable interface: a later jig may add keys, but doesn't change or remove those it has.
+
+```
+./build/bootstrap/jig graph x86_64-unknown-linux-gnu/jig
+./build/bootstrap/jig graph --json
+```
+
 
 ### Statements
 

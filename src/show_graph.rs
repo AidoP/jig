@@ -1,6 +1,8 @@
 //! `jig graph`, which shows rig's graph of a project, as it is generated: each edge, with its outputs, inputs and
 //! command, as text, or with `--json`, as JSON, for tools.
 //!
+//! What it shows is a stable interface: a later jig may add keys, but doesn't change or remove those it has.
+//!
 //! The text has a statement for each edge, as ninja's `build` statements are written, in the order the graph has them,
 //! followed by the default targets:
 //!

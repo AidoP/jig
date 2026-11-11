@@ -1733,11 +1733,32 @@ implementation of that trait, so `generate.rs` doesn't change.
      written, while Windows takes it so, and jig and rig's workers use it.
      - rig, sys: a canonical path, which isn't verbatim.
    - **Done: the integration tests on Windows,** natively in CI, with coreutils on `PATH`, as Git for Windows has them,
-     and nightly. The harness runs `jig.exe`, has programs end in `.exe`, takes the paths jig shows with `\` as with
-     `/`, and finds `env` by `PATH`. Those which read `build.ninja` are ignored, as jig doesn't generate it there, and
-     those which make symbolic links, set modes or run POSIX shell are ignored there, or built only on Unix: 106 run
-     there of 186. Under Wine, with uutils, 100 of them pass, while two need `echo`, three nightly, and one takes rustc
-     to start as quickly as it does natively.
+     clippy and nightly. The harness runs `jig.exe`, has programs end in `.exe`, takes the paths jig shows with `\` as
+     with `/`, and finds `env` by `PATH`. Those which make symbolic links, set modes or run POSIX shell are ignored
+     there, or built only on Unix.
+   - **Done: `jig graph`, which the tests read what is configured from.** They read `build.ninja` at first, which isn't
+     generated on Windows, so most were ignored there.
+     - **The command.** `jig graph [--json] [<output> ...]` shows rig's graph, once it's up to date, each edge as a
+       statement in ninja's form, `build <outputs> [| <implicit>]: command|phony <inputs> [| <implicit>] [||
+       <order-only>]`, with a line under it for each of what it has: `description`, `command`, the command line as `-v`
+       shows it, `depfile`, `discover`, `early`, `pass-env`, `pool`, `cache`, `target`, `tags`, `any-host`, `generator`,
+       `restat` and `hashed`. Its paths have `/` on every platform. `--json` has the same, with the command's program,
+       arguments, variables, directory and file for stderr apart. It's documented as stable: keys may be added, but not
+       changed or removed. With ninja as the engine, it's an error, as rig's graph isn't generated.
+     - **The tests.** Each configuration runs `jig graph`, and with ninja as the engine, generates rig's graph to read
+       it from. What is built is read from it, as a statement with its command line, rather than ninja's rule and
+       variables, and its depfile is `graph.d`, which with rig also lists the paths found missing. A test of how
+       `build.ninja` is written still reads it, where ninja is. On Windows, the `\` of the paths jig gives commands are
+       taken as `/`, and a word quoted only as it had one, as not.
+     - **Found by it on Windows:** a linker given by a path, `tools/ld.lld`, wasn't taken as one, as a path joined
+       there has `\`, so it wasn't given to rustc relative to the build directory. A program with either separator is a
+       path there now.
+     - Integration: `jig graph` shows a crate's and a custom command's statements, with what they have, only those of
+       the outputs given, and JSON, and an output which none produces, or an option it doesn't take, is an error.
+     - Of the 189 integration tests, 181 are built on Windows, as 8 make links or set modes, and 157 run there, as 3
+       are of `build.ninja`, 1 of a Linux host's targets, 1 of building for Windows from elsewhere, 1 hides `env` by
+       `PATH`, and 18 run POSIX shell. Under Wine, with uutils, which has no `echo` or `sh`, and without clippy or
+       nightly, 146 of them pass, while the other 11 need those.
 
 ## Risks
 
