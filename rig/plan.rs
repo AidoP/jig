@@ -822,8 +822,8 @@ mod tests {
         // while it has that time and size, its hash is taken as it was recorded, rather than it being read, which would
         // find it differs
         assert_eq!(build.plan(&["app"]).unwrap(), []);
-        // once it changes, it is read
-        build.write("a.o", "changed");
+        // once it changes, it is read, which its size shows, as a clock may not have moved since it was written
+        build.write("a.o", "changed again");
         let reasons = build.plan(&["a.o"]).unwrap();
         assert_eq!(reasons, [("a.o".into(), Reason::OutputModified("a.o".into()))]);
     }
