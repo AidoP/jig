@@ -1490,6 +1490,11 @@ fn environment_variables_reconfigure() {
     // ninja regenerates it the first time, as it has not recorded how it was made
     build(Some("one"));
     assert!(!build(Some("one")).contains("CONFIGURE"));
+    // which rig's graph depends on itself, as its depfile lists it as rustc lists what `env!` reads
+    if rig_engine() {
+        let depfile = std::fs::read_to_string(project.dir.join("build/graph.d")).unwrap();
+        assert_contains(&depfile, "\n# env-dep:JIG_TEST_VALUE\n");
+    }
     let output = build(Some("two"));
     assert_contains(&output, configuring());
     assert_contains(&output, "note: value is two");
@@ -2456,10 +2461,20 @@ log note 'data read'
     // ninja regenerates it the first time, as it has not recorded how it was made
     build();
     assert!(!build().contains("CONFIGURE"));
+    // which rig's graph depends on itself, as its depfile lists them, rather than by the stamp, which is not touched
+    let stamp = project.dir.join("build/reconfigure.stamp");
+    let stamped = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+    if rig_engine() {
+        let depfile = std::fs::read_to_string(project.dir.join("build/graph.d")).unwrap();
+        assert!(depfile.contains(" ../extra ") && depfile.contains(" ../data "), "{depfile}");
+    }
     std::fs::write(project.dir.join("extra"), "").unwrap();
     let output = build();
     assert_contains(&output, configuring());
     assert_contains(&output, "note: extra exists");
+    if rig_engine() {
+        assert_eq!(std::fs::metadata(&stamp).unwrap().modified().unwrap(), stamped);
+    }
     // the engine keeps the dependencies in its log, rather than the depfile
     let extra = "../extra";
     if rig_engine() {
