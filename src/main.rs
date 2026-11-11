@@ -21,6 +21,7 @@ mod rig_graph;
 mod platform;
 mod run;
 mod rust_analyzer;
+mod show_graph;
 mod target_spec;
 mod test_runner;
 mod timings;
@@ -87,6 +88,10 @@ commands:
                          rig's cache as its store, and the toolchains rustup has, running as many at once as `--jobs`,
                          reporting its tags, and with `--install`, installing a toolchain a command needs with rustup
     workers              show the workers of the `workers` property, with their hosts, tags and toolchains
+    graph [--json] [<output> ...]
+                         show rig's graph of the project, once it is up to date: each command, with its outputs,
+                         inputs and command line, as ninja's `build` statements are written, or as JSON with `--json`,
+                         or only those of the outputs given
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
@@ -177,6 +182,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         "serve" => cache::serve(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "worker" => cache::worker(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "workers" => cache::workers(args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
+        "graph" => show_graph::show(args).map(|()| ExitCode::SUCCESS),
         "lint" => {
             let mut args = args.peekable();
             let deny_warnings = args.next_if(|arg| arg == "-D" || arg == "--deny-warnings").is_some();
@@ -565,6 +571,8 @@ enum Error {
     UnknownEngine(String),
     /// `JIG_ENGINE=ninja` on Windows, where only rig builds.
     NinjaOnWindows,
+    /// `jig graph` with `JIG_ENGINE=ninja`, which has no graph of rig's.
+    GraphOfNinja,
     /// A value of `change-detection` which is not a way to detect changes.
     ChangeDetection(String),
     /// A size, of the cache, which is not one.
@@ -650,6 +658,9 @@ impl core::fmt::Display for Error {
             },
             Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
             Self::NinjaOnWindows => write!(f, "`JIG_ENGINE=ninja` is not supported on Windows, where rig builds"),
+            Self::GraphOfNinja => {
+                write!(f, "`jig graph` shows rig's graph, which is not generated with `JIG_ENGINE=ninja`")
+            },
             Self::InvalidSize(size) => write!(f, "{size:?} is not a size, such as `512M` or `10G`"),
             Self::CacheOff => {
                 write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
