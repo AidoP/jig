@@ -1,5 +1,5 @@
-//! The user's configuration, `$XDG_CONFIG_HOME/jig/config` or `~/.config/jig/config`, or the file `JIG_CONFIG` gives,
-//! unless it is empty or `off`.
+//! The user's configuration, `$XDG_CONFIG_HOME/jig/config`, or on Windows, `%APPDATA%\jig\config`, or
+//! `~/.config/jig/config`, or the file `JIG_CONFIG` gives, unless it is empty or `off`.
 //!
 //! It is a file of the same statements as `Jig`, which is processed before a project's own, as if the project began
 //! with a `use` of it, so that it sets what belongs to the user or the machine rather than the project, such as rig's
@@ -17,7 +17,7 @@ use crate::project::{File, Project};
 pub const VARIABLE: &str = "JIG_CONFIG";
 
 /// Returns the path of the user's configuration, absolute, from environment variables as `env` gives them, or `None`
-/// if it is turned off, or there is nowhere for it, without `XDG_CONFIG_HOME` and `HOME`.
+/// if it is turned off, or there is nowhere for it, without `XDG_CONFIG_HOME`, `APPDATA` on Windows, and `HOME`.
 ///
 /// A variable is only read if the one before it is not set, so that the configuration depends only on those which
 /// decide where it is.
@@ -28,6 +28,8 @@ pub fn path(mut env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
         Some(path) => PathBuf::from(path),
         None => match set(env("XDG_CONFIG_HOME")) {
             Some(config) => PathBuf::from(config).join("jig/config"),
+            // on Windows, where a user's settings go
+            None if cfg!(windows) && let Some(data) = set(env("APPDATA")) => PathBuf::from(data).join("jig/config"),
             None => PathBuf::from(set(env("HOME"))?).join(".config/jig/config"),
         },
     };
@@ -73,6 +75,8 @@ mod tests {
         assert_eq!(path(env(&[("JIG_CONFIG", ""), ("HOME", "/h")])), None);
         assert_eq!(path(env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), absolute("/x/jig/config"));
         assert_eq!(path(env(&[("HOME", "/h")])), absolute("/h/.config/jig/config"));
+        let data = path(env(&[("APPDATA", "/a"), ("HOME", "/h")]));
+        assert_eq!(data, absolute(if cfg!(windows) { "/a/jig/config" } else { "/h/.config/jig/config" }));
         assert_eq!(path(env(&[])), None);
     }
 }

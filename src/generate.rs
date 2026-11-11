@@ -71,7 +71,7 @@ impl Rebase {
     fn new(build_dir: &Path) -> Self {
         let root = normalize(&std::env::current_dir().unwrap_or_default());
         let build_dir = normalize(&root.join(build_dir));
-        let physical = std::fs::canonicalize(&build_dir).unwrap_or_else(|_| build_dir.clone());
+        let physical = rig::canonicalize(&build_dir).unwrap_or_else(|_| build_dir.clone());
         Self { root, build_dir, physical }
     }
     fn path(&self, path: &Path) -> PathBuf {
@@ -134,7 +134,7 @@ fn normalize(path: &Path) -> PathBuf {
             Component::CurDir => (),
             Component::ParentDir => {
                 if normal.symlink_metadata().is_ok_and(|metadata| metadata.is_symlink())
-                    && let Ok(target) = std::fs::canonicalize(&normal)
+                    && let Ok(target) = rig::canonicalize(&normal)
                 {
                     normal = target;
                 }
@@ -284,8 +284,7 @@ fn write_generated_files(files: &[GeneratedFile]) -> Result<(), Error> {
                 return Err(Error::Write(file.output.clone(), error));
             }
         }
-        let current = std::fs::metadata(&file.output).map(|metadata| crate::platform::mode(&metadata));
-        if current.is_ok_and(|mode| mode == file.mode) {
+        if std::fs::metadata(&file.output).is_ok_and(|metadata| crate::platform::has_mode(&metadata, file.mode)) {
             continue;
         }
         if let Err(error) = crate::platform::set_mode(&file.output, file.mode) {
@@ -1372,7 +1371,7 @@ fn identify_linkers(project: &mut Project, crates: &[Crate]) {
             let search = std::env::var_os("PATH").unwrap_or_default();
             std::env::split_paths(&search).find_map(|dir| crate::platform::program_in(&dir, &linker))
         };
-        let identity = match path.and_then(|path| std::fs::canonicalize(path).ok()) {
+        let identity = match path.and_then(|path| rig::canonicalize(&path).ok()) {
             Some(path) => {
                 project.depend(path.clone());
                 let version = std::process::Command::new(&path).arg("--version").output();

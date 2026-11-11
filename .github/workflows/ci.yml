@@ -93,8 +93,8 @@ jobs:
 
   windows-native:
     # rig and jig built and tested on Windows itself, for what Wine is not, as console events, job objects, locking
-    # files and paths, with MSVC, while the integration tests, which make symbolic links, set modes and run commands
-    # which are POSIX shell, are left out until they are ported
+    # files and paths, with MSVC, and the integration tests, but for those which read `build.ninja`, make symbolic links,
+    # set modes or run POSIX shell, which run commands from coreutils, as Git for Windows has them on `PATH` in its bash
     name: test (stable, ${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -107,15 +107,16 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-      - name: Install the toolchain
+      - name: Install the toolchains
+        # the tests of custom targets use nightly as well
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable nightly --profile minimal
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Bootstrap
         run: sh bootstrap.sh
       - name: Test
         timeout-minutes: 30
-        run: build/bootstrap/jig test rig jig
+        run: build/bootstrap/jig test rig jig integration
 
   windows:
     # rig and jig built for Windows with MinGW, and their tests run with Wine, as they are developed, linted as well,

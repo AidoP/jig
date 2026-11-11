@@ -4,8 +4,8 @@
 //! The cache is set by the builtin properties `cache/dir`, `cache/size`, `cache/remote` and `cache/push`, which the
 //! user's configuration, as [`crate::config`] finds it, usually sets, each of which an environment variable overrides:
 //!
-//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache, `$XDG_CACHE_HOME/jig` or `$HOME/.cache/jig` by default,
-//!   or `off`, or empty, without a cache.
+//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache, `$XDG_CACHE_HOME/jig`, or on Windows,
+//!   `%LOCALAPPDATA%\jig\cache`, or `$HOME/.cache/jig` by default, or `off`, or empty, without a cache.
 //! - `cache/size`, or `JIG_CACHE_SIZE`: the size it is collected down to, after a build at most once a day, `10G` by
 //!   default.
 //! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache it is in front of, if any, as
@@ -56,12 +56,15 @@ pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
 const EVERY: Duration = Duration::from_hours(24);
 
-/// Returns the directory of the cache by default, `$XDG_CACHE_HOME/jig` or `$HOME/.cache/jig`, or empty, which is
-/// off, without either, from environment variables as `env` gives them.
+/// Returns the directory of the cache by default, `$XDG_CACHE_HOME/jig`, or on Windows, where a user's local data
+/// goes, `%LOCALAPPDATA%\jig\cache`, or `$HOME/.cache/jig`, or empty, which is off, without any of them, from
+/// environment variables as `env` gives them.
 pub fn default_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> String {
     let set = |value: Option<OsString>| value.filter(|value| !value.is_empty());
+    let local = |env: &mut dyn FnMut(&str) -> Option<OsString>| set(env("LOCALAPPDATA")).filter(|_| cfg!(windows));
     let dir = match set(env("XDG_CACHE_HOME")) {
         Some(cache) => PathBuf::from(cache).join("jig"),
+        None if let Some(local) = local(&mut env) => PathBuf::from(local).join("jig").join("cache"),
         None => match set(env("HOME")) {
             Some(home) => PathBuf::from(home).join(".cache/jig"),
             None => return String::new(),
@@ -541,6 +544,10 @@ mod tests {
         // by their components, as a path joined on Windows has `\\` between them
         let dir = |vars| PathBuf::from(default_dir(env(vars)));
         assert_eq!(dir(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")]), Path::new("/x/jig"));
+        // and on Windows, where a user's local data goes
+        let local = &[("XDG_CACHE_HOME", ""), ("LOCALAPPDATA", "/l"), ("HOME", "/h")];
+        let expected = if cfg!(windows) { "/l/jig/cache" } else { "/h/.cache/jig" };
+        assert_eq!(dir(local), Path::new(expected));
         assert_eq!(dir(&[("XDG_CACHE_HOME", ""), ("HOME", "/h")]), Path::new("/h/.cache/jig"));
         assert_eq!(default_dir(env(&[])), "");
         // each absolute, which on Windows has a drive
