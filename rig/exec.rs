@@ -883,9 +883,14 @@ fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeI
     needs
 }
 
-/// Whether two paths relative to the build's directory are of the same file, with or without `./` before them.
+/// Whether two paths relative to the build's directory are of the same file, with or without `./` before them, and on
+/// Windows, with `\\` or `/` between their components, as rustc reports an artifact by the path it was given, which
+/// jig gives with `\\` there, while the graph has `/`.
 pub(crate) fn same_path(lhs: &str, rhs: &str) -> bool {
-    let trim = |path: &str| path.trim_start_matches("./").to_string();
+    let trim = |path: &str| {
+        let path = if cfg!(windows) { path.replace('\\', "/") } else { path.to_string() };
+        path.trim_start_matches("./").to_string()
+    };
     trim(lhs) == trim(rhs)
 }
 
@@ -3183,6 +3188,14 @@ mod tests {
         assert_eq!((report.lost, report.remote), (1, 1), "{finished:?}");
         assert_eq!(build.read("mid"), "d\n");
         assert_eq!(build.ran(&[]), ["here"]);
+    }
+
+    #[test]
+    fn compares_paths_as_rustc_reports_them() {
+        assert!(same_path("./a/b.rmeta", "a/b.rmeta"));
+        assert!(!same_path("a/b.rmeta", "a/c.rmeta"));
+        // with the separator jig gives rustc on Windows, which it reports the artifact by
+        assert_eq!(same_path("a\\b.rmeta", "a/b.rmeta"), cfg!(windows));
     }
 
     #[test]

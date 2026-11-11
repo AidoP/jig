@@ -6347,6 +6347,7 @@ fn generates_when_needed() {
     }
 }
 
+#[cfg_attr(windows, ignore = "it reads `build.ninja`, which jig does not generate on Windows")]
 #[test]
 fn target_codegen_options() {
     let project = Project::new("target-codegen", &[("Jig", "\
