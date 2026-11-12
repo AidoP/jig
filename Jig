@@ -58,10 +58,11 @@ crate jig 'src/main.rs'
     install target == release-target
     default target == release-target
 
-# the integration tests run jig
+# the integration tests run jig, and their commands run rig's test helper, which is the test harness, run again
 crate integration 'test/main.rs'
     target release-target
     test
+    use rig
     depends {release-target}/jig
 
 # the performance tests time jig on large projects, which are slow, so are run with `jig test --tag perf` or `--all`

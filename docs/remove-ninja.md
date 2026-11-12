@@ -206,10 +206,25 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      whole, rather than finding a `build` line.
    - **Checked.** Every test passes on Linux, and under Wine, the integration tests pass as they did after step 4.
 
-6. **Make the integration tests independent of POSIX shell.** The 18 integration tests ignored on Windows for running
-   POSIX shell use a helper program instead, as rig's do: a small test crate of the project, as `jig-test-tool`, which
-   copies, writes, prints its arguments and fails with a status, as the tests' custom commands need. Those which test
-   running a shell script as a program stay Unix only.
+6. **Done: make the integration tests independent of POSIX shell.** Rather than a test crate of its own, the
+   integration tests' harness registers rig's test helper, so that their commands, and what `run` runs, are the
+   harness itself, run again with `--rig-test-helper`, which a test's `Jig` names as `'HELPER'`. A program given by a
+   path, found in `PATH`, or a test's runner is a copy of it, `tool.exe` and so on, named as Windows needs on every
+   platform. The helper gained `pwd`, `run`, which runs a program, `$<name>` in `echo`, and `\x<hex>` in `printf`.
+   - Of the 18 tests which were ignored on Windows, 14 run there. `run_relative_program` and `run_reference` run
+     shell scripts as programs, and `proxy_rebuilds_its_jig` and `proxy_installed_by_itself` replace the `jig` which is
+     running and check a wrapper's script, which only Unix does, so they stay Unix only, saying why.
+   - `which_function` and `environment_variables_reconfigure` find `rustc`, which every machine which runs the tests
+     has, rather than `sh`, and join `PATH` as the platform does.
+   - **A bug it found:** a file which uses itself overflowed the 1 MiB stack of the main thread on Windows before it
+     reached `MAX_USE_DEPTH`, which was chosen for Linux's 8 MiB. jig evaluates the configuration on a thread with a 64
+     MiB stack of its own, so that it stops at the same depth on every platform, and `use_force` no longer raises the
+     stack with `ulimit`.
+   - **Checked.** Every test passes on Linux. Under Wine, 163 integration tests pass, from 150, and 7 are ignored,
+     from 21. The 12 which fail need what the Wine prefix lacks: nightly, rustup, clippy and a custom target, and for
+     `impure_functions` and `impure_functions_allowed`, an `echo` program, whose diagnostics show the lines which run
+     it, so they keep running `echo`, which a Windows machine with Git has.
+
 7. **Rewrite the documentation.** The README, `build-engine.md` and the module and function docs describe jig and rig
    without ninja: rig's behaviour by itself, as its console's output, rather than by what ninja does. Phases which
    describe history, as phase 1's "with ninja's behaviour", stay as they were, with a note that ninja was since

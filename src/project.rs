@@ -39,8 +39,9 @@ pub fn has_line_break(text: &str) -> bool {
 }
 
 /// The greatest depth of files being processed, each used by the one before, beyond which a `use` is an error, so that
-/// a file which uses itself with `force` stops before the stack overflows. An optimized `jig` processes files about
-/// twice as deep within the 8 MiB stack a main thread has by default.
+/// a file which uses itself with `force` stops before the stack overflows, which the stack the configuration is
+/// evaluated on, `CONFIGURE_STACK`, is made for, unoptimized. An optimized `jig` processes files about twice as deep
+/// within 8 MiB.
 pub const MAX_USE_DEPTH: usize = 2048;
 
 pub struct Project {

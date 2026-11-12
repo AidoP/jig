@@ -18,19 +18,29 @@ const EXE: &str = std::env::consts::EXE_SUFFIX;
 /// found where `PATH` hides other programs, and by `PATH` on Windows, as coreutils has it.
 const ENV: &str = if cfg!(windows) { "env" } else { "/usr/bin/env" };
 
+// the program the tests' commands run, rather than a shell, so that they run on Windows too
+rig::register_test_helper!();
+
+/// Returns the path of the test helper, which is this executable, with `/` between its components, so that a `Jig`
+/// file has it in a string as it is. A command runs it with its steps after `--rig-test-helper`.
+fn helper() -> String {
+    rig::test_helper::program().replace('\\', "/")
+}
+
 /// A project in a temporary directory, removed when dropped.
 struct Project {
     dir: PathBuf,
 }
 impl Project {
-    /// Create a project from `(path, contents)` pairs. The first file should be the root `Jig`.
+    /// Create a project from `(path, contents)` pairs. The first file should be the root `Jig`. `HELPER` in a file is
+    /// replaced by the path of the [test helper](helper).
     fn new(name: &str, files: &[(&str, &str)]) -> Self {
         let dir = std::env::temp_dir().join(format!("jig-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for (path, contents) in files {
             let path = dir.join(path);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, contents).unwrap();
+            std::fs::write(path, contents.replace("HELPER", &helper())).unwrap();
         }
         std::fs::create_dir_all(&dir).unwrap();
         // the paths outside the build directory are absolute, as `jig` sees them, which on Windows are not verbatim, as
@@ -292,7 +302,6 @@ fn slashed(text: &str) -> String {
     if cfg!(windows) { text.replace("\\\\", "/").replace('\\', "/") } else { text.into() }
 }
 
-/// Assert that text contains `needle`, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
 /// Assert that an edge's block in rig's graph, as `jig graph` shows it, has the lists of files given, unless they are
 /// empty, and a part of its command, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
 #[track_caller]
@@ -304,6 +313,7 @@ fn assert_statement(statement: &str, lists: &str, command: &str) {
     assert_contains(&format!("{} ", found.unwrap_or_default()), command);
 }
 
+/// Assert that text contains `needle`, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
 #[track_caller]
 fn assert_contains(haystack: &str, needle: &str) {
     let found = haystack.contains(needle) || slashed(haystack).contains(needle);
@@ -1150,45 +1160,46 @@ log note 'unclosed {'a'
         .stderr("error[invalid-string-template]: invalid string template\n --> Jig:3:20");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn run_function() {
     let project = Project::new("run", &[("Jig", "\
 set diagnostic/impure 'allow'
 declare name
     default 'world'
-log note '{run('sh', '-c', 'echo \"hello $WHO\"; echo', WHO: name)}|'
-log note '{run('printf', '%s-%s', 'a', {5})}'
-@if starts-with(run('sh', '-c', 'pwd'), '/')
+log note '{run('HELPER', '--rig-test-helper', 'echo', 'hello', '$WHO', '&&', 'echo', WHO: name)}|'
+log note '{run('HELPER', '--rig-test-helper', 'args', 'a', {5})}'
+@if run('HELPER', '--rig-test-helper', 'pwd') != 'nowhere'
 log note 'condition'
 ")]);
     let output = project.configure().ok();
     // trailing newlines are removed
-    output.stderr("note: hello world|\n").stderr("note: a-5\n").stderr("note: condition\n");
+    output.stderr("note: hello world|\n").stderr("note: a|5|\n").stderr("note: condition\n");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn run_errors() {
     let project = Project::new("run-errors", &[("Jig", "\
 set diagnostic/impure 'allow'
 declare a
-set a run('sh', '-c', 'echo oops >&2; echo second >&2; exit 3')
+set a run('HELPER', '--rig-test-helper', 'eecho', 'oops', '&&', 'eecho', 'second', '&&', 'exit', '3')
 set a run('bluemetal-no-such-program')
 set a run('echo', X: 'a', 'late')
 set a run('echo', 5)
 set a run(X: 'a')
-set a run('sh', '-c', 'printf \"\\377\"')
+set a run('HELPER', '--rig-test-helper', 'printf', '\\xff')
 ")]);
+    let helper = helper();
     project.configure().failed()
-        .stderr("error[run-failed]: \"sh\" failed with exit status: 3\n --> Jig:3:7")
+        // with its exit status, as the system shows it, `exit status: 3`, or `exit code: 3` on Windows
+        .stderr(&format!("error[run-failed]: {helper:?} failed with exit "))
+        .stderr(": 3\n --> Jig:3:7")
         // shown like a location
         .stderr("^\n --> stderr\n  |\n  | oops\n  | second\n  |\nerror")
         .stderr("error[run-spawn]: failed to run \"bluemetal-no-such-program\": ")
         .stderr("error[positional-after-env]: program arguments must come before environment variables\n --> Jig:5:27")
         .stderr("error[invalid-operand]: unsigned value used where str is required\n --> Jig:6:19")
         .stderr("error[argument-count]: function \"run\" takes at least 1 argument, but 0 were given\n --> Jig:7:7")
-        .stderr("error[run-output]: output of \"sh\" is not valid unicode\n --> Jig:8:7")
+        .stderr(&format!("error[run-output]: output of {helper:?} is not valid unicode\n --> Jig:8:7"))
         .stderr("configuration failed with 6 errors");
 }
 
@@ -1227,18 +1238,17 @@ crate Upper 'x.rs'
     output.build(&format!("{host}/libUpper.rlib"));
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn run_environment_names() {
     let project = Project::new("run-env-names", &[("Jig", "\
 set diagnostic/impure 'allow'
 declare name
     default 'world'
-log note '{run('sh', '-c', 'echo $NAME_world', {'NAME_{name}'}: 'computed')}'
-log note '{run('sh', '-c', 'echo $CC $X-Y', CC: 'clang', name: name)}'
-log note '{run('printenv', 'X-Y', X-Y: 'hyphen')}'
-log note '{run('printf', {5})}|{run('printf', '%s', {'{5}'})}'
-set name run('printenv', {'a b'}: 'x')
+log note '{run('HELPER', '--rig-test-helper', 'echo', '$NAME_world', {'NAME_{name}'}: 'computed')}'
+log note '{run('HELPER', '--rig-test-helper', 'echo', '$CC', '$X-Y', CC: 'clang', name: name)}'
+log note '{run('HELPER', '--rig-test-helper', 'getenv', 'X-Y', X-Y: 'hyphen')}'
+log note '{run('HELPER', '--rig-test-helper', 'echo', {5})}|{run('HELPER', '--rig-test-helper', 'echo', {'{5}'})}'
+set name run('HELPER', '--rig-test-helper', 'env', {'a b'}: 'x')
 ")]);
     project.configure().failed()
         // a name in `{}` is computed, like the name of a property
@@ -1247,7 +1257,7 @@ set name run('printenv', {'a b'}: 'x')
         .stderr("note: hyphen\n")
         // an expression in `{}` is still an argument unless it is followed by `: `
         .stderr("note: 5|5\n")
-        .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"a b\"\n --> Jig:8:26")
+        .stderr("error[invalid-identifier]: invalid character ' ' in identifier \"a b\"\n --> Jig:8:")
         .stderr("configuration failed with 1 error");
 }
 
@@ -1315,7 +1325,7 @@ log note 'normalized'
     assert_eq!(depfile, "graph: ../Jig ../sub/Jig ../sub/present ../sub/inner ../sub/absent ../sub/no/such/file\n");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+#[cfg_attr(windows, ignore = "it runs shell scripts as programs, which only Unix does")]
 #[test]
 fn run_relative_program() {
     let project = Project::new("run-relative", &[
@@ -1339,11 +1349,10 @@ log note '{run('sh', '-c', 'echo from path')}'
     assert_eq!(depfile, "graph: ../Jig ../sub/Jig ../tool.sh ../sub/local.sh\n");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn which_function() {
     let project = Project::new("which", &[("Jig", "\
-log note 'sh is {which('sh')}'
+log note 'rustc is {which('rustc')}'
 declare a
 set a which('bluemetal-no-such-program')
 set a which('a/b')
@@ -1355,10 +1364,10 @@ set a which('')
         .stderr("error[invalid-program-name]: invalid program name \"a/b\", which cannot contain \"/\"\n --> Jig:4:13")
         .stderr("error[invalid-program-name]: invalid program name \"\"")
         .stderr("configuration failed with 3 errors");
-    // the first executable `sh` in `PATH`
+    // the first executable `rustc` in `PATH`
     let path = std::env::var_os("PATH").unwrap();
-    let sh = std::env::split_paths(&path).map(|dir| dir.join("sh")).find(|path| path.is_file()).unwrap();
-    output.stderr(&format!("note: sh is {}\n", sh.display()));
+    let rustc = std::env::split_paths(&path).map(|dir| dir.join(format!("rustc{EXE}"))).find(|path| path.is_file());
+    output.stderr(&format!("note: rustc is {}\n", rustc.unwrap().display()));
 }
 
 #[test]
@@ -1509,20 +1518,24 @@ fn environment_variables_reconfigure() {
     assert!(!build(Some("two")).contains("CONFIGURE"));
     assert_contains(&build(None), "note: value is unset");
     // and `PATH`, which `which` searches
-    let project = Project::new("path-reconfigure", &[("Jig", "log note which('sh')\n")]);
+    let project = Project::new("path-reconfigure", &[("Jig", "log note which('rustc')\n")]);
     project.configure().ok();
     let build = |path: &str| {
         let mut command = jig_command();
         let output = command.arg("build").env("PATH", path).current_dir(&project.dir).output().unwrap();
         String::from_utf8(output.stdout).unwrap()
     };
-    let path = std::env::var("PATH").unwrap();
+    // as the platform separates the directories of `PATH`
+    let joined = |dirs: &[PathBuf]| std::env::join_paths(dirs).unwrap().into_string().unwrap();
+    let dirs: Vec<PathBuf> = std::env::split_paths(&std::env::var_os("PATH").unwrap()).collect();
+    let path = joined(&dirs);
     build(&path);
     assert!(!build(&path).contains("CONFIGURE"));
-    assert_contains(&build(&format!("{path}:/nonexistent")), configuring());
+    let nonexistent = project.dir.join("nonexistent");
+    assert_contains(&build(&joined(&[dirs.clone(), vec![nonexistent]].concat())), configuring());
     // a directory which is searched and is missing is not out of date each time
     let missing = project.dir.join("missing");
-    let path = format!("{}:{path}", missing.display());
+    let path = joined(&[vec![missing.clone()], dirs].concat());
     build(&path);
     assert!(!build(&path).contains("CONFIGURE"));
     // but configures the project again once it exists
@@ -2250,7 +2263,6 @@ fn cached_commands_run_the_chosen_toolchain() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn rig_caches_custom_commands() {
     // a command with `cache` is fetched from the cache, by the contents of its inputs and of its program, which here is
@@ -2263,17 +2275,27 @@ fn rig_caches_custom_commands() {
 custom copy
     input 'in.txt'
     output 'out.txt'
-    command 'jig-test-gen' input output
+    command 'jig-test-gen' '--rig-test-helper' 'echo' 'copy' '>>' 'runs.txt' '&&' 'cat' input '>' output
     cache
 custom plain
     input 'in.txt'
     output 'plain.txt'
-    command 'sh' '-c' 'echo plain >> runs.txt && cp \"$1\" \"$2\"' 'sh' input output
+    command 'HELPER' '--rig-test-helper' 'echo' 'plain' '>>' 'runs.txt' '&&' 'cp' input output
 "),
         ("in.txt", "in\n"),
-        ("tools/jig-test-gen", "#!/bin/sh\necho copy >> runs.txt && cat \"$1\" > \"$2\"\n"),
     ];
-    let path = |project: &Project| format!("{}/tools:{}", project.dir.display(), std::env::var("PATH").unwrap());
+    let path = |project: &Project| {
+        let path = std::env::var_os("PATH").unwrap();
+        let dirs = std::iter::once(project.dir.join("tools")).chain(std::env::split_paths(&path));
+        std::env::join_paths(dirs).unwrap().into_string().unwrap()
+    };
+    // the program, a copy of the test helper
+    let tool = |project: &Project| {
+        let tool = project.dir.join(format!("tools/jig-test-gen{EXE}"));
+        std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        std::fs::copy(helper(), &tool).unwrap();
+        tool
+    };
     let build = |project: &Project| {
         let mut command = jig_command();
         command.arg("build").env("JIG_CACHE", &cache_dir).env("PATH", path(project)).current_dir(&project.dir);
@@ -2286,8 +2308,7 @@ custom plain
         runs.lines().filter(|line| *line == name).count()
     };
     let project = Project::new("custom-cache", &files);
-    let tool = project.dir.join("tools/jig-test-gen");
-    make_executable(&tool, &tool);
+    tool(&project);
     project.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&project))]).ok();
     build(&project);
     assert_eq!((runs(&project, "copy"), runs(&project, "plain")), (1, 1));
@@ -2299,24 +2320,21 @@ custom plain
     assert_eq!(std::fs::read_to_string(project.dir.join("build/out.txt")).unwrap(), "in\n");
     // as it is in another checkout, whose program is in another directory, but the same
     let other = Project::new("custom-cache-other", &files);
-    let tool = other.dir.join("tools/jig-test-gen");
-    make_executable(&tool, &tool);
+    let tool = tool(&other);
     other.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&other))]).ok();
     build(&other);
     assert_eq!((runs(&other, "copy"), runs(&other, "plain")), (0, 1));
     assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\n");
     // a program which changes configures the project again, and runs
-    std::fs::write(&tool, "#!/bin/sh\necho copy >> runs.txt && cat \"$1\" \"$1\" > \"$2\"\n").unwrap();
+    std::io::Write::write_all(&mut std::fs::File::options().append(true).open(&tool).unwrap(), b"changed").unwrap();
     assert_contains(&build(&other), configuring());
     assert_eq!(runs(&other, "copy"), 1);
-    assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\nin\n");
     // and a test cannot be cached, as it runs to be seen to pass
     let project = Project::new("custom-cache-test", &[("Jig", "test t\n    command 'true'\n    cache\n")]);
     project.configure().failed().stderr("cache");
     let _ = std::fs::remove_dir_all(&cache);
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn pass_env() {
     // the variables a command or crate passes on are its inputs, and the only ones, with those which locate tools,
@@ -2327,7 +2345,7 @@ fn pass_env() {
     let jig = |cached: &str| format!("\
 custom seen
     output 'seen.txt'
-    command 'sh' '-c' 'printf \"%s %s\" \"${{{{JIG_TEST_PASSED-unset}}}}\" \"${{{{JIG_TEST_HIDDEN-unset}}}}\" > \"$1\"' 'sh' output
+    command 'HELPER' '--rig-test-helper' 'getenv' 'JIG_TEST_PASSED' '>' output '&&' 'getenv' 'JIG_TEST_HIDDEN' '>>' output
     pass-env 'JIG_TEST_PASSED'
 {cached}
 crate app 'app.rs'
@@ -2346,21 +2364,21 @@ log note app.pass-env
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(output.status.success(), "{stdout}");
         let seen = std::fs::read_to_string(project.dir.join("build/seen.txt")).unwrap();
-        let app = Command::new(project.dir.join(format!("build/{}/app", project.host()))).output().unwrap();
+        let app = Command::new(project.dir.join(format!("build/{}/app{EXE}", project.host()))).output().unwrap();
         (stdout.contains("CUSTOM seen"), seen, String::from_utf8(app.stdout).unwrap())
     };
     let [(_, jig), (_, app)] = files("");
     let project = Project::new("pass-env", &[("Jig", &jig), ("app.rs", &app)]);
     project.configure().ok().stderr("note: JIG_TEST_PASSED\n");
-    assert_eq!(run(&project, false, "one"), (true, "one hidden".into(), "one".into()));
+    assert_eq!(run(&project, false, "one"), (true, "one\nhidden\n".into(), "one".into()));
     // with rig, a value which changes runs the command again, and compiles the crate again
     assert!(!run(&project, false, "one").0);
-    assert_eq!(run(&project, false, "two"), (true, "two hidden".into(), "two".into()));
+    assert_eq!(run(&project, false, "two"), (true, "two\nhidden\n".into(), "two".into()));
     // and a cached command inherits only what it passes on
     let [(_, jig), (_, app)] = files("    cache");
     let project = Project::new("pass-env-cached", &[("Jig", &jig), ("app.rs", &app)]);
     project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
-    assert_eq!(run(&project, true, "three"), (true, "three unset".into(), "three".into()));
+    assert_eq!(run(&project, true, "three"), (true, "three\nunset\n".into(), "three".into()));
     let project = Project::new("pass-env-invalid", &[("Jig", "custom c\n    output 'c'\n    command 'true'\n    pass-env 'A=B'\n")]);
     project.configure().failed().stderr("A=B");
     let _ = std::fs::remove_dir_all(&cache);
@@ -2512,7 +2530,6 @@ fn use_file() {
         .stderr("error[unknown-attribute]: unknown use attribute \"odd\"\n --> Jig:2:5");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn use_force() {
     let project = Project::new("use-force", &[
@@ -2553,13 +2570,8 @@ use 'cycle'
         ("Jig", "use 'loop'\n"),
         ("loop/Jig", "use '../loop'\n    force\n"),
     ]);
-    // with a larger stack than the default, which an unoptimized `jig` needs at that depth
-    let output = Command::new("sh")
-        .args(["-c", "ulimit -s 65532 2> /dev/null; exec \"$0\" generate Jig"])
-        .arg(configure_path())
-        .current_dir(&project.dir)
-        .output()
-        .unwrap();
+    // within the stack jig evaluates the configuration on, on every platform, whose main threads' stacks differ
+    let output = Command::new(configure_path()).args(["generate", "Jig"]).current_dir(&project.dir).output().unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!output.status.success(), "{stderr}");
     assert_contains(&stderr, "error[use-depth]: files are used more than 2048 deep, each by the one before\n --> loop/Jig:1:5");
@@ -2738,7 +2750,6 @@ fn flycheck_problems() {
     assert_contains(&stderr, "no crate with the label \"nope\"");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn custom_command() {
     let project = Project::new("custom", &[
@@ -2747,34 +2758,37 @@ fn custom_command() {
 custom copy
     input 'in.txt'
     output '../out/copy.txt'
-    command 'sh' '-c' 'cat \"$1\" > \"$2\"; echo \"a  b\" >> \"$2\"' 'sh' input output
+    command 'HELPER' '--rig-test-helper' 'cat' input '>' output '&&' 'echo' 'a  b' '>>' output
 custom tool
     output '../out/tool.txt'
-    command './tool.sh' output 'a b' 4 * 2
+    command './tool.exe' '--rig-test-helper' 'echo' 'tool:' output 'a b' 4 * 2 '>' output
 "),
         ("sub/in.txt", "hello\n"),
-        ("sub/tool.sh", "#!/bin/sh\necho \"tool: $*\" > \"$1\"\n"),
     ]);
-    make_executable(&project.dir.join("sub/tool.sh"), &project.dir.join("sub/tool.sh"));
+    // a copy of the test helper, as a program given by a path, which is named as Windows needs it to be on every
+    // platform
+    std::fs::copy(helper(), project.dir.join("sub/tool.exe")).unwrap();
     let output = project.configure().ok();
     // `input` and `output` are the paths, as the arguments of the program, run from the project root
-    assert_contains(output.build("../out/copy.txt"), "\
-../out/copy.txt
-    description = CUSTOM copy
-    inputs = ../sub/in.txt
-    command = cd .. && sh -c 'cat \"$1\" > \"$2\"; echo \"a  b\" >> \"$2\"' sh sub/in.txt out/copy.txt");
+    let copy = output.build("../out/copy.txt");
+    // with the program, which is given by its path, as an input
+    assert_contains(copy, "../out/copy.txt\n    description = CUSTOM copy\n    inputs = ../sub/in.txt ");
+    let command = "--rig-test-helper cat sub/in.txt '>' out/copy.txt '&&' echo 'a  b' '>>' out/copy.txt";
+    assert_contains(copy, &format!("\n    command = cd .. && {} {command}", helper()));
     // a program which is a path is relative to the file, and a dependency
     assert_contains(output.build("../out/tool.txt"), "\
 ../out/tool.txt
     description = CUSTOM tool
-    inputs = ../sub/tool.sh
-    command = cd .. && ./sub/tool.sh out/tool.txt 'a b' 8");
+    inputs = ../sub/tool.exe
+    command = cd .. && ./sub/tool.exe --rig-test-helper echo tool: out/tool.txt 'a b' 8 '>' out/tool.txt");
     // a command's outputs can be built by its name
     assert_contains(&output.graph, "\ncustom/copy\n    alias = ../out/copy.txt\n");
     let built = jig_command().args(["build", "custom/copy", "custom/tool"]).current_dir(&project.dir).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stdout));
     assert_eq!(std::fs::read_to_string(project.dir.join("out/copy.txt")).unwrap(), "hello\na  b\n");
-    assert_eq!(std::fs::read_to_string(project.dir.join("out/tool.txt")).unwrap(), "tool: out/tool.txt a b 8\n");
+    // with the path of the output as jig gives it, with `\\` on Windows
+    let tool = std::fs::read_to_string(project.dir.join("out/tool.txt")).unwrap();
+    assert_eq!(slashed(&tool), "tool: out/tool.txt a b 8\n");
 }
 
 #[test]
@@ -3142,7 +3156,6 @@ set a contains(flags)
         .stderr("configuration failed with 3 errors");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn change_detection() {
     // `first` writes the first character of its input, which a change to the rest of it leaves as it was, so with its
@@ -3152,11 +3165,11 @@ fn change_detection() {
 custom first
     input 'gen.in'
     output 'gen.h'
-    command 'sh' '-c' 'cut -c1 \"$1\" > \"$2\"' 'sh' input output
+    command 'HELPER' '--rig-test-helper' 'first' input '>' output
 custom after
     input first
     output 'after.txt'
-    command 'cp' input output
+    command 'HELPER' '--rig-test-helper' 'cp' input output
     default
 {after}
 ");
@@ -3236,7 +3249,6 @@ crate unit 'unit.rs'
     project.configure().failed().stderr("tag, or list of tags, which are not empty and have no whitespace");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn tests() {
     let project = Project::new("tests", &[
@@ -3244,41 +3256,44 @@ fn tests() {
         ("sub/Jig", "\
 custom gen
     output 'gen.txt'
-    command 'sh' '-c' 'echo hello > \"$1\"' 'sh' output
+    command 'HELPER' '--rig-test-helper' 'echo' 'hello' '>' output
 test generated
     input gen
-    command './check.sh' input
+    command './check.exe' '--rig-test-helper' 'cat' input
 test fails
-    command 'sh' '-c' 'echo some output; echo an error >&2; exit 3'
+    command 'HELPER' '--rig-test-helper' 'echo' 'some output' '&&' 'eecho' 'an error' '&&' 'exit' '3'
 test passes
-    command 'true'
+    command 'HELPER' '--rig-test-helper' 'true'
 test arguments
-    command 'sh' '-c' 'echo \"arguments:$*\"' 'sh'
+    command 'HELPER' '--rig-test-helper' 'echo' 'arguments:'
 "),
-        ("sub/check.sh", "#!/bin/sh\ngrep -q hello \"$1\"\n"),
     ]);
-    make_executable(&project.dir.join("sub/check.sh"), &project.dir.join("sub/check.sh"));
+    // a copy of the test helper, as a program given by a path, which is named as Windows needs it to be on every
+    // platform
+    std::fs::copy(helper(), project.dir.join("sub/check.exe")).unwrap();
     let output = project.configure().ok();
     // a test's target builds its inputs and program, and `test` builds those of every test
-    assert_contains(&output.graph, "\ntest/generated\n    alias = gen.txt ../sub/check.sh\n");
+    assert_contains(&output.graph, "\ntest/generated\n    alias = gen.txt ../sub/check.exe\n");
     assert_contains(&output.graph, "\ntest\n    alias = test/generated test/fails test/passes test/arguments\n");
 
     let run = |names: &[&str]| {
         let output = jig_command().arg("test").args(names).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
-    // the inputs are built before the tests run, and the output of a failed test is shown
+    // the inputs are built before the tests run, and the output of a failed test is shown, with its exit status, as the
+    // system shows it
+    let status = if cfg!(windows) { "exit code: 3" } else { "exit status: 3" };
     let (success, stdout, stderr) = run(&["generated", "fails", "passes"]);
     assert!(!success);
     // the results line up, with how long each test took
-    assert_contains(&without_durations(&stdout), "
+    assert_contains(&without_durations(&stdout), &format!("
 running 3 tests
 test generated ... ok
 test fails     ... FAILED
 test passes    ... ok
 
 ---- fails ----
-exit status: 3
+{status}
 some output
 an error
 
@@ -3286,7 +3301,7 @@ failures:
     fails
 
 test result: FAILED. 2 passed; 1 failed
-");
+"));
     // without colours, as stdout is not a terminal
     assert!(!stdout.contains('\x1b'), "{stdout}");
     assert_contains(&stdout, "\ntest passes    ... ok (0.");
@@ -3301,16 +3316,16 @@ test result: FAILED. 2 passed; 1 failed
     // with `-v`, the output of each test is shown below its result, rather than that of the failures at the end
     let (success, stdout, _) = run(&["-v", "fails", "passes"]);
     assert!(!success);
-    assert_contains(&without_durations(&stdout), "\
+    assert_contains(&without_durations(&stdout), &format!("\
 test fails  ... FAILED
-    exit status: 3
+    {status}
     some output
     an error
 test passes ... ok
 
 failures:
     fails
-");
+"));
     assert!(!stdout.contains("---- fails ----"), "{stdout}");
     // only a crate's test harness is given libtest's `--color`
     let (success, stdout, _) = run(&["-v", "arguments"]);
@@ -3557,7 +3572,6 @@ fn shows_timings() {
     assert!(!stderr.contains("timings:"), "{stderr}");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn run_programs() {
     let hello = "\
@@ -3582,7 +3596,8 @@ fn main() {
     let dir = project.dir.display().to_string();
     // the only binary crate is built and run in the working directory, with what is built reported on stderr
     let (code, stdout, stderr) = run("sub", &[]);
-    assert_eq!((code, stdout), (Some(0), format!("hello [] in {dir}/sub\n")), "{stderr}");
+    let sub = project.dir.join("sub").display().to_string();
+    assert_eq!((code, stdout), (Some(0), format!("hello [] in {sub}\n")), "{stderr}");
     assert_contains(&stderr, "RUSTC ");
     // with the arguments after its name, or after `--`, and with its exit status
     assert_eq!(run(".", &["hello", "a", "-b"]).1, format!("hello [\"a\", \"-b\"] in {dir}\n"));
@@ -3603,12 +3618,12 @@ crate other 'hello.rs'
     default
 target {host}
     override
-    runner ['./wrap.sh', '--tag']
+    runner ['./wrap.exe', '--rig-test-helper', 'echo', 'wrapped', '--tag', '&&', 'run']
 ")),
         ("hello.rs", hello),
-        ("wrap.sh", "#!/bin/sh\necho \"wrapped $1\"\nshift\nexec \"$@\"\n"),
     ]);
-    make_executable(&project.dir.join("wrap.sh"), &project.dir.join("wrap.sh"));
+    // a copy of the test helper, which runs the program with its arguments, after its own
+    std::fs::copy(helper(), project.dir.join("wrap.exe")).unwrap();
     project.configure().ok();
     let output = jig_command().args(["run", "other", "x"]).current_dir(&project.dir).output().unwrap();
     let expected = format!("wrapped --tag\nhello [\"x\"] in {}\n", project.dir.display());
@@ -4689,7 +4704,7 @@ custom c
     }
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+#[cfg_attr(windows, ignore = "it runs a shell script as a program, which only Unix does")]
 #[test]
 fn run_reference() {
     let project = Project::new("run-reference", &[
@@ -5774,17 +5789,16 @@ custom tool
     assert_contains(&stderr, &format!("no program is installed at {wrapper:?}"));
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn build_dir_change() {
     let project = Project::new("build-dir-change", &[
         ("Jig", "\
 custom data
-    command 'sh' '-c' 'echo data > \"$1\"' 'sh' output
+    command 'HELPER' '--rig-test-helper' 'echo' 'data' '>' output
     default
 test passes
     input data
-    command 'true'
+    command 'HELPER' '--rig-test-helper' 'true'
 "),
     ]);
     project.configure().ok();
@@ -5806,7 +5820,7 @@ test passes
     assert!(project.dir.join("build/graph").is_file());
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+#[cfg_attr(windows, ignore = "it replaces the jig which is running, which only Unix can")]
 #[test]
 fn proxy_rebuilds_its_jig() {
     // the program is the `jig` the wrapper runs, which is replaced while it builds it, as when `jig` is built by itself
@@ -5841,13 +5855,12 @@ custom jig
     assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), installed);
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn depends_attribute() {
     let project = Project::new("depends", &[
         ("Jig", "\
 custom data
-    command 'sh' '-c' 'echo data > \"$1\"' 'sh' output
+    command 'HELPER' '--rig-test-helper' 'echo' 'data' '>' output
 crate app 'app.rs'
     crate-type 'bin'
     test
@@ -5856,10 +5869,10 @@ custom copy
     input 'in.txt'
     depends data 'extra.txt'
     output 'copy.txt'
-    command 'cp' input output
+    command 'HELPER' '--rig-test-helper' 'cp' input output
 test runs
     depends app
-    command 'true'
+    command 'HELPER' '--rig-test-helper' 'true'
 log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
 "),
         ("app.rs", "fn main() {}\n#[test]\nfn data() { assert!(std::path::Path::new(\"build/data\").exists()); }\n"),
@@ -5873,10 +5886,14 @@ log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
     // which are built first, without rebuilding when they change
     assert_eq!(files_of(statement(&output.graph, &format!("{host}/app{EXE}"))), "inputs = ../app.rs\nafter = data\n");
     assert_eq!(files_of(statement(&output.graph, &format!("{host}/test/app{EXE}"))), "inputs = ../app.rs\nafter = data\n");
-    assert_eq!(files_of(statement(&output.graph, "copy.txt")), "inputs = ../in.txt\nafter = data ../extra.txt\n");
+    // as is the program, the test helper, which is given by its path
+    let copy = files_of(statement(&output.graph, "copy.txt"));
+    assert!(copy.starts_with("inputs = ../in.txt ") && copy.ends_with("\nafter = data ../extra.txt\n"), "{copy}");
     // and which are built for a test
     assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE} data\n"));
-    assert_contains(&output.graph, &format!("\ntest/runs\n    alias = {host}/app{EXE}\n"));
+    // with the test's program, the test helper, before it
+    let runs = statement(&output.graph, "test/runs");
+    assert!(runs.starts_with("test/runs\n    alias = ") && runs.ends_with(&format!(" {host}/app{EXE}")), "{runs}");
     // so that the test of the crate finds what it depends on
     let run = jig_command().args(["test", "app"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
@@ -6028,7 +6045,6 @@ log note '{aarch64-unknown-linux-musl.linker} {aarch64-unknown-linux-musl.linker
     assert!(!own.contains("rust-lld") && !own.contains("linker-flavor"), "{own}");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
 #[test]
 fn toolchain_option() {
     let project = Project::new("toolchain", &[("Jig", "\
@@ -6036,7 +6052,7 @@ log note 'toolchain: {toolchain}'
     quiet
 custom version
     output 'version.txt'
-    command 'sh' '-c' 'rustc --version > \"$1\"' 'sh' output
+    command 'HELPER' '--rig-test-helper' 'run' 'rustc' '--version' '>' output
     default
 ")]);
     let jig = |args: &[&str]| {
@@ -6258,7 +6274,7 @@ log note '{({'thumbv8m.main-none-eabihf'}/app)} {({'thumbv8m.main-none-eabihf'}.
     project.configure().failed().stderr("error[invalid-crate-name]: invalid character '.' in crate name \"a.b\"");
 }
 
-#[cfg_attr(windows, ignore = "its commands are POSIX shell")]
+#[cfg_attr(windows, ignore = "it checks the script of a wrapper, which is a program on Windows")]
 #[test]
 fn proxy_installed_by_itself() {
     // a `jig` which installs wrappers over itself, as when jig installs itself, does not make a wrapper run itself
