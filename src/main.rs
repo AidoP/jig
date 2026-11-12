@@ -217,6 +217,10 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
 
 /// Evaluate the configuration from its root file, `input`, then generate the graph and the files beside it, with a
 /// rustup toolchain if one is given.
+/// The stack the configuration is evaluated on, which `project::MAX_USE_DEPTH` files, each used by the one before, fit
+/// in, as an unoptimized `jig` processes them. It is only reserved, until it is used.
+const CONFIGURE_STACK: usize = 64 << 20;
+
 fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let sysroot = rustc_print("sysroot", toolchain)?;
     let host = rustc_print("host-tuple", toolchain)?;
@@ -234,13 +238,23 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
         Err(error) => return Err(Error::Read(input, error)),
     };
     declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
-    // the user's configuration, as if the project began by using it
-    config::apply(&mut project)?;
-    project.parse(file);
-    // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
-    if !project.fatal {
-        project.check();
-    }
+    // on a thread with a stack of its own, as deep on every platform, as a file which uses itself goes deep, while the
+    // main thread's stack is 8 MiB on Linux, and 1 MiB on Windows
+    let evaluate = || -> Result<(), Error> {
+        // the user's configuration, as if the project began by using it
+        config::apply(&mut project)?;
+        project.parse(file);
+        // a fatal diagnostic stops the configuration, so what is after it, which the check is about, is not known
+        if !project.fatal {
+            project.check();
+        }
+        Ok(())
+    };
+    std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new().name("configure".into()).stack_size(CONFIGURE_STACK);
+        let evaluating = thread.spawn_scoped(scope, evaluate).expect("failed to start configuring");
+        evaluating.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })?;
     report_diagnostics(&project)?;
 
     // rig caches when there is a cache, which configures the project again when it is turned on or off, as the variables

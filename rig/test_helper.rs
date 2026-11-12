@@ -8,8 +8,9 @@
 //! appended to one if it ends in `>> <file>`:
 //!
 //! - `cat <file> ...`, the contents of the files, `echo <word> ...`, the words, with a space between them and a newline
-//!   after them, `printf <text>`, the text with `\n` and `\e` as a newline and an escape, and `eecho <word> ...`, as
-//!   `echo`, to stderr.
+//!   after them, and a `$<name>` at the start of one replaced by the variable's value, or nothing, `printf <text>`, the
+//!   text with `\n`, `\e` and `\x<hex>` as a newline, an escape and a byte, `eecho <word> ...`, as `echo`, to stderr,
+//!   and `pwd`, the working directory.
 //! - `touch <file> ...`, `cp <from> <to>`, `mkdir <dir>` and `rmdir <dir>`, as their commands do, and `chmod-x <file>`,
 //!   which makes a file executable, on Unix.
 //! - `true`, `test-dir <dir>`, which fails unless the directory is there, and `cwd-is <dir>`, unless it is the
@@ -21,6 +22,7 @@
 //!   lines, and `args <word> ...`, each word followed by `|`.
 //! - `zeros <count>`, as many zero bytes, `size <file>`, its size in bytes, with a newline, `first <file>`, the first
 //!   character of each of its lines, and `strip <text> <prefix>`, the text without the prefix.
+//! - `run <program> <argument> ...`, which runs a program, whose stdout is the step's, and fails as it does.
 //! - `spawn <seconds> <file>`, which runs the helper again to sleep, writing its process ID to the file, and waits for
 //!   it, and `tokens`, which takes two of the jobserver's tokens, prints them, and gives them back, on Unix.
 
@@ -137,9 +139,22 @@ fn step(words: &[String]) -> Result<(), Failure> {
                 out.extend(read(file)?);
             }
         },
-        ["echo", words @ ..] => out = format!("{}\n", words.join(" ")).into_bytes(),
+        ["echo", words @ ..] => {
+            let words: Vec<String> = words.iter().map(|word| expand(word)).collect();
+            out = format!("{}\n", words.join(" ")).into_bytes();
+        },
         ["eecho", words @ ..] => io(writeln!(std::io::stderr(), "{}", words.join(" ")))?,
-        ["printf", text] => out = text.replace("\\n", "\n").replace("\\e", "\x1b").into_bytes(),
+        ["printf", text] => out = unescape(text),
+        ["pwd"] => out = format!("{}\n", std::env::current_dir().map_err(failed)?.display()).into_bytes(),
+        ["run", program, args @ ..] => {
+            let ran = std::process::Command::new(program).args(args).output().map_err(failed)?;
+            io(std::io::stderr().write_all(&ran.stderr))?;
+            out = ran.stdout;
+            if !ran.status.success() {
+                io(std::io::stdout().write_all(&out))?;
+                return Err((ran.status.code().unwrap_or(1), String::new()));
+            }
+        },
         ["touch", files @ ..] => {
             for file in files {
                 let opened = std::fs::File::options().create(true).append(true).open(file);
@@ -210,6 +225,37 @@ fn step(words: &[String]) -> Result<(), Failure> {
         },
         None => io(std::io::stdout().write_all(&out)),
     }
+}
+
+/// Returns a word with a `$<name>` at its start replaced by the variable's value, or nothing if it is not set.
+fn expand(word: &str) -> String {
+    let Some(rest) = word.strip_prefix('$') else {
+        return word.to_string();
+    };
+    let end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(rest.len());
+    std::env::var(&rest[..end]).unwrap_or_default() + &rest[end..]
+}
+
+/// Returns text with `\n`, `\e` and `\x<hex>`, of two digits, as a newline, an escape and a byte.
+fn unescape(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut rest = text.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        rest = after;
+        match (byte, rest) {
+            (b'\\', [escape @ (b'n' | b'e'), after @ ..]) => {
+                bytes.push(if *escape == b'n' { b'\n' } else { 0x1b });
+                rest = after;
+            },
+            (b'\\', [b'x', high, low, after @ ..]) => {
+                let hex = std::str::from_utf8(&[*high, *low]).ok().and_then(|hex| u8::from_str_radix(hex, 16).ok());
+                bytes.push(hex.unwrap_or(b'?'));
+                rest = after;
+            },
+            (byte, _) => bytes.push(byte),
+        }
+    }
+    bytes
 }
 
 fn sleep(seconds: &str) -> Result<(), Failure> {
