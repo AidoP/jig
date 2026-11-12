@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::Error;
 use crate::depfile::Discovered;
-use crate::graph::{Action, EdgeId, EdgeKind, EdgeRef, Graph, NodeId};
+use crate::graph::{EdgeId, EdgeKind, EdgeRef, Exec, Graph, NodeId};
 use crate::stamp::{Stamp, Stamps};
 use crate::state::{Record, State};
 
@@ -119,8 +119,8 @@ impl Fnv {
     }
 }
 
-/// Returns an edge's action as bytes, which differ whenever it does: a shell command as it is, or each part of a
-/// program with its length before it, so that parts which run together differ.
+/// Returns an edge's action as bytes, which differ whenever it does: each part of its program with its length before
+/// it, so that parts which run together differ.
 #[must_use]
 pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
     match edge.kind() {
@@ -148,46 +148,38 @@ pub(crate) const BUILD_DIR: &str = "\0build-dir";
 
 /// Returns an action with the build's directory, absolute, replaced wherever it is by [`BUILD_DIR`], or as it is if
 /// the directory is empty, as it is when it is not known.
-pub(crate) fn relocated(action: &Action, dir: &str) -> Action {
+pub(crate) fn relocated(exec: &Exec, dir: &str) -> Exec {
     let relocate = |string: &str| if dir.is_empty() { string.to_string() } else { string.replace(dir, BUILD_DIR) };
-    match action {
-        Action::Shell(command) => Action::Shell(relocate(command)),
-        Action::Exec(exec) => Action::Exec(crate::graph::Exec {
-            program: relocate(&exec.program),
-            args: exec.args.iter().map(|arg| relocate(arg)).collect(),
-            env: exec.env.iter().map(|(name, value)| (name.clone(), relocate(value))).collect(),
-            dir: exec.dir.as_deref().map(relocate),
-            stderr: exec.stderr.as_deref().map(relocate),
-        }),
+    Exec {
+        program: relocate(&exec.program),
+        args: exec.args.iter().map(|arg| relocate(arg)).collect(),
+        env: exec.env.iter().map(|(name, value)| (name.clone(), relocate(value))).collect(),
+        dir: exec.dir.as_deref().map(relocate),
+        stderr: exec.stderr.as_deref().map(relocate),
     }
 }
 
-fn bytes_of(action: &Action) -> Vec<u8> {
+fn bytes_of(action: &Exec) -> Vec<u8> {
     let mut bytes = Vec::new();
     parts_of(action, &mut |part| bytes.extend_from_slice(part));
     bytes
 }
 
 /// Gives the bytes of an action, as [`bytes_of`] returns them, in parts, in turn.
-fn parts_of(action: &Action, write: &mut dyn FnMut(&[u8])) {
-    match action {
-        Action::Shell(command) => write(command.as_bytes()),
-        Action::Exec(exec) => {
-            let mut part = |part: &str| {
-                write(&part.len().to_le_bytes());
-                write(part.as_bytes());
-            };
-            part(&exec.program);
-            exec.args.iter().for_each(|arg| part(arg));
-            part("\0env");
-            exec.env.iter().for_each(|(name, value)| {
-                part(name);
-                part(value);
-            });
-            part(exec.dir.as_deref().unwrap_or("\0"));
-            part(exec.stderr.as_deref().unwrap_or("\0"));
-        },
-    }
+fn parts_of(exec: &Exec, write: &mut dyn FnMut(&[u8])) {
+    let mut part = |part: &str| {
+        write(&part.len().to_le_bytes());
+        write(part.as_bytes());
+    };
+    part(&exec.program);
+    exec.args.iter().for_each(|arg| part(arg));
+    part("\0env");
+    exec.env.iter().for_each(|(name, value)| {
+        part(name);
+        part(value);
+    });
+    part(exec.dir.as_deref().unwrap_or("\0"));
+    part(exec.stderr.as_deref().unwrap_or("\0"));
 }
 
 /// Returns the inputs an edge declares, explicit and implicit, with the inputs of each alias in place of the alias.
@@ -639,13 +631,11 @@ mod tests {
             stderr: None,
         };
         let mut graph = Graph::new();
-        let (a, b) = (graph.file("a"), graph.file("b"));
-        let kind = EdgeKind::Command(Action::Exec(exec));
+        let a = graph.file("a");
+        let kind = EdgeKind::Command(exec);
         let cache = Some("toolchain".into());
         let edge = crate::Edge { kind, outputs: vec![a], cache, pass_env: vec!["CC".into()], ..Default::default() };
         let id = graph.add_edge(edge).unwrap();
-        let kind = EdgeKind::Command(Action::Shell("cc".into()));
-        let shell = graph.add_edge(crate::Edge { kind, outputs: vec![b], ..Default::default() }).unwrap();
         let edge = graph.edge(id);
         let mut hash = fnv1a(&action_bytes(edge));
         hash = fnv1a(&[hash.to_le_bytes().as_slice(), b"\0cache", b"toolchain"].concat());
@@ -654,7 +644,6 @@ mod tests {
         bytes.extend_from_slice(&2_usize.to_le_bytes());
         bytes.extend_from_slice(b"CC");
         assert_eq!(action_hash(edge), fnv1a(&bytes));
-        assert_eq!(action_hash(graph.edge(shell)), fnv1a(b"cc"));
     }
 
     #[test]

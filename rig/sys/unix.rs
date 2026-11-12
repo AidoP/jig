@@ -134,18 +134,6 @@ pub fn group_ended(leader: u32) {
     let _ = leader;
 }
 
-/// Returns the command which runs a line with the shell, `sh -c`.
-///
-/// # Errors
-///
-/// Never, as it can on Windows.
-#[allow(clippy::unnecessary_wraps, reason = "as on Windows, where it fails")]
-pub fn shell(line: &str) -> std::io::Result<std::process::Command> {
-    let mut sh = std::process::Command::new("/bin/sh");
-    sh.arg("-c").arg(line);
-    Ok(sh)
-}
-
 /// Whether a file is executable, by any of its modes.
 pub fn is_executable(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;

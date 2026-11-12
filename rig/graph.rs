@@ -11,17 +11,8 @@ pub struct NodeId(pub(crate) u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EdgeId(pub(crate) u32);
 
-/// What an edge runs to produce its outputs.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// A command line, run by `sh -c`.
-    Shell(String),
-    /// A program, run directly rather than by a shell.
-    Exec(Exec),
-}
-
 /// A program to run, with its arguments, environment, working directory and where its stderr goes, which need no
-/// quoting, as no shell reads them.
+/// quoting, as no shell reads them. A command which needs a shell runs one, as `sh -c`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Exec {
     /// The program, which is found in `PATH` unless it has a `/`, when it is relative to the working directory.
@@ -35,25 +26,21 @@ pub struct Exec {
     pub stderr: Option<String>,
 }
 
-impl Action {
-    /// Returns the action as a command line for `sh`, as it is shown, which is the command of a shell action.
+impl Exec {
+    /// Returns the program as a command line for `sh`, as it is shown.
     #[must_use]
     pub fn command_line(&self) -> String {
         use std::fmt::Write as _;
-        let exec = match self {
-            Self::Shell(command) => return command.clone(),
-            Self::Exec(exec) => exec,
-        };
         let mut line = String::new();
-        if let Some(dir) = &exec.dir {
+        if let Some(dir) = &self.dir {
             let _ = write!(line, "cd {} && ", shell_quote(dir));
         }
-        for (name, value) in &exec.env {
+        for (name, value) in &self.env {
             let _ = write!(line, "{name}={} ", shell_quote(value));
         }
-        let words = std::iter::once(&exec.program).chain(&exec.args);
+        let words = std::iter::once(&self.program).chain(&self.args);
         line.push_str(&words.map(|word| shell_quote(word)).collect::<Vec<_>>().join(" "));
-        if let Some(stderr) = &exec.stderr {
+        if let Some(stderr) = &self.stderr {
             let _ = write!(line, " 2> {}", shell_quote(stderr));
         }
         line
@@ -69,13 +56,13 @@ fn shell_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-/// Whether an edge produces its outputs by running an action, or only names other files.
+/// Whether an edge produces its outputs by running a program, or only names other files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum EdgeKind {
-    /// An alias, as ninja's `phony`, which runs nothing, and is up to date once its inputs are.
+    /// An alias, which runs nothing, and is up to date once its inputs are.
     #[default]
     Alias,
-    Command(Action),
+    Command(Exec),
 }
 
 /// What an edge runs alongside.
@@ -84,7 +71,7 @@ pub enum Pool {
     /// The edge runs alongside any other, with its output captured.
     #[default]
     Default,
-    /// The edge runs alone, with the terminal, as ninja's `console` pool.
+    /// The edge runs alone, with the terminal.
     Console,
 }
 
@@ -124,9 +111,9 @@ pub struct Edge {
     pub pass_env: Vec<String>,
     /// Which workers a cached edge may run on.
     pub placement: Placement,
-    /// An action which writes the edge's depfile as running it would, without doing its work, such as rustc with
+    /// A program which writes the edge's depfile as running it would, without doing its work, such as rustc with
     /// `--emit=dep-info` alone, by which the inputs of an edge which has not run are found, to send it to a worker.
-    pub discover: Option<Action>,
+    pub discover: Option<Exec>,
     /// Outputs which the action writes before it finishes, and reports as rustc does with `--json=artifacts`, as the
     /// metadata of a crate, so that the edges which need only them start once they are written. An edge which has them
     /// writes what rustc writes with `--error-format=json`, of which what it would have printed is shown.
@@ -162,7 +149,7 @@ struct EdgeData {
     cache: Option<String>,
     pass_env: Vec<String>,
     placement: Placement,
-    discover: Option<Action>,
+    discover: Option<Exec>,
     early: Vec<NodeId>,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); 5],
@@ -453,7 +440,7 @@ impl<'a> EdgeRef<'a> {
     }
     /// The action which finds what the edge discovers without running it, if it has one.
     #[must_use]
-    pub fn discover(&self) -> Option<&'a Action> {
+    pub fn discover(&self) -> Option<&'a Exec> {
         self.data.discover.as_ref()
     }
     /// The outputs the edge reports before it finishes, as rustc does, if it has any.
@@ -497,7 +484,7 @@ mod tests {
     fn command(graph: &mut Graph, outputs: &[&str], inputs: &[&str]) -> Result<EdgeId, Error> {
         let outputs = outputs.iter().map(|path| graph.file(path)).collect();
         let inputs = inputs.iter().map(|path| graph.file(path)).collect();
-        let kind = EdgeKind::Command(Action::Shell("true".into()));
+        let kind = EdgeKind::Command(Exec { program: "true".into(), ..Exec::default() });
         graph.add_edge(Edge { kind, outputs, inputs, ..Edge::default() })
     }
 

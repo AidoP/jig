@@ -15,13 +15,13 @@
 
 use std::path::Path;
 
-use crate::graph::{Action, Edge, EdgeKind, Exec, Graph, NodeId, Pool};
+use crate::graph::{Edge, EdgeKind, Exec, Graph, NodeId, Pool};
 use crate::Error;
 
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -42,12 +42,8 @@ impl Graph {
         for edge in self.edges() {
             match edge.kind() {
                 EdgeKind::Alias => w.u32(0),
-                EdgeKind::Command(Action::Shell(command)) => {
+                EdgeKind::Command(exec) => {
                     w.u32(1);
-                    w.str(command);
-                },
-                EdgeKind::Command(Action::Exec(exec)) => {
-                    w.u32(2);
                     w.exec(exec);
                 },
             }
@@ -91,12 +87,8 @@ impl Graph {
             }
             match edge.discover() {
                 None => w.u32(0),
-                Some(Action::Shell(command)) => {
+                Some(exec) => {
                     w.u32(1);
-                    w.str(command);
-                },
-                Some(Action::Exec(exec)) => {
-                    w.u32(2);
                     w.exec(exec);
                 },
             }
@@ -145,8 +137,7 @@ impl Graph {
         for _ in 0..r.u32()? {
             let kind = match r.u32()? {
                 0 => EdgeKind::Alias,
-                1 => EdgeKind::Command(Action::Shell(r.str()?.into())),
-                2 => EdgeKind::Command(Action::Exec(r.exec()?)),
+                1 => EdgeKind::Command(r.exec()?),
                 _ => return Err(Error::Format("unknown kind of edge")),
             };
             let description = r.str()?.into();
@@ -184,8 +175,7 @@ impl Graph {
             let placement = crate::Placement { any_host, target, tags };
             let discover = match r.u32()? {
                 0 => None,
-                1 => Some(Action::Shell(r.str()?.into())),
-                2 => Some(Action::Exec(r.exec()?)),
+                1 => Some(r.exec()?),
                 _ => return Err(Error::Format("unknown kind of discovery")),
             };
             let early = r.nodes(nodes)?;
@@ -362,7 +352,11 @@ mod tests {
         let (a, b, c, d) = (graph.file("a"), graph.file("b c"), graph.file("c.d"), graph.file("d"));
         graph
             .add_edge(Edge {
-                kind: EdgeKind::Command(Action::Shell("cc -o a b\\ c".into())),
+                kind: EdgeKind::Command(Exec {
+                    program: "cc".into(),
+                    args: vec!["-o".into(), "a".into(), "b c".into()],
+                    ..Exec::default()
+                }),
                 description: "CC a".into(),
                 outputs: vec![a],
                 implicit_outputs: vec![c],
@@ -375,7 +369,7 @@ mod tests {
                 hashed: true,
                 cache: Some("toolchain".into()),
                 pass_env: vec!["CC".into(), "CFLAGS".into()],
-                discover: Some(Action::Shell("cc -M a.c > a.o.d".into())),
+                discover: Some(Exec { program: "cc".into(), args: vec!["-M".into(), "a.c".into()], ..Exec::default() }),
                 early: vec![c],
                 placement: crate::Placement {
                     any_host: true,
@@ -394,7 +388,7 @@ mod tests {
             stderr: None,
         };
         let program = graph.file("e f");
-        let kind = EdgeKind::Command(Action::Exec(exec));
+        let kind = EdgeKind::Command(exec);
         graph.add_edge(Edge { kind, outputs: vec![program], ..Edge::default() }).unwrap();
         graph.add_default(&[a, d]);
         graph
@@ -420,7 +414,7 @@ mod tests {
         corrupted[10] ^= 1;
         assert_eq!(error(&corrupted), "checksum mismatch");
         let mut other = bytes[..bytes.len() - 8].to_vec();
-        other[4] = 9;
+        other[4] = (VERSION + 1) as u8;
         let checksum = fnv1a(&other);
         other.extend_from_slice(&checksum.to_le_bytes());
         assert_eq!(error(&other), "another version");

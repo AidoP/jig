@@ -25,6 +25,10 @@ mod test_runner;
 mod timings;
 mod toolchain;
 
+// the program the differential tests' edges run, which is this executable, run again
+#[cfg(test)]
+rig::register_test_helper!();
+
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args_os();
     let program = args.next().unwrap_or("jig".into());

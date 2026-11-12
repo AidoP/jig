@@ -412,7 +412,7 @@ pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Erro
 /// directory it runs in, the root build file, and the toolchain, if it is given one.
 fn generated_by(graph: &rig::Graph, edge: rig::EdgeId) -> Option<(PathBuf, PathBuf, Option<String>)> {
     let data = graph.edge(edge);
-    let rig::EdgeKind::Command(rig::Action::Exec(exec)) = data.kind() else {
+    let rig::EdgeKind::Command(exec) = data.kind() else {
         return None;
     };
     let running = crate::configured::jig().ok()?;
