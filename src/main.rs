@@ -14,7 +14,6 @@ mod generate;
 mod graph;
 mod install;
 mod lint;
-mod ninja;
 mod project;
 mod rig_builder;
 mod rig_graph;
@@ -58,9 +57,11 @@ commands of the build which took longest.
 
 commands:
     generate [<input>]   evaluate the configuration, `Jig` by default, and generate rig's graph in the build
-                         directory, or `build.ninja` if `JIG_ENGINE` is `ninja`
-    build [<arg> ...]    build the project, or the targets given, with rig, or with ninja if `JIG_ENGINE` is
-                         `ninja`, which is given the arguments
+                         directory
+    build [-j <jobs>] [-k <failures>] [-n] [-v] [--quiet] [<target> ...]
+                         build the project, or the targets given, with as many jobs at once, going on until as many
+                         commands have failed, `0` for any, or showing what would run, and why, with `-n`, the
+                         commands rather than their descriptions with `-v`, or only what they print with `--quiet`
     test [-v] [--all] [--tag <tag> ...] [<name> ...]
                          build and run the tests without tags and those with a tag in `test-tags`, or only those named
                          or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the
@@ -222,7 +223,6 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
-    project.line_breaks = configured::Engine::from_env()? == configured::Engine::Rig;
     // which toolchain rustup's proxies run, as rustc was asked of above, so that the project is configured again when it
     // changes, and the toolchain is identified afresh
     project.read_env("RUSTUP_TOOLCHAIN");
@@ -545,7 +545,7 @@ enum Error {
     /// A tag given to `jig test` which no test has.
     UnknownTag(String),
     TestsFailed(usize),
-    /// Text which cannot be written to a file of ninja's, as it has a line break.
+    /// A path which cannot be written to a depfile, as it has a line break.
     LineBreak(std::path::PathBuf, String),
     UnknownLint(String),
     UnknownProgram(String, Vec<String>),
@@ -567,12 +567,6 @@ enum Error {
     Rig(rig::Error),
     /// An argument of `jig build` which rig does not take, or a depfile it could not read.
     RigArgument(String),
-    /// A value of `JIG_ENGINE` which is not an engine.
-    UnknownEngine(String),
-    /// `JIG_ENGINE=ninja` on Windows, where only rig builds.
-    NinjaOnWindows,
-    /// `jig graph` with `JIG_ENGINE=ninja`, which has no graph of rig's.
-    GraphOfNinja,
     /// A value of `change-detection` which is not a way to detect changes.
     ChangeDetection(String),
     /// A size, of the cache, which is not one.
@@ -627,7 +621,9 @@ impl core::fmt::Display for Error {
             Self::UnknownTag(tag) => write!(f, "no test tagged {tag:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
-            Self::LineBreak(path, text) => write!(f, "cannot write {text:?} to {path:?}, as ninja cannot write a line break"),
+            Self::LineBreak(path, text) => {
+                write!(f, "cannot write {text:?} to {path:?}, as a depfile cannot have a line break")
+            },
             Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
             Self::UnknownProgram(name, names) => write!(f, "no program named {name:?}, of {}", names.join(", ")),
             Self::ProgramNotChosen(names) => write!(f, "choose the program to run, of {}", names.join(", ")),
@@ -655,11 +651,6 @@ impl core::fmt::Display for Error {
             Self::RigArgument(argument) => write!(f, "rig does not take {argument:?}"),
             Self::ChangeDetection(value) => {
                 write!(f, "`change-detection` is {value:?}, rather than `'timestamp'` or `'hash'`")
-            },
-            Self::UnknownEngine(engine) => write!(f, "unknown engine {engine:?} in `JIG_ENGINE`, rather than `ninja` or `rig`"),
-            Self::NinjaOnWindows => write!(f, "`JIG_ENGINE=ninja` is not supported on Windows, where rig builds"),
-            Self::GraphOfNinja => {
-                write!(f, "`jig graph` shows rig's graph, which is not generated with `JIG_ENGINE=ninja`")
             },
             Self::InvalidSize(size) => write!(f, "{size:?} is not a size, such as `512M` or `10G`"),
             Self::CacheOff => {
@@ -702,7 +693,7 @@ fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> 
 /// files of, so that the toolchain is identified again when it is updated in place.
 fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str) -> String {
     let (identity, file) = toolchain::identity(verbose_version, Path::new(sysroot));
-    // a file which is missing is not depended on, as ninja would configure the project again each time
+    // a file which is missing identifies nothing, so it is not depended on
     if let Some(file) = file {
         project.depend(file);
     }

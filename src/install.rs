@@ -267,8 +267,8 @@ fn destination(prefix: &Path, file: &database::Install) -> PathBuf {
 ///
 /// The `proxy-build` diagnostic is reported first if the configuration or the program is out of date, before the
 /// configuration is regenerated, so that it precedes any diagnostics from configuring. Its severity is that recorded
-/// when last configured, and as an error, nothing is configured or built. Ninja is quiet, so that only the diagnostic
-/// and the output of what it runs are shown.
+/// when last configured, and as an error, nothing is configured or built. The build is quiet, so that only the
+/// diagnostic and the output of what it runs are shown.
 ///
 /// Returns whether the wrapper was reinstalled, as it should then be run again.
 pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
@@ -308,8 +308,7 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
     let Some(file) = find_program(&database, prefix, wrapper) else {
         return Err(Error::ProxyNotInstalled(wrapper.into()));
     };
-    // nothing is built when nothing is out of date, as before 1.12, ninja reports that there is nothing to do even
-    // when it is quiet
+    // nothing is built when nothing is out of date, which the diagnostic has found
     if stale {
         project.build(&Request { targets: &[file.target], quiet: true, ..Default::default() })?;
     }

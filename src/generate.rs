@@ -1,21 +1,18 @@
-//! Generation of the files which build a project: the specifications of its custom targets, and the graph of the
-//! engine which builds it, rig's `graph`, or with `JIG_ENGINE=ninja`, `build.ninja`, with its depfile, in the build
-//! directory, and `.rust-project.json` and the database, read by `jig build`, `jig check`, `jig test` and
-//! `jig install`, at the project root.
+//! Generation of the files which build a project: the specifications of its custom targets, and rig's graph, `graph`,
+//! with its depfile, in the build directory, and `.rust-project.json` and the database, read by `jig build`,
+//! `jig check`, `jig test` and `jig install`, at the project root.
 //!
-//! Ninja runs in the build directory, so the paths in `build.ninja` are relative to it, while the project's paths are
+//! rig builds in the build directory, so the paths of the graph are relative to it, while the project's paths are
 //! relative to the project root.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::configured::Engine;
 use crate::graph::{Edge, Graph, Rule};
-use crate::ninja::{self, NinjaFile};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
-use crate::rig_graph::RigGraph;
+use crate::rig_graph::{self, RigGraph};
 use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -27,9 +24,6 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
         return Err(Error::Create(build_dir, error));
     }
     let at = Rebase::new(&build_dir);
-    // only the graph of the engine which builds it is written, which it regenerates
-    let engine = Engine::from_env()?;
-    write_reconfigure_stamp(&build_dir)?;
     write_target_specs(&project.targets, &build_dir, project.toolchain.as_deref())?;
     write_generated_files(&project.generated)?;
 
@@ -38,16 +32,11 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
     // the linkers are identified, and depended on, before the depfile is written
     identify_linkers(&mut project, &crates);
-    write_depfile(&project, &at, &build_dir, engine)?;
+    write_depfile(&project, &at, &build_dir)?;
     let units = units(&project, &crates, sysroot, &build_dir);
-    let path = build_dir.join(engine.file());
-    let mut graph: Box<dyn Graph> = match engine {
-        Engine::Ninja => Box::new(NinjaFile::new(path)?),
-        Engine::Rig => Box::new(RigGraph::new(path)),
-    };
-    write_graph(graph.as_mut(), &project, &crates, &units, &installed, input, &at)?;
+    let mut graph = RigGraph::new(build_dir.join(rig_graph::FILE));
+    write_graph(&mut graph, &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
-    retire_build_dir(&build_dir)?;
     write_database(&project, &units, &installed, input, &at, &build_dir)
 }
 
@@ -294,35 +283,13 @@ fn write_generated_files(files: &[GeneratedFile]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Returns the hash of the value of an environment variable as the database records it, in hexadecimal.
-pub fn env_hash(hash: u64) -> String {
-    format!("{hash:016x}")
-}
-
-/// The file in the build directory which the graph depends on, which is touched to regenerate it, such as when a path
-/// the configuration found was missing is created.
-pub const RECONFIGURE_STAMP: &str = "reconfigure.stamp";
-
-/// Create the stamp which regenerates the graph when it is touched, unless it exists, as it must not be newer than the
-/// graph.
-fn write_reconfigure_stamp(build_dir: &Path) -> Result<(), Error> {
-    let path = build_dir.join(RECONFIGURE_STAMP);
-    match std::fs::File::create_new(&path) {
-        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(Error::Create(path, error)),
-        _ => Ok(()),
-    }
-}
-
-/// Write the depfile of the graph, `<graph>.d`, which is regenerated when a file the configuration read changes, or
-/// the reconfigure stamp is touched.
-///
-/// For rig, it also lists the paths the configuration found missing, and the environment variables it read, as
-/// `# env-dep:` lines, as rustc writes them, which rig takes as inputs, so that the graph is regenerated once one is
-/// created or one changes, without the stamp. ninja takes neither, so the stamp is touched for it instead.
-fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path, engine: Engine) -> Result<(), Error> {
-    let graph = engine.file();
+/// Write the depfile of the graph, `graph.d`, which is regenerated when a file the configuration read changes, or one
+/// it found missing is created, or an environment variable it read changes, which it lists as `# env-dep:` lines, as
+/// rustc writes them, which rig takes as inputs of the edge which generates the graph.
+fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(), Error> {
+    let graph = rig_graph::FILE;
     let path = build_dir.join(format!("{graph}.d"));
-    // a line break cannot be escaped in a depfile, as in `build.ninja`
+    // a line break cannot be escaped in a depfile
     let files = project.files.iter().map(|file| &file.path);
     if let Some(broken) = files.chain(&project.dependencies).find(|path| has_line_break(&path.to_string_lossy())) {
         return Err(Error::LineBreak(path, broken.display().to_string()));
@@ -331,8 +298,7 @@ fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path, engine: Engin
         Ok(file) => file,
         Err(error) => return Err(Error::Create(path, error)),
     };
-    let rig = engine == Engine::Rig;
-    if let Err(error) = write_dependencies(&mut file, graph, project, at, &build_dir.join(RECONFIGURE_STAMP), rig) {
+    if let Err(error) = write_dependencies(&mut file, graph, project, at) {
         return Err(Error::Write(path, error));
     }
     Ok(())
@@ -343,29 +309,23 @@ fn write_dependencies(
     graph: &str,
     project: &Project,
     at: &Rebase,
-    stamp: &Path,
-    rig: bool,
 ) -> Result<(), std::io::Error> {
     write!(w, "{graph}:")?;
-    let stamp = stamp.to_path_buf();
     // builtin files change with jig, which the configuration already depends on, and a file processed again is listed
     // once
     let mut seen = std::collections::HashSet::new();
     let files = project.files.iter().filter(|file| !file.builtin && seen.insert(&file.path)).map(|file| &file.path);
     // as are the files generated by `file` statements, so that one which is removed is written again
     let generated = project.generated.iter().map(|file| &file.output);
-    let missing = project.missing.iter().filter(|_| rig);
-    let paths = files.chain(&project.dependencies).chain(generated).chain(missing).chain([&stamp]);
+    let paths = files.chain(&project.dependencies).chain(generated).chain(&project.missing);
     for path in at.paths(paths) {
         // escape the characters which are special in a depfile
         let path = path.display().to_string().replace(' ', "\\ ").replace('#', "\\#").replace('$', "$$");
         write!(w, " {path}")?;
     }
     writeln!(w)?;
-    if rig {
-        for (name, _) in &project.env {
-            writeln!(w, "# env-dep:{name}")?;
-        }
+    for (name, _) in &project.env {
+        writeln!(w, "# env-dep:{name}")?;
     }
     Ok(())
 }
@@ -416,8 +376,8 @@ fn write_graph(
     input: &Path,
     at: &Rebase,
 ) -> Result<(), Error> {
-    // the file which the graph is written to, for the engine which builds it, which its generator edge regenerates
-    let generated = Engine::from_env()?.file();
+    // the file which the graph is written to, which its generator edge regenerates
+    let generated = rig_graph::FILE;
     // the specifications of custom targets are found in the build directory, and rebased
     let build_dir = &at.build_dir;
     // whether rig stamps the files of an edge by their contents
@@ -926,26 +886,6 @@ fn write_rust_project(sysroot: &str, units: &[Unit]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Replace `build.ninja` in the previous build directory, from the database, if `build-dir` has changed, with a stub
-/// which ninja finds is up to date, so that ninja running there, which is regenerating it, stops.
-///
-/// `jig` then finds the new build directory from the database. The rest of the previous build directory is kept.
-fn retire_build_dir(build_dir: &Path) -> Result<(), Error> {
-    let Ok(bytes) = std::fs::read(database::PATH) else {
-        return Ok(());
-    };
-    let Ok(previous) = database::read(&bytes) else {
-        return Ok(());
-    };
-    let previous = Path::new(previous.build_dir);
-    // the paths are relative to the project root, which is the working directory, unless they are absolute
-    let absolute = |path: &Path| normalize(&std::path::absolute(path).unwrap_or_else(|_| path.into()));
-    if absolute(previous) == absolute(build_dir) {
-        return Ok(());
-    }
-    ninja::retire(previous, build_dir)
-}
-
 /// The command of a test, which the database borrows.
 struct TestCommand<'a> {
     name: &'a str,
@@ -973,9 +913,8 @@ fn write_database(
     let token_file = settings.token_file.as_ref().map(|path| path.display().to_string()).unwrap_or_default();
     let proxy_build = project.deferred_severity("proxy-build", Severity::Warning).to_string();
     let other_jig = project.deferred_severity("other-jig", Severity::Warning).to_string();
-    // the `jig` which regenerates `build.ninja`, as its configure rule runs it
+    // the `jig` which regenerates the graph, as its generator edge runs it
     let jig = std::env::current_exe().map(|jig| jig.display().to_string()).unwrap_or_default();
-    let missing: Vec<_> = project.missing.iter().map(|path| path.display().to_string()).collect();
     // the database borrows the paths and commands
     let diagnostics: Vec<_> = units.iter().map(|unit| unit.diagnostics().display().to_string()).collect();
     let lint_diagnostics: Vec<_> = units.iter().map(|unit| unit.lint_diagnostics().display().to_string()).collect();
@@ -1011,9 +950,7 @@ fn write_database(
         programs.push((name, path, target, runner, unit.default));
     }
 
-    let missing = missing.iter().map(String::as_str).collect();
     let test_tags = project.test_tags();
-    let env_hashes: Vec<String> = project.env.iter().map(|(_, hash)| hash.map(env_hash).unwrap_or_default()).collect();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets = installed.iter().map(|file| crate::graph::path_string(&at.path(&file.path)));
     let install_targets: Vec<_> = install_targets.collect();
@@ -1021,9 +958,6 @@ fn write_database(
         input: &input,
         toolchain: project.toolchain.as_deref().unwrap_or_default(),
         build_dir: &build_dir,
-        missing,
-        env: project.env.iter().map(|(name, _)| name.as_str()).collect(),
-        env_hashes: env_hashes.iter().map(String::as_str).collect(),
         test_tags: test_tags.iter().map(String::as_str).collect(),
         install_prefix: &install_prefix,
         proxy_build: &proxy_build,

@@ -35,7 +35,7 @@
 use std::fmt::Write as _;
 
 use crate::Error;
-use crate::configured::{Configured, Engine, Output};
+use crate::configured::{Configured, Output};
 use crate::rust_analyzer::string;
 
 /// Show rig's graph of the project which contains the working directory, once it is up to date, or only the edges
@@ -52,9 +52,6 @@ pub fn show(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), Error>
         }
     }
     let project = Configured::find(Output::Stderr)?;
-    if project.engine != Engine::Rig {
-        return Err(Error::GraphOfNinja);
-    }
     let graph = rig::Graph::load(&project.build_dir.join(crate::rig_graph::FILE)).map_err(Error::Rig)?;
     let mut ids = Vec::new();
     for output in &outputs {

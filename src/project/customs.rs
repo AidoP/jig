@@ -440,7 +440,7 @@ impl Project {
         }
         Some(normalize(&base.join(path)))
     }
-    /// Report a path which ninja cannot write, as it has a newline, returning [`None`] if it is one.
+    /// Report a path which a depfile cannot have, as it has a newline, returning [`None`] if it is one.
     pub(super) fn check_path(&mut self, path: &Path, span: Span) -> Option<()> {
         if !has_line_break(&path.to_string_lossy()) {
             return Some(());
@@ -498,15 +498,6 @@ impl Project {
                 program = reference.paths.first().cloned();
             }
             for argument in operand.data.spread() {
-                // an argument is written to `build.ninja` on a single line
-                if !self.line_breaks && has_line_break(&argument) {
-                    self.diagnostics.push(Diagnostic {
-                        span: Some(operand.span),
-                        message: Message::NewlineInArgument,
-                        severity: Severity::Error,
-                    });
-                    return None;
-                }
                 arguments.push(argument);
             }
         }

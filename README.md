@@ -33,16 +33,14 @@ target x86_64-pc-windows-gnu
 
 Then `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu` runs their tests for Windows, but for those whose
 commands are shell lines, and `jig lint` lints them for Windows too. On Windows, rig runs each command as a program,
-without a shell, as each which jig writes is, so `JIG_ENGINE=ninja`, which runs them with one, isn't supported there.
+without a shell, as each which jig writes is.
 
 ## Building
 
-Building `jig` needs Rust 1.97 or later. ninja 1.11 or later is optional, for building with ninja rather than rig, and
-for the tests which compare the two, which are skipped without it. The tests need a nightly toolchain as well, for those
-of custom targets.
+Building `jig` needs Rust 1.97 or later. The tests need a nightly toolchain as well, for those of custom targets.
 
 The `perf` test times `jig` on large generated projects, failing if one takes far longer than expected, or grows much
-faster than its size where it should be linear, and compares rig with ninja. It is slow, so it is tagged `perf`, and
+faster than its size where it should be linear. It is slow, so it is tagged `perf`, and
 `jig test` leaves it out unless it is named, or run with `jig test --tag perf` or `jig test --all`, as CI does. Its
 time budgets are multiplied by the `JIG_PERF_SCALE` environment variable, such as `JIG_PERF_SCALE=4 jig test perf` on
 a slow machine.
@@ -54,12 +52,10 @@ running the test harness with `--nocapture`, as in `build/<target>/test/jig benc
 `rig/` is rig, the build engine which builds projects, as `docs/build-engine.md` plans. It is a crate which `jig`
 uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate` writes rig's
 graph to `graph` in the build directory, and rig builds the project, keeping the state of the build in `.rig` in the
-build directory. With `JIG_ENGINE=ninja`, `jig generate` writes `build.ninja` instead, from the same description, and
-ninja builds the project, which it can also do on its own in the build directory. Only the file of the engine which
-builds the project is written, and building with the other engine generates its file first.
+build directory.
 
 The build system needs to be bootstrapped, with `bootstrap.sh`, which builds `jig` with rustc alone, and configures the
-project for the engine `JIG_ENGINE` chooses.
+project.
 
 ```
 sh bootstrap.sh
@@ -81,7 +77,7 @@ tested with `jig test`.
 ./build/bootstrap/jig test
 ```
 
-`jig generate` evaluates `Jig`, writes rig's `graph`, or `build.ninja`, to the build directory and records the build
+`jig generate` evaluates `Jig`, writes rig's `graph` to the build directory and records the build
 directory in `.jig`, at the project root. `jig build`, `jig check`, `jig test`, `jig run`, `jig lint` and `jig install`
 find `.jig` in the working directory or its parents, so they can be run from anywhere in the project. They configure the
 project first if it is not, from the `Jig` in the closest of those directories with one, or again from what it was
@@ -89,25 +85,24 @@ configured with if its build directory has been removed or `.jig` is from anothe
 targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test`,
 `test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom commands
 with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the checks,
-which are for rust-analyzer, nor the lints. With rig, it takes a subset of ninja's options before them:
-`-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would run, `-v` to show commands rather
-than descriptions, and `--quiet`. With ninja, every argument is passed to ninja.
-rustc and clippy are run in colour, as their output is captured, and with rig, as with ninja, the colour is left out
-where the build's output is not a terminal, so that what is built does not depend on where its output goes. `jig
---color <when>`, before the command, chooses otherwise, as `auto`, `always` or `never`, for the build with rig, `jig
-lint` and jig's own diagnostics, such as `jig --color=always build | less -R`. ninja chooses for itself.
-With colour, where the build's output is a terminal, rig shows the build in place, as ninja does on a smart terminal:
+which are for rust-analyzer, nor the lints. It takes options before them: `-j <jobs>`, `-k <failures>`, `-n` for a
+dry run, which shows why each edge would run, `-v` to show commands rather than descriptions, and `--quiet`.
+rustc and clippy are run in colour, as their output is captured, and the colour is left out where the build's output
+is not a terminal, so that what is built does not depend on where its output goes. `jig --color <when>`, before the
+command, chooses otherwise, as `auto`, `always` or `never`, for the build, `jig lint` and jig's own diagnostics, such as
+`jig --color=always build | less -R`.
+With colour, where the build's output is a terminal, rig shows the build in place:
 a line for each of the commands which run at once, by the order it started in, with how long it has run, such as
 `[ 2/15] RUSTC libexample.rlib (3m)`, or `[  /15] -` once its command has finished and no other has started in its
 place. What has finished is not kept, but what it printed is, above the lines, and once the build is done, the lines
 are replaced by a summary, such as `[15/15] completed in 3m 14s`, or `[12/15] stopped after 2.0s` if it stopped first.
 `jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
-program and running tests took, each in total, and with rig, the ten commands of the build which took longest, from
+program and running tests took, each in total, and the ten commands of the build which took longest, from
 when each started until it finished, such as `jig --timings test`.
 The graph regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
 the project, so running another one reports the `other-jig` warning, which names both, until `jig generate` configures
 the project with the one which is running. Its severity is that of `diagnostic/other-jig`
-when it was configured, where `'error'` stops the command before running ninja.
+when it was configured, where `'error'` stops the command before building.
 
 `jig run [<name>] [--] [<argument> ...]` builds a binary crate and runs it with the arguments, in the working
 directory, by the `runner` of its target if it has one, which it is given to before the arguments, and exits as it
@@ -132,8 +127,8 @@ fails if a lint is an error, such as one which is denied, and with `-D` or `--de
 which is found in what was saved, so the lints are not run again, as `jig lint -D` is in CI.
 
 A rustup toolchain is selected with `+<toolchain>` before the command, as with cargo, such as `jig +nightly build`. The
-project is configured with it, so that rustc, the custom commands, the tests and `run` use it, including when ninja is
-run directly, until the project is configured with another. `jig +<toolchain> generate` configures it with the
+project is configured with it, so that rustc, the custom commands, the tests and `run` use it, until the project is
+configured with another. `jig +<toolchain> generate` configures it with the
 toolchain, and `jig generate` without one leaves the toolchain to rustup, while the other commands configure it again
 if they are given a different toolchain. Without rustup, a toolchain cannot be selected.
 
@@ -141,7 +136,7 @@ if they are given a different toolchain. Without rustup, a toolchain cannot be s
 ./build/bootstrap/jig +nightly build
 ```
 
-With rig, the results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from it
+The results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from it
 rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or on Windows,
 `%LOCALAPPDATA%\jig\cache`, or `~/.cache/jig`, by default, and `'off'` turns it off, usually set in the user's
 configuration. The `JIG_CACHE` environment variable overrides it, relative to the working directory, while a `JIG_CACHE`
@@ -153,7 +148,7 @@ each crate's sources, the crates it uses and the variables it read, and by the i
 toolchain is updated in place. Turning the cache on or off configures the project again too. The cache is shared between
 checkouts of a project in different directories, as what rustc is given and writes does not depend on where the project
 is. A crate or command which is cached runs in a hermetic environment, inheriting only the variables it passes on, with
-`pass-env`, and those which locate tools. The cache has no effect with ninja.
+`pass-env`, and those which locate tools.
 
 `jig cache stats` shows where the cache is and what it holds, `jig cache gc [--max-size <size>]` removes what was used
 longest ago until it is no larger than a size, such as `512M` or `10G`, and `jig cache clear` removes everything in it.
@@ -276,8 +271,8 @@ set cache/size '20G'
 set cache/push true
 ```
 
-`jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, which ninja
-builds as `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
+`jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, as the
+target `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
 directory, and is the `install-prefix` property, relative to the project root, without one.
 
@@ -290,7 +285,7 @@ directory, with what it wraps after its end. A wrapper which is running when it 
 does not remove a program which is running, to `<wrapper>.old0` and so on, which the next reinstall removes.
 
 `jig build --proxy` brings the configuration up to date, finds the program installed at the wrapper in the prefix, and
-builds it quietly, which with ninja needs ninja 1.11 or later. If the configuration or the program is out of date,
+builds it quietly. If the configuration or the program is out of date,
 it first reports the `proxy-build` warning, before any diagnostics from configuring. Its severity is that of
 `diagnostic/proxy-build` at the end of the configuration when it was last generated, where `'error'` fails without
 configuring, building or running the program, and `'allow'` hides it. Then, if the wrapper would be
@@ -303,18 +298,17 @@ reinstalled and run again in place of the program. A wrapper whose program the p
 ./build/bootstrap/jig install --proxy ~/.local
 ```
 
-Ninja runs in the build directory, so every path in `build.ninja` is relative to it, with those outside it leading out
+rig builds in the build directory, so every path of its graph is relative to it, with those outside it leading out
 of it with `..`, from where it is once symbolic links are followed. rustc, rustdoc and clippy run there too, and are
 given those paths, but the paths they write other than in dep-info, as in diagnostics, panics, `file!()` and debug
 info, are remapped to be relative to the project root, as `src/main.rs`, or `build/gen.rs` for a crate generated in the
 build directory, with the project root as the working directory of debug info, so that what they write does not depend
 on where the project is, and a build in another directory is the same. Custom commands, tests and `run` run from the
 project root, so their paths are relative to it as usual.
-A path, such as an input, an output, a crate or a linker script, cannot contain a line break, as neither a depfile nor
-`build.ninja` can write one, which is the error `newline-in-path`. rig runs a command with its arguments as they are,
-so an argument, such as an `env` value or a codegen option, can contain one, while with ninja, which writes each
-command on a line, it cannot, which is the error `newline-in-argument`. A path cannot be empty either, as it would be
-the directory it is relative to, which is the error `empty-path`.
+A path, such as an input, an output, a crate or a linker script, cannot contain a line break, as a depfile cannot have
+one, which is the error `newline-in-path`. rig runs a command with its arguments as they are, so an argument, such as an
+`env` value or a codegen option, can contain one. A path cannot be empty either, as it would be the directory it is
+relative to, which is the error `empty-path`.
 
 `jig graph` shows rig's graph of the project, once it is up to date, for reading what it builds and how, as each of its
 commands, or with outputs, only those which produce them. Each is a statement as ninja writes them, with its outputs,
@@ -362,7 +356,7 @@ stderr apart, for tools. It is a stable interface: a later jig may add keys, but
   the first `log` with the identifier. With `location <name>`, it is shown at another statement, rather than where it
   was logged: the one which gave a property its value, or declared it, or which declared a crate, custom command,
   target or test, whose name may be computed, such as `location {target}` in a `@for`
-- `custom <name>`: a custom build command, which ninja runs when its inputs change. Its outputs can be built with
+- `custom <name>`: a custom build command, which rig runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `file <name>`: a file generated from a template string, which is written when the project is configured. See below
 - `target <name>`: a custom target, which crates can be compiled for. See below
@@ -620,7 +614,7 @@ log error 'Rust 1.95 or later is needed'
   the expression. The build is reconfigured when the file changes, or is created if it was missing
 - `exists(path)`: whether a file or directory exists, as a `bool`, where the path is relative to the file containing
   the expression. The build is reconfigured when an existing path changes, or when a missing one is created, which
-  `jig build`, `jig check` and `jig test` check before running ninja
+  `jig build`, `jig check` and `jig test` check before building
 - `try(expression, default)`: the value of the expression, or the default if evaluating it fails. Its errors are reported
   as warnings instead, except that an impure call is still an error, as evaluating it did not fail
 
@@ -702,7 +696,7 @@ A `crate` statement may be followed by indented attributes:
   repeated, and is also given to rust-analyzer. The crate is built again when its `cfg` or `env` change, as they are
   part of its command
 - `pass-env <names>`: the environment variables rustc inherits for the crate, which `env!` reads, as a name or a list
-  of them, such as `pass-env 'GIT_HASH'`. With rig, the crate is built again when one of their values changes, as
+  of them, such as `pass-env 'GIT_HASH'`. The crate is built again when one of their values changes, as
   it is when a variable `env!` reads changes, and a crate which is cached, when the cache is on, inherits only
   these and those which locate tools: `PATH`, `HOME`, `TMPDIR`, `RUSTUP_HOME` and `CARGO_HOME`. So a cached crate
   whose `env!` reads any other variable from the environment fails to compile, rather than being cached without it
@@ -842,10 +836,9 @@ A `custom` statement is followed by indented attributes:
   project is configured again when it changes, while one which is a path is an input. A command which is cached is
   stamped by the contents of its files, whatever its `change-detection`. A test cannot be cached
 - `pass-env <names>`: the environment variables the command reads from those it inherits, as a name or a list of
-  them, such as `pass-env ['CC', 'CFLAGS']`. With rig, the command runs again when one of their values changes, and
-  a command which is cached inherits only these and those which locate tools, as a cached crate does, so that every
-  variable which can change its outputs is part of the key it is cached by. ninja passes on every variable, and tracks
-  none of them
+  them, such as `pass-env ['CC', 'CFLAGS']`. The command runs again when one of their values changes, and a command
+  which is cached inherits only these and those which locate tools, as a cached crate does, so that every variable
+  which can change its outputs is part of the key it is cached by
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output
@@ -859,7 +852,7 @@ custom device-tree
 ```
 
 A `file` statement is followed by indented attributes, which give the contents of the file, as it is written when the
-project is configured, rather than by ninja. It is only written when its contents change, so that what uses it is only
+project is configured, rather than by rig. It is only written when its contents change, so that what uses it is only
 built again then, and is written again if it is removed. Like a custom command, it is a property with its name, whose
 value is a reference to it, so it can be an input, or a `link-script`. Its output cannot overlap another output.
 
@@ -944,8 +937,7 @@ target bluemetal-riscv64
 - `build-dir`: the directory of what is built, relative to the project root, `build` by default. It is read-only
   once it is used, such as by a crate or the outputs of a custom command, so it is set before them. When it changes,
   `jig build`, `jig check`, `jig test` and `jig install` regenerate the graph in the new build directory, and build
-  there. With ninja, `build.ninja` in the previous build directory is replaced with a stub, which ninja finds is up to
-  date, so that ninja, which is regenerating it there, stops. The rest of the previous build directory is kept
+  there. The previous build directory is kept
 - `target`: the target triple for crates without a `target` attribute, initially the host
 - `install-prefix`: the directory `jig install` installs in when it is not given one, relative to the project root,
   `/usr/local` by default, or on Windows, where a user's own programs go, `%LOCALAPPDATA%\Programs`, which needs no
@@ -956,8 +948,7 @@ target bluemetal-riscv64
   size, or `'hash'`, by a BLAKE3 hash of its contents too. With `'hash'`, a file which is written again unchanged, or
   changed and changed back, rebuilds nothing, and what depends on an output which is written unchanged is not rebuilt.
   A file is only read again when its time or size has changed, or when it is a source which was modified within a tick
-  of the file system's clock of being hashed, as it may have changed again without its time showing it. ninja always
-  uses timestamps
+  of the file system's clock of being hashed, as it may have changed again without its time showing it
 - `cache/dir`, `cache/size`, `cache/remote` and `cache/push`: rig's cache, as described for it, usually set in the user's
   configuration: its directory, `$XDG_CACHE_HOME/jig`, `%LOCALAPPDATA%\jig\cache` on Windows, or
   `~/.cache/jig` by default, or `'off'`; the size it is

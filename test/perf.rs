@@ -283,7 +283,7 @@ fn up_to_date_build() {
     let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     project.generate();
     project.time(&["build"]);
-    // with nothing to do, neither the configuration nor ninja's work should take long
+    // with nothing to do, neither the configuration nor rig's work should take long
     let elapsed = project.time(&["build"]);
     println!("up-to-date build: {elapsed:?}");
     assert!(elapsed <= budget(1000), "an up-to-date build took {elapsed:?}");
@@ -306,10 +306,10 @@ fn copies(n: usize) -> Vec<(String, String)> {
     files
 }
 
-/// The times an engine takes to build a project from nothing, and when it is up to date, each the shortest of
-/// several runs, where the first is only measured with `full`.
+/// The times rig takes to build a project from nothing, and when it is up to date, each the shortest of several runs,
+/// where the first is only measured with `full`.
 #[track_caller]
-fn build_times(project: &Project, engine: &str, full: bool) -> (Duration, Duration) {
+fn build_times(project: &Project, full: bool) -> (Duration, Duration) {
     project.generate();
     let build = |clean: bool| {
         if clean {
@@ -319,12 +319,11 @@ fn build_times(project: &Project, engine: &str, full: bool) -> (Duration, Durati
         let output = Command::new(jig_path())
             .arg("build")
             .env("JIG_CACHE", "off").env("JIG_CONFIG", "off")
-            .env("JIG_ENGINE", engine)
             .current_dir(&project.dir)
             .output()
             .unwrap();
         let elapsed = start.elapsed();
-        assert!(output.status.success(), "{engine} failed:\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "the build failed:\n{}", String::from_utf8_lossy(&output.stderr));
         elapsed
     };
     let full = if full { (0..RUNS).map(|_| build(true)).min().unwrap() } else { build(true) };
@@ -333,43 +332,19 @@ fn build_times(project: &Project, engine: &str, full: bool) -> (Duration, Durati
     (full, up_to_date)
 }
 
-/// The times of each engine to build a project of `n` copies from nothing and when it is up to date, in a project of
-/// its own each, so that neither sees the other's outputs or state.
-fn engine_times(n: usize) -> [(Duration, Duration); 2] {
-    ["ninja", "rig"].map(|engine| {
-        let project = Project::new(&format!("engines-{engine}-{n}"), &copies(n));
-        build_times(&project, engine, true)
-    })
-}
-
-/// How much longer rig may take than ninja, as a ratio, which is far above what it takes, so that noise does not fail
-/// the tests.
-const RIG_RATIO: f64 = 1.3;
-
-/// Whether ninja is installed, which rig is compared with.
-fn has_ninja() -> bool {
-    Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success())
-}
-
 #[test]
-fn rig_builds_as_fast_as_ninja() {
-    if !has_ninja() {
-        println!("ninja is not installed, so rig is not compared with it");
-        return;
-    }
+fn rig_builds_copies() {
+    // a full build of a thousand commands, which is the engine's time rather than the commands', and an up-to-date one,
+    // each measured again before failing, in case another process slowed rig
     let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // a full build and an up-to-date one, measured again before failing, in case another process slowed rig
     let mut failure = String::new();
     for _ in 0..2 {
-        let [(ninja_full, ninja_noop), (rig_full, rig_noop)] = engine_times(1000);
-        println!("1000 copies: full build ninja {ninja_full:?}, rig {rig_full:?}");
-        println!("1000 copies: up to date ninja {ninja_noop:?}, rig {rig_noop:?}");
-        let full = rig_full.as_secs_f64() / ninja_full.as_secs_f64();
-        let noop = rig_noop.saturating_sub(Duration::from_millis(10)).as_secs_f64() / ninja_noop.as_secs_f64();
-        failure = if full > RIG_RATIO {
-            format!("a full build took rig {rig_full:?}, {full:.2} times ninja's {ninja_full:?}")
-        } else if noop > RIG_RATIO {
-            format!("an up-to-date build took rig {rig_noop:?}, more than {RIG_RATIO} times ninja's {ninja_noop:?}")
+        let (full, up_to_date) = build_times(&Project::new("rig-copies", &copies(1000)), true);
+        println!("1000 copies: full build {full:?}, up to date {up_to_date:?}");
+        failure = if full > budget(FULL_BUDGET) {
+            format!("a full build of 1000 copies took {full:?}")
+        } else if up_to_date > budget(UP_TO_DATE_BUDGET) {
+            format!("an up-to-date build of 1000 copies took {up_to_date:?}")
         } else {
             return;
         };
@@ -377,11 +352,17 @@ fn rig_builds_as_fast_as_ninja() {
     panic!("{failure}");
 }
 
+/// The budgets of a full build of 1000 copies, and an up-to-date one, in milliseconds, before they are scaled: about
+/// three and ten times what each took on four cores, 0.45 s and 8 ms, as they were measured, so that they catch a
+/// pathological slowdown rather than noise.
+const FULL_BUDGET: u64 = 1500;
+const UP_TO_DATE_BUDGET: u64 = 100;
+
 #[test]
 fn rig_up_to_date_scales() {
     // an up-to-date build stats each file, and plans each edge, once
     let _timing = TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let time = |n: usize| build_times(&Project::new(&format!("rig-scales-{n}"), &copies(n)), "rig", false).1;
+    let time = |n: usize| build_times(&Project::new(&format!("rig-scales-{n}"), &copies(n)), false).1;
     let mut ratio = 0.0;
     for _ in 0..2 {
         let (small, large) = (time(1000), time(4000));

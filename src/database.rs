@@ -5,9 +5,8 @@
 //! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
 //! When read, its contents borrow from its bytes.
 //!
-//! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the missing
-//! paths, the environment variables, as a list of their names followed by a list of their hashes, the tags of the
-//! tests which are run by default, the install prefix,
+//! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the tags of
+//! the tests which are run by default, the install prefix,
 //! the severities of `proxy-build` and `other-jig`, the `jig` which configured it, then how rig caches: the directory of
 //! the cache, or empty without one, the size it is collected down to as a decimal string, the remote cache, or empty
 //! without one, whether it is pushed to, and the file of the token for it, or empty without one, followed by each
@@ -24,7 +23,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 26;
+const VERSION: u32 = 27;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -32,16 +31,8 @@ pub struct Database<'a> {
     pub input: &'a str,
     /// The rustup toolchain it is configured with, given with `+<toolchain>`, or empty if none was given.
     pub toolchain: &'a str,
-    /// The build directory, where ninja runs, relative to the project root.
+    /// The build directory, where rig builds, relative to the project root.
     pub build_dir: &'a str,
-    /// The paths which the configuration found were missing, relative to the project root, which it is generated again
-    /// once one of them exists.
-    pub missing: Vec<&'a str>,
-    /// The environment variables the configuration read, by name, which it is generated again once one of them
-    /// changes.
-    pub env: Vec<&'a str>,
-    /// The hash of the value of each of `env`, in hexadecimal, or empty if it was not set.
-    pub env_hashes: Vec<&'a str>,
     /// The tags of the tests which `jig test` runs without names or tags, beside those without tags.
     pub test_tags: Vec<&'a str>,
     /// The directory `jig install` installs in by default, relative to the project root unless it is absolute.
@@ -49,7 +40,7 @@ pub struct Database<'a> {
     /// The severity of the `proxy-build` diagnostic, as the value of its property, which `jig build --proxy` reports.
     pub proxy_build: &'a str,
     /// The severity of the `other-jig` diagnostic, which is reported when a `jig` other than the one which configured
-    /// the project, and which regenerates `build.ninja`, is run.
+    /// the project, and which regenerates its graph, is run.
     pub other_jig: &'a str,
     /// The `jig` which configured the project.
     pub jig: &'a str,
@@ -117,7 +108,7 @@ pub struct Test<'a> {
 /// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
 #[derive(Debug, PartialEq)]
 pub struct Lint<'a> {
-    /// The name of the crate, with its target if it is not the host target, which its ninja target is `lint/<name>`.
+    /// The name of the crate, with its target if it is not the host target, which its target is `lint/<name>`.
     pub name: &'a str,
     /// The file of the diagnostics saved by the lint, relative to the project root.
     pub diagnostics: &'a str,
@@ -130,7 +121,7 @@ pub struct Program<'a> {
     pub name: &'a str,
     /// The binary, relative to the project root.
     pub path: &'a str,
-    /// The ninja target which builds it, relative to the build directory.
+    /// The target which builds it, relative to the build directory.
     pub target: &'a str,
     /// The runner of its target, which it is run by, as its program and first arguments, or empty to run it directly.
     pub runner: Vec<&'a str>,
@@ -143,7 +134,7 @@ pub struct Program<'a> {
 pub struct Install<'a> {
     /// The file, relative to the project root.
     pub path: &'a str,
-    /// The ninja target which builds the file, relative to the build directory.
+    /// The target which builds the file, relative to the build directory.
     pub target: &'a str,
     /// The directory it is installed in, relative to the prefix unless it is absolute.
     pub dir: &'a str,
@@ -159,9 +150,6 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.input)?;
     write_str(w, database.toolchain)?;
     write_str(w, database.build_dir)?;
-    write_strs(w, &database.missing)?;
-    write_strs(w, &database.env)?;
-    write_strs(w, &database.env_hashes)?;
     write_strs(w, &database.test_tags)?;
     write_str(w, database.install_prefix)?;
     write_str(w, database.proxy_build)?;
@@ -228,9 +216,6 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         input: r.str()?,
         toolchain: r.str()?,
         build_dir: r.str()?,
-        missing: r.strs()?,
-        env: r.strs()?,
-        env_hashes: r.strs()?,
         test_tags: r.strs()?,
         install_prefix: r.str()?,
         proxy_build: r.str()?,
@@ -357,9 +342,6 @@ mod tests {
             build_dir: "build",
             input: "Jig",
             toolchain: "nightly",
-            missing: vec!["Debug"],
-            env: vec!["CC", "UNSET"],
-            env_hashes: vec!["00000000000000ff", ""],
             test_tags: vec!["slow"],
             install_prefix: "/usr/local",
             proxy_build: "warning",
