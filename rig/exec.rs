@@ -2697,13 +2697,11 @@ mod tests {
     }
 
     /// A graph of two cached edges which each discover `extra.h`, and print, of one which reads `hidden`, which it
-    /// does not declare or discover, and of an edge which is not cached, which holds a job for a second, longer than
-    /// `SLOW`, so that the others, which wait for it, are sent to a worker, wherever the test helper is slow to start, as
-    /// on Windows on Arm.
+    /// does not declare or discover, and of the slow edge, which is not cached.
     fn compiled() -> Graph {
         let cc = "cat $in extra.h > $out && echo $out: $in extra.h > $out.d && echo compiled $out";
         graph()
-            .rule("slow", &[("command", "sleep 1 && touch $out")])
+            .rule("slow", &[("command", SLOW)])
             .edge("slow", &["slow"], &[])
             .cached("toolchain")
             .rule("cc", &[("command", cc), ("depfile", "$out.d")])
@@ -2775,8 +2773,14 @@ mod tests {
     }
 
     /// The rule of an edge which is not cached, and takes long enough that it is the first to run, by how long it took
-    /// when it last ran, and holds the one job a build has, so that the others run on a worker, if they can.
-    const SLOW: &str = "sleep 0.3 && touch $out";
+    /// when it last ran, and holds the one job a build has, so that the others run on a worker, if they can: a second,
+    /// which is clearly longer than sending one there takes, wherever the test helper is slow to start, as under Wine,
+    /// or on Windows on Arm.
+    const SLOW: &str = "sleep 1 && touch $out";
+
+    /// The rule of the slow edge of [`copied`], which holds the one job for 0.3 s, which the times of its tests' links,
+    /// workers and copies are chosen against.
+    const BRIEF: &str = "sleep 0.3 && touch $out";
 
     /// Remove outputs, so that their edges run again.
     fn remove(build: &Build, outputs: &[&str]) {
@@ -2836,11 +2840,11 @@ mod tests {
         assert!(sent(b"p\n") && !sent(b"r\n") && !sent(b"g\n"));
     }
 
-    /// A graph of the slow edge, and of two cached edges which copy their inputs, once they have slept for as many
-    /// seconds as their inputs give.
+    /// A graph of the slow edge, by [`BRIEF`], and of two cached edges which copy their inputs, once they have slept
+    /// for as many seconds as their inputs give.
     fn copied() -> Graph {
         graph()
-            .rule("slow", &[("command", SLOW)])
+            .rule("slow", &[("command", BRIEF)])
             .edge("slow", &["slow"], &[])
             .cached("toolchain")
             .rule("cp", &[("command", "sleep-for $in && cp $in $out")])
