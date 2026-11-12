@@ -3697,7 +3697,8 @@ fn regenerates_itself() {
     if !cfg!(windows) {
         assert!(line.ends_with(&format!(" {}", rebased(&project, &configure_path()))), "{line}");
     }
-    assert_statement(statement, "", &format!(" && {} generate Jig ", slashed_words(&configure_path().display().to_string())));
+    let configure = slashed_words(&configure_path().display().to_string());
+    assert_statement(statement, "", &format!(" && {configure} generate Jig "));
 }
 
 #[test]
