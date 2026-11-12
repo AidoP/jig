@@ -123,9 +123,9 @@ fn rebased(project: &Project, path: &Path) -> String {
 /// shows it.
 #[track_caller]
 fn statement<'a>(text: &'a str, output: &str) -> &'a str {
-    // a library has its metadata as an implicit output, after `|`
+    // a library has its metadata as an output after it, and a check its diagnostics
     let found = |prefix: String| text.find(&prefix);
-    let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} |"))) else {
+    let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} "))) else {
         panic!("no statement for {output:?}:\n{text}");
     };
     let rest = &text[start..];
@@ -2387,6 +2387,36 @@ fn rig_rebuilds_when_a_crate_variable_changes() {
 }
 
 #[test]
+fn removed_crates_are_not_needed() {
+    // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
+    // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs
+    let project = Project::new("removed-crates", &[
+        ("Jig", "crate util 'util.rs'\ncrate app 'app.rs'\n    crate-type 'bin'\n    use util\n"),
+        ("util.rs", "pub fn value() -> u8 { 1 }\n"),
+        ("app.rs", "extern crate util;\nfn main() { print!(\"{}\", util::value()); }\n"),
+    ]);
+    let build = || {
+        let output = jig_command().args(["build"]).env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+    build();
+    let host = project.host();
+    std::fs::write(project.dir.join("Jig"), "crate app 'app.rs'\n    crate-type 'bin'\n").unwrap();
+    std::fs::write(project.dir.join("app.rs"), "fn main() { print!(\"2\"); }\n").unwrap();
+    let outputs = [format!("build/{host}/libutil.rlib"), format!("build/{host}/libutil.rmeta")];
+    for removed in ["util.rs".to_string()].into_iter().chain(outputs) {
+        std::fs::remove_file(project.dir.join(removed)).unwrap();
+    }
+    assert_contains(&build(), &format!(" RUSTC {host}/app{EXE}\n"));
+    let ran = Command::new(project.dir.join(format!("build/{host}/app{EXE}"))).output().unwrap();
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "2");
+    // and is then up to date
+    assert!(!build().contains("RUSTC"));
+}
+
+#[test]
 fn missing_paths_are_not_dependencies() {
     let project = Project::new("missing-dependencies", &[("Jig", "\
 set diagnostic/impure 'allow'
@@ -2725,7 +2755,7 @@ build ../out/copy.txt: command ../sub/in.txt
     command = cd .. && sh -c 'cat \"$1\" > \"$2\"; echo \"a  b\" >> \"$2\"' sh sub/in.txt out/copy.txt");
     // a program which is a path is relative to the file, and a dependency
     assert_contains(output.build("../out/tool.txt"), "\
-build ../out/tool.txt: command | ../sub/tool.sh
+build ../out/tool.txt: command ../sub/tool.sh
     description = CUSTOM tool
     command = cd .. && ./sub/tool.sh out/tool.txt 'a b' 8");
     // a command's outputs can be built by its name
@@ -3416,7 +3446,7 @@ log note clippy/
     // a crate is linted as it is checked, with the levels set where it is declared, where groups are given first
     let app = output.build(&format!("{host}/lint/libapp.rmeta"));
     assert_contains(app, &format!(
-        "build {host}/lint/libapp.rmeta | {host}/lint/app.txt: command ../app.rs | {host}/check/libutil.rmeta\n",
+        "build {host}/lint/libapp.rmeta {host}/lint/app.txt: command ../app.rs | {host}/check/libutil.rmeta\n",
     ));
     assert_contains(app, &format!("\
  --crate-type=bin --crate-name=app --edition=2024 --target={host} -L dependency={host}/check \
@@ -3640,10 +3670,10 @@ custom image
     // everything which is built is in the build directory, with the graph, as the commands run there
     assert!(!project.dir.join("build").exists());
     let graph = &output.graph;
-    assert_contains(graph, &format!("\nbuild {host}/libkernel.rlib | {host}/libkernel.rmeta: command ../kernel.rs\n"));
+    assert_contains(graph, &format!("\nbuild {host}/libkernel.rlib {host}/libkernel.rmeta: command ../kernel.rs\n"));
     assert_contains(graph, &format!("-L dependency={host}"));
     assert_contains(graph, &format!("\nbuild {host}/test/kernel{EXE}: command ../kernel.rs\n"));
-    assert_contains(graph, &format!("\nbuild {host}/check/libkernel.rmeta | {host}/check/kernel.json: command"));
+    assert_contains(graph, &format!("\nbuild {host}/check/libkernel.rmeta {host}/check/kernel.json: command"));
     assert_contains(graph, &format!("\nbuild image: command {host}/libkernel.rlib\n"));
     // with a directory for the temporary files of each edge, as they are named after the crate
     assert_contains(graph, &format!(" --out-dir=tmp/{host}/kernel "));
@@ -3693,7 +3723,7 @@ fn regenerates_itself() {
     let statement = output.build("graph");
     let line = statement.lines().next().unwrap_or_default();
     // relative to the build directory, unless it is on another drive, on Windows
-    assert!(line.starts_with("build graph: command ../Jig | ") && line.ends_with(&format!("/jig{EXE}")), "{line}");
+    assert!(line.starts_with("build graph: command ../Jig ") && line.ends_with(&format!("/jig{EXE}")), "{line}");
     if !cfg!(windows) {
         assert!(line.ends_with(&format!(" {}", rebased(&project, &configure_path()))), "{line}");
     }
@@ -3722,9 +3752,9 @@ fn rebased_paths() {
     };
     jig(&["generate", "Jig"]);
     let graph = jig(&["graph"]);
-    assert!(graph.starts_with(&format!("build graph: command ../Jig | jig{EXE}\n")), "{graph}");
+    assert!(graph.starts_with(&format!("build graph: command ../Jig jig{EXE}\n")), "{graph}");
     assert_contains(&graph, &format!("\nbuild jig{EXE}: command ../app.rs\n"));
-    assert_contains(&graph, &format!("\nbuild {host}/libapp.rlib | {host}/libapp.rmeta: command ../app.rs\n"));
+    assert_contains(&graph, &format!("\nbuild {host}/libapp.rlib {host}/libapp.rmeta: command ../app.rs\n"));
     // rustc writes its working directory as the project root, and the paths of sources relative to it, other than in
     // its dep-info, which rig reads
     assert_contains(&graph, &format!(" --remap-path-prefix={dir}/build=. --remap-path-prefix=..= --target="));
@@ -3794,7 +3824,7 @@ target my-kernel
     assert!(spec.ends_with(",\n  \"disable-redzone\": true,\n  \"os\": \"bluemetal\"\n}\n"), "{spec}");
     // crates for the target use its specification
     assert_statement(output.build("my-kernel/libkernel.rlib"), "\
-build my-kernel/libkernel.rlib | my-kernel/libkernel.rmeta: command ../kernel.rs | targets/my-kernel.json\n", "--crate-type=lib --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
+build my-kernel/libkernel.rlib my-kernel/libkernel.rmeta: command ../kernel.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
 
     // an unchanged specification is not written again, as every crate for the target depends on it
     let modified = std::fs::metadata(project.dir.join("build/targets/my-kernel.json")).unwrap().modified().unwrap();
@@ -4084,23 +4114,23 @@ log note '{my-kernel.link-script} {riscv64gc-unknown-none-elf.link-script} {my-k
     output.stderr("note: kernel/link.x build/generated.x other.x\n");
     // the script is passed to the linker, rather than written to the specification, and what is linked depends on it
     assert_statement(output.build("my-kernel/kernel"), "\
-build my-kernel/kernel: command ../kernel.rs | targets/my-kernel.json ../kernel/link.x\n", "--crate-type=bin --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x ");
+build my-kernel/kernel: command ../kernel.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=bin --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x ");
     let spec = std::fs::read_to_string(project.dir.join("build/targets/my-kernel.json")).unwrap();
     assert!(!spec.contains("link.x"), "{spec}");
     // a library is not linked, but its test harness is
     assert_statement(output.build("my-kernel/libutil.rlib"), "\
-build my-kernel/libutil.rlib | my-kernel/libutil.rmeta: command ../util.rs | targets/my-kernel.json\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
+build my-kernel/libutil.rlib my-kernel/libutil.rmeta: command ../util.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
     assert_statement(output.build("my-kernel/test/util"), "\
-build my-kernel/test/util: command ../util.rs | targets/my-kernel.json ../kernel/link.x\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test ");
+build my-kernel/test/util: command ../util.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test ");
     // nor is a check
     let commands = output.graph.lines().filter(|line| line.starts_with("    command = "));
     assert_eq!(commands.filter(|line| line.contains("-C link-arg=-T../kernel/link.x")).count(), 2, "{}", output.graph);
     // a crate's own replaces its target's
     assert_statement(output.build("my-kernel/other"), "\
-build my-kernel/other: command ../other.rs | targets/my-kernel.json ../other.x\n", "--crate-type=bin --crate-name=other --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x ");
+build my-kernel/other: command ../other.rs targets/my-kernel.json ../other.x\n", "--crate-type=bin --crate-name=other --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x ");
     // a builtin target can have one with `override`, which is built first when it is generated
     assert_statement(output.build("riscv64gc-unknown-none-elf/app"), "\
-build riscv64gc-unknown-none-elf/app: command ../app.rs | generated.x\n", "--crate-type=bin --crate-name=app --edition=2024 --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x ");
+build riscv64gc-unknown-none-elf/app: command ../app.rs generated.x\n", "--crate-type=bin --crate-name=app --edition=2024 --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x ");
 }
 
 #[test]
@@ -4636,7 +4666,7 @@ custom c
     assert_contains(example, &format!("build example: command {host}/tool{EXE}\n"));
     assert_statement(example, "", &format!(" && cat build/{host}/tool{EXE} build/example "));
     let b = output.build("b");
-    assert_contains(b, &format!("build b: command | {host}/tool{EXE}\n"));
+    assert_contains(b, &format!("build b: command {host}/tool{EXE}\n"));
     assert_statement(b, "", &format!("cd .. && ./build/{host}/tool{EXE} build/b "));
     // a path outside the project leads out of the build directory, which on Windows is from the root of its drive
     if !cfg!(windows) {
@@ -5599,7 +5629,7 @@ fn graph_command() {
     let output = project.configure().ok();
     // each edge, as ninja's statements are written, with what it has under it
     assert_contains(&output.graph, "build copy: command ../in.txt\n    description = CUSTOM copy\n    command = cd .. && cp in.txt build/copy");
-    assert_contains(&output.graph, &format!("\nbuild {host}/libutil.rlib | {host}/libutil.rmeta: command ../util.rs\n"));
+    assert_contains(&output.graph, &format!("\nbuild {host}/libutil.rlib {host}/libutil.rmeta: command ../util.rs\n"));
     assert_contains(&output.graph, &format!("\n    early = {host}/libutil.rmeta\n"));
     assert_contains(&output.graph, "\nbuild custom/copy: phony copy\n\n");
     assert_contains(&output.graph, "\ndefault custom/copy\n");
@@ -5616,8 +5646,8 @@ fn graph_command() {
     assert!(ok, "{json}");
     assert_eq!(slashed(&json), "\
 {\"edges\": [
-    {\"outputs\": [\"copy\"], \"implicit-outputs\": [], \"kind\": \"command\", \"inputs\": [\"../in.txt\"], \"implicit\": [], \
-\"order-only\": [], \"description\": \"CUSTOM copy\", \"program\": \"cp\", \"args\": [\"in.txt\", \"build/copy\"], \"dir\": \"..\"}
+    {\"outputs\": [\"copy\"], \"kind\": \"command\", \"inputs\": [\"../in.txt\"], \"dependencies\": [], \"after\": [], \
+\"description\": \"CUSTOM copy\", \"program\": \"cp\", \"args\": [\"in.txt\", \"build/copy\"], \"dir\": \"..\"}
 ], \"defaults\": []}
 ");
     // an output which no edge produces is an error, as is an option it doesn't take

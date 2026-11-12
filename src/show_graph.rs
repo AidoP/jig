@@ -7,7 +7,7 @@
 //! followed by the default targets:
 //!
 //! ```text
-//! build <output> ... [| <implicit output> ...]: command|phony [<input> ...] [| <implicit> ...] [|| <order-only> ...]
+//! build <output> ...: command|phony [<input> ...] [| <dependency> ...] [|| <after> ...]
 //!     <key> = <value>
 //! default <target> ...
 //! ```
@@ -26,10 +26,10 @@
 //! - `generator`, `restat` and `hashed`, each `= true`, if it is.
 //!
 //! The JSON is an object of `edges`, an array of an object for each, and of `defaults`, an array of paths. An edge has
-//! `outputs`, `implicit-outputs`, `kind`, `command` or `phony`, `inputs`, `implicit` and `order-only`, then the keys of
-//! the text, in its order, but for `command`, which it has in parts: `program`, `args`, an array, `env`, an array of
-//! `[name, value]` pairs, `dir` and `stderr`. Those which are lists in the text are arrays, a flag is `true`, and what
-//! an edge does not have is left out.
+//! `outputs`, `kind`, `command` or `phony`, `inputs`, `dependencies` and `after`, then the keys of the text, in its
+//! order, but for `command`, which it has in parts: `program`, `args`, an array, `env`, an array of `[name, value]`
+//! pairs, `dir` and `stderr`. Those which are lists in the text are arrays, a flag is `true`, and what an edge does not
+//! have is left out.
 
 use std::fmt::Write as _;
 
@@ -178,15 +178,12 @@ fn to_text(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
     for &edge in edges {
         let kind = if *edge.kind() == rig::EdgeKind::Alias { "phony" } else { "command" };
         let _ = write!(text, "build{}", paths(edge.outputs()));
-        if !edge.implicit_outputs().is_empty() {
-            let _ = write!(text, " |{}", paths(edge.implicit_outputs()));
-        }
         let _ = write!(text, ": {kind}{}", paths(edge.inputs()));
-        if !edge.implicit().is_empty() {
-            let _ = write!(text, " |{}", paths(edge.implicit()));
+        if !edge.dependencies().is_empty() {
+            let _ = write!(text, " |{}", paths(edge.dependencies()));
         }
-        if !edge.order_only().is_empty() {
-            let _ = write!(text, " ||{}", paths(edge.order_only()));
+        if !edge.after().is_empty() {
+            let _ = write!(text, " ||{}", paths(edge.after()));
         }
         text.push('\n');
         for (key, value) in fields(graph, edge, true) {
@@ -230,11 +227,10 @@ fn to_json(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
         let kind = if *edge.kind() == rig::EdgeKind::Alias { "phony" } else { "command" };
         let mut entry = vec![
             format!("\"outputs\": {}", paths(edge.outputs())),
-            format!("\"implicit-outputs\": {}", paths(edge.implicit_outputs())),
             format!("\"kind\": {}", string(kind)),
             format!("\"inputs\": {}", paths(edge.inputs())),
-            format!("\"implicit\": {}", paths(edge.implicit())),
-            format!("\"order-only\": {}", paths(edge.order_only())),
+            format!("\"dependencies\": {}", paths(edge.dependencies())),
+            format!("\"after\": {}", paths(edge.after())),
         ];
         for (key, value) in fields(graph, edge, false) {
             let value = match value {

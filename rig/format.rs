@@ -10,8 +10,7 @@
 //! path, then its description, its depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console,
 //! its flags, `1` if it is a generator, `2` if it is restat and `4` if it is hashed, then what identifies it in the
 //! cache as `0` if it is not cached, or `1` followed by the string, then the environment variables it passes on, as a
-//! list of strings, then its lists of nodes: outputs, implicit outputs,
-//! inputs, implicit inputs and order-only inputs.
+//! list of strings, then its lists of nodes: outputs, inputs, dependencies and what it is built after.
 
 use std::path::Path;
 
@@ -21,7 +20,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
 /// failing to load its graph.
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -93,7 +92,7 @@ impl Graph {
                 },
             }
             w.nodes(edge.early());
-            for list in [edge.outputs(), edge.implicit_outputs(), edge.inputs(), edge.implicit(), edge.order_only()] {
+            for list in [edge.outputs(), edge.inputs(), edge.dependencies(), edge.after()] {
                 w.nodes(list);
             }
         }
@@ -133,7 +132,7 @@ impl Graph {
         }
         let nodes = graph.nodes();
         // the lists of each edge are read into the same vectors, which the graph copies its nodes from
-        let mut lists: [Vec<NodeId>; 5] = Default::default();
+        let mut lists: [Vec<NodeId>; crate::graph::LISTS] = Default::default();
         for _ in 0..r.u32()? {
             let kind = match r.u32()? {
                 0 => EdgeKind::Alias,
@@ -197,8 +196,8 @@ impl Graph {
                 early,
                 ..Edge::default()
             };
-            let [outputs, implicit_outputs, inputs, implicit, order_only] = &lists;
-            let added = graph.add_edge_with(edge, [outputs, implicit_outputs, inputs, implicit, order_only]);
+            let [outputs, inputs, dependencies, after] = &lists;
+            let added = graph.add_edge_with(edge, [outputs, inputs, dependencies, after]);
             added.map_err(|_| Error::Format("an output is produced by more than one edge"))?;
         }
         let defaults = r.nodes(nodes)?;
@@ -350,6 +349,7 @@ mod tests {
     fn graph() -> Graph {
         let mut graph = Graph::new();
         let (a, b, c, d) = (graph.file("a"), graph.file("b c"), graph.file("c.d"), graph.file("d"));
+        let dependency = graph.file("lib.a");
         graph
             .add_edge(Edge {
                 kind: EdgeKind::Command(Exec {
@@ -358,10 +358,10 @@ mod tests {
                     ..Exec::default()
                 }),
                 description: "CC a".into(),
-                outputs: vec![a],
-                implicit_outputs: vec![c],
+                outputs: vec![a, c],
                 inputs: vec![b],
-                order_only: vec![d],
+                dependencies: vec![dependency],
+                after: vec![d],
                 depfile: Some("a.d".into()),
                 pool: Pool::Console,
                 generator: true,
@@ -376,7 +376,6 @@ mod tests {
                     target: Some("riscv64gc".into()),
                     tags: vec!["fast".into()],
                 },
-                ..Edge::default()
             })
             .unwrap();
         graph.add_alias("all", &[a]).unwrap();

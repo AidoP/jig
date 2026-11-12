@@ -400,8 +400,7 @@ fn write_graph(
     graph.edge(Edge {
         description: describe("CONFIGURE", generated),
         outputs: &[generated],
-        inputs: &[&at.path(input)],
-        implicit: &as_paths(&exe),
+        inputs: &as_paths(&[at.path(input)].into_iter().chain(exe).collect::<Vec<_>>()),
         exec: program(&configure.display().to_string(), args, Some(&at.root), Vec::new()),
         depfile: Some(&depfile_of(generated)),
         console: true,
@@ -438,9 +437,8 @@ fn write_graph(
         graph.edge(Edge {
             description: format!("CUSTOM {}", custom.name),
             outputs: &as_paths(&outputs),
-            inputs: &as_paths(&at.paths(&custom.inputs)),
-            implicit: &as_paths(&at.paths(&custom.program)),
-            order_only: &as_paths(&at.paths(&custom.depends)),
+            inputs: &as_paths(&at.paths(custom.inputs.iter().chain(&custom.program))),
+            after: &as_paths(&at.paths(&custom.depends)),
             exec,
             hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
             cache: custom.cache.as_deref(),
@@ -490,9 +488,7 @@ fn write_graph(
             flags.cfg(&c.cfg);
             flags
         };
-        let deps_of = |externs: &[Extern]| -> Vec<PathBuf> {
-            externs.iter().map(|d| d.path.clone()).chain(spec.iter().cloned()).collect()
-        };
+        let deps_of = |externs: &[Extern]| -> Vec<PathBuf> { externs.iter().map(|d| d.path.clone()).collect() };
         // a procedural macro unwinds, so it links the copies too
         let proc_macro = c.kind == Kind::ProcMacro;
         let externs_built = externs(proc_macro, c.kind == Kind::Lib);
@@ -536,13 +532,13 @@ fn write_graph(
             transitive_libraries(crates, units, index).into_iter().map(path).collect()
         };
         let (libraries, harness_libraries) = (libraries(proc_macro), libraries(true));
-        let link_deps: Vec<_> =
-            deps.iter().copied().chain(as_paths(&libraries)).chain(link_script.as_deref()).collect();
-        let harness_link_deps: Vec<_> = as_paths(&harness_deps)
-            .into_iter()
-            .chain(as_paths(&harness_libraries))
-            .chain(link_script.as_deref())
-            .collect();
+        let link_deps: Vec<_> = deps.iter().copied().chain(as_paths(&libraries)).collect();
+        let harness_link_deps: Vec<_> =
+            as_paths(&harness_deps).into_iter().chain(as_paths(&harness_libraries)).collect();
+        // what rustc reads: the crate's root, which finds its other sources, its target's specification, and its linker
+        // script, where it links
+        let inputs: Vec<&Path> = [input.as_path()].into_iter().chain(as_paths(&spec)).collect();
+        let linked_inputs: Vec<&Path> = inputs.iter().copied().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
         let crate_type = c.kind.crate_type();
         let output = at.path(&c.output());
@@ -565,14 +561,14 @@ fn write_graph(
         }
         let placement = placement(unit, units, project, linked);
         let early: Vec<&Path> = metadata.iter().map(PathBuf::as_path).collect();
+        let outputs: Vec<&Path> = [output.as_path()].into_iter().chain(early.iter().copied()).collect();
         graph.edge(Edge {
             description: describe("RUSTC", &output),
-            outputs: &[&output],
-            implicit_outputs: &early,
+            outputs: &outputs,
             early: &early,
-            inputs: &[&input],
-            implicit: if linked { &link_deps } else { &deps },
-            order_only: &as_paths(&depends),
+            inputs: if linked { &linked_inputs } else { &inputs },
+            dependencies: if linked { &link_deps } else { &deps },
+            after: &as_paths(&depends),
             depfile: Some(&depfile_of(&output)),
             discover: Some(discovery(&exec)),
             exec,
@@ -594,9 +590,9 @@ fn write_graph(
             graph.edge(Edge {
                 description: describe("RUSTC", &harness),
                 outputs: &[&harness],
-                inputs: &[&input],
-                implicit: &harness_link_deps,
-                order_only: &as_paths(&depends),
+                inputs: &linked_inputs,
+                dependencies: &harness_link_deps,
+                after: &as_paths(&depends),
                 depfile: Some(&depfile_of(&harness)),
                 discover: Some(discovery(&exec)),
                 exec,
@@ -615,9 +611,9 @@ fn write_graph(
             graph.edge(Edge {
                 description: describe("RUSTC", &copy),
                 outputs: &[&copy],
-                inputs: &[&input],
-                implicit: &as_paths(&harness_deps),
-                order_only: &as_paths(&depends),
+                inputs: &inputs,
+                dependencies: &as_paths(&harness_deps),
+                after: &as_paths(&depends),
                 depfile: Some(&depfile_of(&copy)),
                 exec,
                 hashed,
@@ -656,13 +652,14 @@ fn write_graph(
         let rust = Rust { crate_type, name, input: &root, env, pass_env: &unit.pass_env, toolchain };
         // a check writes metadata, rather than linking
         let placement = placement(unit, units, project, false);
-        let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).chain(as_paths(&spec)).collect();
+        let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).collect();
+        let inputs: Vec<&Path> = [root.as_path()].into_iter().chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
         // the documentation is of the crate as it is built, rather than its tests, with the metadata of the crates it
         // uses
         if let Some(name) = &unit.doc {
             let index = at.path(&unit.doc_index());
-            let implicit: Vec<_> = deps.iter().copied().chain([output.as_path()]).collect();
+            let dependencies: Vec<_> = deps.iter().copied().chain([output.as_path()]).collect();
             let doc_dir = at.path(&unit.doc_dir()).display().to_string();
             let leading = ["--color=always".to_string(), format!("--out-dir={doc_dir}")];
             let exec = rust.exec("rustdoc", &leading, &flags, None);
@@ -672,8 +669,8 @@ fn write_graph(
             graph.edge(Edge {
                 description: describe("RUSTDOC", &index),
                 outputs: &[&index],
-                inputs: &[&root],
-                implicit: &implicit,
+                inputs: &inputs,
+                dependencies: &dependencies,
                 exec,
                 hashed,
                 pass_env: rust.pass_env,
@@ -706,10 +703,9 @@ fn write_graph(
             // date
             graph.edge(Edge {
                 description: describe("CLIPPY", &output),
-                outputs: &[&output],
-                implicit_outputs: &[&diagnostics],
-                inputs: &[&root],
-                implicit: &deps,
+                outputs: &[&output, &diagnostics],
+                inputs: &inputs,
+                dependencies: &deps,
                 depfile: Some(&depfile_of(&output)),
                 discover: Some(discovery(&exec)),
                 exec,
@@ -727,10 +723,9 @@ fn write_graph(
         let exec = rust.exec("rustc", &metadata_emit(&outdir, &output, false), &flags, Some(&diagnostics));
         graph.edge(Edge {
             description: describe("CHECK", &output),
-            outputs: &[&output],
-            implicit_outputs: &[&diagnostics],
-            inputs: &[&root],
-            implicit: &deps,
+            outputs: &[&output, &diagnostics],
+            inputs: &inputs,
+            dependencies: &deps,
             depfile: Some(&depfile_of(&output)),
             discover: Some(discovery(&exec)),
             exec,

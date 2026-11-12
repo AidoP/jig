@@ -8,10 +8,11 @@
 //! rig's rules, and what each of them writes, small enough to be read in one sitting. ninja was the oracle before it,
 //! and the model was checked against it, agreeing on every seed, before ninja was removed.
 //!
-//! The graphs have explicit, implicit and order-only inputs, implicit outputs, aliases, edges which discover inputs
-//! from their depfiles, and restat edges, which leave an output alone when it would not change. The edits change the
-//! contents of sources, touch them without changing them, delete outputs, and build a few targets rather than the
-//! defaults. They leave out what the model leaves out, as a source whose time goes back, or an output changed by hand.
+//! The graphs have inputs, dependencies, what an edge is built after, edges of several outputs, aliases, edges which
+//! discover inputs from their depfiles, and restat edges, which leave an output alone when it would not change. The
+//! edits change the contents of sources, touch them without changing them, delete outputs, and build a few targets
+//! rather than the defaults. They leave out what the model leaves out, as a source whose time goes back, or an output
+//! changed by hand.
 //!
 //! `JIG_DIFFERENTIAL_SEEDS` sets the number of seeds, which is `16` by default.
 
@@ -51,10 +52,10 @@ impl Random {
 struct Spec {
     rule: &'static str,
     output: String,
-    implicit_outputs: Vec<String>,
+    extra_outputs: Vec<String>,
     inputs: Vec<String>,
-    implicit: Vec<String>,
-    order_only: Vec<String>,
+    dependencies: Vec<String>,
+    after: Vec<String>,
     /// The headers the edge discovers, which its depfile lists, for the `discover` rule.
     discovered: Vec<String>,
 }
@@ -85,7 +86,7 @@ fn generate(random: &mut Random) -> Generated {
         };
         let output = if random.chance(30) { format!("out/o{i}") } else { format!("o{i}") };
         let extra = rule == "step" && random.chance(20);
-        let implicit_outputs = if extra { vec![format!("o{i}.extra")] } else { Vec::new() };
+        let extra_outputs = if extra { vec![format!("o{i}.extra")] } else { Vec::new() };
         let mut inputs = Vec::new();
         for _ in 0..=random.below(3) {
             let input = random.pick(&files).clone();
@@ -93,22 +94,22 @@ fn generate(random: &mut Random) -> Generated {
                 inputs.push(input);
             }
         }
-        let mut implicit = Vec::new();
+        let mut dependencies = Vec::new();
         if random.chance(30) {
             let input = random.pick(&files).clone();
             if !inputs.contains(&input) {
-                implicit.push(input);
+                dependencies.push(input);
             }
         }
-        // an alias is only an implicit input, as it is not a file which `cat` could read, and not of a restat edge, as
+        // an alias is only a dependency, as it is not a file which `cat` could read, and not of a restat edge, as
         // when the model was checked against ninja, which runs such an edge again the next time it builds after it left
         // its output alone, though nothing it depends on changed, which rig does not
         if rule != "gen" && !aliases.is_empty() && random.chance(25) {
-            implicit.push(random.pick(&aliases).0.clone());
+            dependencies.push(random.pick(&aliases).0.clone());
         }
-        let order_only = if !produced.is_empty() && random.chance(20) {
+        let after = if !produced.is_empty() && random.chance(20) {
             let input = random.pick(&produced).clone();
-            if inputs.contains(&input) || implicit.contains(&input) { Vec::new() } else { vec![input] }
+            if inputs.contains(&input) || dependencies.contains(&input) { Vec::new() } else { vec![input] }
         } else {
             Vec::new()
         };
@@ -120,9 +121,9 @@ fn generate(random: &mut Random) -> Generated {
             Vec::new()
         };
         files.push(output.clone());
-        files.extend(implicit_outputs.iter().cloned());
+        files.extend(extra_outputs.iter().cloned());
         produced.push(output.clone());
-        edges.push(Spec { rule, output, implicit_outputs, inputs, implicit, order_only, discovered });
+        edges.push(Spec { rule, output, extra_outputs, inputs, dependencies, after, discovered });
         if random.chance(15) {
             let targets = vec![random.pick(&produced).clone()];
             aliases.push((format!("alias{}", aliases.len()), targets));
@@ -145,7 +146,7 @@ fn write(generated: &Generated, dir: &Path) {
             "step" => {
                 steps.extend(words(&["cat"]).into_iter().chain(spec.inputs.iter().cloned()));
                 steps.extend(words(&[">", output]));
-                for copy in &spec.implicit_outputs {
+                for copy in &spec.extra_outputs {
                     steps.extend(words(&["&&", "cp", output, copy]));
                 }
                 ("STEP", None)
@@ -168,11 +169,10 @@ fn write(generated: &Generated, dir: &Path) {
         edges.push(rig::Edge {
             kind: rig::EdgeKind::Command(rig::test_helper::exec(steps)),
             description: format!("{description} {output}"),
-            outputs: nodes(std::slice::from_ref(output)),
-            implicit_outputs: nodes(&spec.implicit_outputs),
+            outputs: nodes(&std::iter::once(output).chain(&spec.extra_outputs).cloned().collect::<Vec<_>>()),
             inputs: nodes(&spec.inputs),
-            implicit: nodes(&spec.implicit),
-            order_only: nodes(&spec.order_only),
+            dependencies: nodes(&spec.dependencies),
+            after: nodes(&spec.after),
             depfile,
             restat: spec.rule == "gen",
             ..rig::Edge::default()
@@ -251,13 +251,13 @@ impl<'a> Model<'a> {
             Some((_, targets)) => targets.clone(),
             None => vec![input.clone()],
         };
-        let mut inputs: Vec<String> = spec.inputs.iter().chain(&spec.implicit).flat_map(aliases).collect();
+        let mut inputs: Vec<String> = spec.inputs.iter().chain(&spec.dependencies).flat_map(aliases).collect();
         inputs.extend(self.records.get(&id).into_iter().flat_map(|record| record.discovered.iter().cloned()));
         inputs
     }
     fn outputs(&self, id: usize) -> Vec<String> {
         let spec = &self.generated.edges[id];
-        std::iter::once(&spec.output).chain(&spec.implicit_outputs).cloned().collect()
+        std::iter::once(&spec.output).chain(&spec.extra_outputs).cloned().collect()
     }
     /// Returns the edges which building targets wants, the edges which produce them and those they depend on, or every
     /// edge without targets.
@@ -266,14 +266,14 @@ impl<'a> Model<'a> {
         if targets.is_empty() {
             return (0..edges.len()).collect();
         }
-        let writes = |spec: &Spec, path: &str| spec.output == path || spec.implicit_outputs.iter().any(|o| o == path);
+        let writes = |spec: &Spec, path: &str| spec.output == path || spec.extra_outputs.iter().any(|o| o == path);
         let producer = |path: &str| edges.iter().position(|spec| writes(spec, path));
         let mut wanted = BTreeSet::new();
         let mut stack: Vec<usize> = targets.iter().filter_map(|target| producer(target)).collect();
         while let Some(id) = stack.pop() {
             if wanted.insert(id) {
-                let order_only = edges[id].order_only.iter().cloned();
-                let inputs = self.inputs(id).into_iter().chain(order_only);
+                let after = edges[id].after.iter().cloned();
+                let inputs = self.inputs(id).into_iter().chain(after);
                 stack.extend(inputs.filter_map(|input| producer(&input)));
             }
         }
@@ -309,7 +309,7 @@ impl<'a> Model<'a> {
         if spec.rule != "gen" || self.files.get(&spec.output).is_none_or(|(contents, _)| *contents != read) {
             self.write(&spec.output, read.clone());
         }
-        for output in &spec.implicit_outputs {
+        for output in &spec.extra_outputs {
             self.write(output, read.clone());
         }
         // recorded once it has run, as rig records it, with its inputs as it read them, and what it discovered
@@ -328,7 +328,7 @@ impl<'a> Model<'a> {
     /// Returns the contents of the outputs, as [`outputs`] reads them from a build's directory.
     fn outputs_contents(&self) -> Vec<(String, Option<String>)> {
         let edges = self.generated.edges.iter();
-        let paths = edges.flat_map(|spec| std::iter::once(&spec.output).chain(&spec.implicit_outputs));
+        let paths = edges.flat_map(|spec| std::iter::once(&spec.output).chain(&spec.extra_outputs));
         paths.map(|path| (path.clone(), self.files.get(path).map(|(contents, _)| contents.clone()))).collect()
     }
 }
@@ -421,7 +421,7 @@ fn apply(edit: &Edit, dir: &Path) {
 
 /// Returns the contents of the outputs of a build, which are the same if the same edges ran.
 fn outputs(generated: &Generated, dir: &Path) -> Vec<(String, Option<String>)> {
-    let paths = generated.edges.iter().flat_map(|spec| std::iter::once(&spec.output).chain(&spec.implicit_outputs));
+    let paths = generated.edges.iter().flat_map(|spec| std::iter::once(&spec.output).chain(&spec.extra_outputs));
     paths.map(|path| (path.clone(), std::fs::read_to_string(dir.join(path)).ok())).collect()
 }
 

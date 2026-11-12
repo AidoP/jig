@@ -167,26 +167,32 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      tests configure, 119 of them. A description no longer quotes its path for `sh`, as ninja's `$out` did, which none
      of them has a reason to. The differential test agrees with the model on 128 seeds, and under Wine the integration
      tests pass as they did after step 2.
-4. **Remove `rig::ninja` and shell actions from rig.**
-   - `rig::testing::Graphs` builds rig's test graphs through the API, with programs rather than shell lines. A test's
-     commands, as `cat`, `cp`, `sleep` and writing a depfile, are done by the test harness itself, run again as a
-     helper program with its arguments, as a test harness can find its own executable, so that the tests need neither
-     `sh` nor coreutils, and run on Windows. The 44 tests ignored on Windows run there.
-   - `rig::ninja`, `Manifest`, `Build` and `Error::Manifest` go. The README shows a cargo project using rig how to
-     build a graph through the API.
-   - `Action::Shell`, `sys::shell` and the graph format's shell actions go, which changes the graph format's version,
-     so that a graph from before is generated again. `Action` is a program alone, which may be a shell a command
-     names, as `sh -c`.
-   - rig's graph keeps, for each edge, its outputs, its early outputs, its inputs, its dependencies and its
-     order-only inputs, in place of ninja's explicit and implicit outputs and inputs, which changes the graph format's
-     version. Its plan errors for a missing input which no edge produces, as now, but takes a missing dependency as
-     out of date, as a discovered one is, so that a crate whose `extern crate` was deleted with what it used is
-     built again, and rustc says why, if it still needs it. jig's `Edge` gives each list, and decides which of an
-     edge's files are inputs and which dependencies, as the decision above lists them.
-     - rig, plan: a missing input which no edge produces is an error, and a missing dependency runs its edge, and
-       an edge which no longer needs it is up to date once it has run.
-     - Integration: a crate which used another, once both the other and its `extern crate` are removed, is built
-       again, without an error from rig.
+4. **Done: remove `rig::ninja` and shell actions from rig.**
+   - rig's tests build their graphs through the API, with `rig::testing::Graphs`, whose rules are templates of the
+     steps of the test helper, `rig::test_helper`: the test's own executable, run again with `--rig-test-helper`,
+     which a hook registered with `register_test_helper!` runs before the test harness's `main`, and which does what
+     its steps say, as `cat`, `cp`, `sleep`, `echo` and writing a depfile, so that the tests need neither `sh` nor
+     coreutils. The tests which were ignored on Windows run there, but for two, which test a FIFO jobserver and
+     process groups with `ps`, which only Unix has. jig's differential test runs the helper too.
+   - `rig::ninja`, `Manifest`, `Build` and `Error::Manifest` are gone, and the README shows a project building a graph
+     through the API.
+   - `Action`, `Action::Shell` and `sys::shell` are gone: an edge's command, and the program which discovers its
+     inputs, are an `Exec`, as is what a worker is asked to run. The graph format's version is 10, the worker
+     protocol's 11, and jig's database's 29.
+   - rig's graph keeps, for each edge, its outputs, of which its early outputs are some, its inputs, its dependencies
+     and what it is built after, in place of ninja's explicit and implicit outputs and inputs. A missing input, or a
+     missing file an edge is built after, which no edge produces, is an error, as before, while a missing dependency
+     runs its edge, as `Reason::DependencyMissing` says if the edge had it, and an edge which has run without it is
+     up to date.
+   - jig gives a crate's root, its target's specification and its linker script, and a custom command's inputs and
+     program, as inputs, and the crates a crate uses, with their libraries where it links, as dependencies. Unlike
+     the decision above, a crate's or command's `depends` stays what it is built after, as the README documents it,
+     so that what it names does not rebuild it. `jig graph` shows the new lists, its `|` before the dependencies and
+     `||` before what an edge is built after, until step 5 replaces its form.
+   - **Checked.** rig's tests pass on Linux, with jig and with cargo, and under Wine, where they had been ignored.
+     A plan test checks that a missing input and a missing file an edge is built after are errors, and that an edge
+     which lost a dependency runs, and is then up to date; an integration test, that a crate whose used crate and
+     `extern crate` were removed is built again. Under Wine, the integration tests pass as they did after step 3.
 
 5. **Give `jig graph` its new form,** as above, with the README, the module's documentation and the integration tests'
    harness and expectations changed to it.

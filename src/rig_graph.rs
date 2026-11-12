@@ -15,13 +15,17 @@ pub const FILE: &str = "graph";
 pub struct Edge<'a> {
     /// What is shown while the edge runs.
     pub description: String,
+    /// The files the edge writes, the first of which names it.
     pub outputs: &'a [&'a Path],
-    pub implicit_outputs: &'a [&'a Path],
+    /// The files the edge reads, which must be there, or be built: a crate's sources, a custom command's inputs, its
+    /// program, given by a path, a linker script and a target's specification.
     pub inputs: &'a [&'a Path],
-    /// Inputs which trigger a rebuild, as the others do.
-    pub implicit: &'a [&'a Path],
-    /// Inputs which must be built first but do not trigger a rebuild.
-    pub order_only: &'a [&'a Path],
+    /// The files the edge depends on, which may be missing, as the crates a crate uses, one of which may have been
+    /// removed along with its use.
+    pub dependencies: &'a [&'a Path],
+    /// The files which are built before the edge, but which it neither reads nor depends on, as a crate's or a
+    /// command's `depends`.
+    pub after: &'a [&'a Path],
     /// The program the edge runs.
     pub exec: rig::Exec,
     /// The depfile the program writes, in the form gcc writes, of the inputs it discovered.
@@ -62,17 +66,16 @@ impl RigGraph {
         paths.iter().map(|path| self.graph.file(&path_string(path))).collect()
     }
     pub fn edge(&mut self, edge: Edge) -> Result<(), Error> {
-        let (outputs, implicit_outputs) = (self.nodes(edge.outputs), self.nodes(edge.implicit_outputs));
+        let outputs = self.nodes(edge.outputs);
         let early = self.nodes(edge.early);
-        debug_assert!(early.iter().all(|node| outputs.contains(node) || implicit_outputs.contains(node)));
+        debug_assert!(early.iter().all(|node| outputs.contains(node)));
         let edge = rig::Edge {
             kind: rig::EdgeKind::Command(edge.exec),
             description: edge.description,
             outputs,
-            implicit_outputs,
             inputs: self.nodes(edge.inputs),
-            implicit: self.nodes(edge.implicit),
-            order_only: self.nodes(edge.order_only),
+            dependencies: self.nodes(edge.dependencies),
+            after: self.nodes(edge.after),
             depfile: edge.depfile.map(path_string),
             pool: if edge.console { rig::Pool::Console } else { rig::Pool::Default },
             generator: edge.generator,

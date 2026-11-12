@@ -270,7 +270,7 @@ struct Dispatch {
     env: Vec<(String, String)>,
     locating: Vec<String>,
     inputs: Vec<String>,
-    /// The outputs it writes, explicit and implicit, and its depfile, if it has one.
+    /// The outputs it writes, and its depfile, if it has one.
     outputs: Vec<String>,
     /// A file stderr is written to, if it writes one, which it need not.
     stderr: Option<String>,
@@ -804,7 +804,7 @@ fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
         }
         match graph.producer(node).map(|edge| graph.edge(edge)) {
             Some(alias) if *alias.kind() == EdgeKind::Alias => {
-                stack.extend(alias.inputs().iter().chain(alias.implicit()).chain(alias.order_only()));
+                stack.extend(alias.inputs().iter().chain(alias.dependencies()).chain(alias.after()));
             },
             _ => {
                 wanted.insert(node);
@@ -863,7 +863,7 @@ fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[
 fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeId) -> bool {
     let early = graph.edge(dependency).early();
     let data = graph.edge(dependent);
-    let declared = data.inputs().iter().chain(data.implicit()).chain(data.order_only());
+    let declared = data.inputs().iter().chain(data.dependencies()).chain(data.after());
     let mut nodes: Vec<NodeId> = declared.copied().collect();
     nodes.extend(plan::discovered_nodes(graph, state, dependent));
     let mut needs = false;
@@ -896,7 +896,7 @@ pub(crate) fn same_path(lhs: &str, rhs: &str) -> bool {
 /// Returns the edges in the plan which an edge depends on, through aliases, by its inputs, declared and discovered.
 fn planned_deps(graph: &Graph, state: &State, edge: EdgeId, index: &HashMap<EdgeId, usize>) -> Vec<usize> {
     let data = graph.edge(edge);
-    let inputs = data.inputs().iter().chain(data.implicit()).chain(data.order_only());
+    let inputs = data.inputs().iter().chain(data.dependencies()).chain(data.after());
     let mut nodes: Vec<NodeId> = inputs.copied().collect();
     nodes.extend(plan::discovered_nodes(graph, state, edge));
     let mut deps = Vec::new();
@@ -912,7 +912,7 @@ fn planned_deps(graph: &Graph, state: &State, edge: EdgeId, index: &HashMap<Edge
             deps.push(dep);
         } else if *graph.edge(producer).kind() == EdgeKind::Alias {
             let alias = graph.edge(producer);
-            nodes.extend(alias.inputs().iter().chain(alias.implicit()).chain(alias.order_only()));
+            nodes.extend(alias.inputs().iter().chain(alias.dependencies()).chain(alias.after()));
         }
     }
     deps.sort_unstable();
@@ -1435,12 +1435,12 @@ impl Run<'_, '_> {
         if edge.pool() == Pool::Console || !edge.hermetic() || self.options.cache.is_none() {
             return None;
         }
-        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let outputs = edge.outputs().iter().map(|&node| self.graph.path(node));
         let outputs: Vec<&str> = outputs.chain(edge.depfile()).collect();
         let leads = |path: &str| crate::worker::ups(path).is_some();
         // an edge which has not run finds its inputs by its action which discovers them, if it has one
         let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
-            let declared = edge.inputs().iter().chain(edge.implicit()).map(|&node| self.graph.path(node));
+            let declared = edge.inputs().iter().chain(edge.dependencies()).map(|&node| self.graph.path(node));
             let discovers = edge.discover().is_some() && edge.depfile().is_some();
             return (discovers && declared.chain(outputs).all(leads)).then_some(identity);
         };
@@ -1469,7 +1469,7 @@ impl Run<'_, '_> {
         let mut inputs: Vec<String> = declared.chain(discovered).cloned().collect();
         inputs.sort_unstable();
         inputs.dedup();
-        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let outputs = edge.outputs().iter().map(|&node| self.graph.path(node));
         let outputs: Vec<String> = outputs.chain(edge.depfile()).map(String::from).collect();
         let stderr = self.action(index).stderr.clone();
         if !inputs.iter().chain(&outputs).chain(&stderr).all(|path| crate::worker::ups(path).is_some()) {
@@ -1517,7 +1517,7 @@ impl Run<'_, '_> {
         if !edge.hashed() {
             return None;
         }
-        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).map(|&node| self.graph.path(node));
+        let outputs = edge.outputs().iter().map(|&node| self.graph.path(node));
         let paths = outputs.chain(edge.depfile()).map(String::from).collect();
         let cache = self.options.cache.as_ref().filter(|_| edge.cache().is_some() && edge.pool() != Pool::Console);
         Some(Arc::new((paths, cache.cloned())))
@@ -1549,7 +1549,7 @@ impl Run<'_, '_> {
             return Vec::new();
         }
         let edge = self.graph.edge(self.edges[index]);
-        let outputs = edge.outputs().iter().chain(edge.implicit_outputs()).filter(|node| !self.wanted.contains(node));
+        let outputs = edge.outputs().iter().filter(|node| !self.wanted.contains(node));
         outputs.map(|&node| self.graph.path(node).to_string()).collect()
     }
     /// An output has been left on a worker, with this stamp, or with `None`, is not, or is no longer.
@@ -1699,7 +1699,7 @@ impl Run<'_, '_> {
         let data = self.graph.edge(edge);
         // the directories of the outputs and depfile are created first, as ninja creates them, which the command
         // fails without if it needs them
-        let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+        let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
         for path in outputs.chain(data.depfile()) {
             // each directory once, as many outputs share one
             if let Some(dir) = Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty())
@@ -1712,7 +1712,7 @@ impl Run<'_, '_> {
         // contents if it is hashed, reusing its last record's hashes
         if data.restat() || data.hashed() {
             let previous = self.state.get(plan::first_output(self.graph, edge));
-            let outputs = data.outputs().iter().chain(data.implicit_outputs());
+            let outputs = data.outputs().iter();
             let before = outputs
                 .map(|&output| {
                     let path = self.graph.path(output);
@@ -1765,7 +1765,7 @@ impl Run<'_, '_> {
         }
         // what a worker wrote, it has
         if let Some(worker) = sent_to.filter(|_| remote) {
-            let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+            let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
             self.on_workers[worker].extend(outputs.chain(data.depfile()).map(String::from));
         }
         self.progress.running -= 1;
@@ -1786,7 +1786,7 @@ impl Run<'_, '_> {
         }
         if outcome.succeeded() {
             // what it left on a worker is stamped as it was left, and what it did not is stamped by its file
-            let outputs = data.outputs().iter().chain(data.implicit_outputs()).map(|&node| self.graph.path(node));
+            let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
             for path in outputs {
                 let stamp = left.iter().find(|(left, _)| left == path).map(|&(_, stamp)| stamp);
                 if stamp.is_some() || self.left.read().is_ok_and(|left| left.contains_key(path)) {
@@ -1849,7 +1849,7 @@ impl Run<'_, '_> {
         if edge.pool() == Pool::Console {
             return None;
         }
-        let outputs = edge.outputs().iter().chain(edge.implicit_outputs());
+        let outputs = edge.outputs().iter();
         let outputs: Vec<&str> = outputs.map(|&node| self.graph.path(node)).collect();
         let inputs = self.inputs.get(&index)?;
         let inputs: Vec<(&str, Option<&Hash>)> = inputs.iter().map(|(path, stamp)| (path.as_str(), stamp.hash())).collect();
@@ -1939,7 +1939,7 @@ fn changed(
     if *data.kind() != EdgeKind::Alias || !seen.insert(edge) {
         return false;
     }
-    let inputs = data.inputs().iter().chain(data.implicit());
+    let inputs = data.inputs().iter().chain(data.dependencies());
     let producers: Vec<EdgeId> = inputs.filter_map(|&node| graph.producer(node)).collect();
     producers.into_iter().any(|producer| changed(graph, producer, index, status, seen))
 }
@@ -2284,7 +2284,7 @@ impl<W: std::io::Write> Observer for Console<W> {
             self.status(graph, edge, progress);
         }
         if failed {
-            let outputs = data.outputs().iter().chain(data.implicit_outputs());
+            let outputs = data.outputs().iter();
             let outputs: Vec<&str> = outputs.map(|&node| graph.path(node)).collect();
             let _ = writeln!(self.out, "FAILED: {}", outputs.join(" "));
             if let EdgeKind::Command(action) = data.kind() {
@@ -3162,7 +3162,7 @@ mod tests {
         let graph = graph()
             .rule("compile", &[("command", &compile)])
             .early(&["a.meta"])
-            .edge("compile", &["a.out", "|", "a.meta"], &[])
+            .edge("compile", &["a.out", "a.meta"], &[])
             .rule("cp", &[("command", "cp $in $out")])
             .edge("cp", &["b.out"], &["a.meta"])
             .edge("cp", &["c.out"], &["a.out"])
@@ -3191,7 +3191,7 @@ mod tests {
             .cached("toolchain")
             .rule("compile", &[("command", &compile)])
             .early(&["a.meta"])
-            .edge("compile", &["a.out", "|", "a.meta"], &[])
+            .edge("compile", &["a.out", "a.meta"], &[])
             .rule("cp", &[("command", "cp $in $out")])
             .edge("cp", &["b.out"], &["a.meta"])
             .finish();
