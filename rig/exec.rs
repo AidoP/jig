@@ -2809,6 +2809,9 @@ mod tests {
         build.options.cache = Some(first.0.clone());
         let release = Release { identity: "release".into(), install: String::new() };
         build.options.releases.insert("toolchain".into(), release);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
+        build.options.jobs = 1;
         build.ran(&[]);
         // a worker of another toolchain of the same release, as on another host, with no tags, and no standard
         // library for the target, so that only the edge which may run on another host, and needs no tag, runs there
@@ -2820,7 +2823,6 @@ mod tests {
         let worker = Arc::new(crate::remote::served_worker(store.0.clone(), executor));
         assert!(worker.capabilities().is_ok());
         build.options.workers = vec![worker];
-        build.options.jobs = 1;
         remove(&build, &["slow", "portable.o", "riscv.o", "gpu.o"]);
         let second = TempCache::new("placed-second");
         build.options.cache = Some(second.0.clone());
@@ -2905,11 +2907,13 @@ mod tests {
         let mut build = Build::new("estimates", graph(false), &files);
         let first = TempCache::new("estimates-first");
         build.options.cache = Some(first.0.clone());
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
+        build.options.jobs = 1;
         build.ran(&[]);
         // with one job, which the slow edge holds, the edge which has not run, which would wait for it, as it is
         // estimated to take as long as those which have, and to send as little, goes to the worker
         build.graph = graph(true);
-        build.options.jobs = 1;
         let store = TempCache::new("estimates-store");
         let link = crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9, speed: 1.0 };
         build.options.workers = vec![linked(&store, link)];
@@ -2925,8 +2929,10 @@ mod tests {
         let mut build = Build::new("waits", copied(), &[("a", "0\n"), ("b", "0\n")]);
         let first = TempCache::new("waits-first");
         build.options.cache = Some(first.0.clone());
-        build.ran(&[]);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
+        build.ran(&[]);
         // over a link with a second's latency, sending takes longer than the slow edge has left, or the others take
         let store = TempCache::new("waits-store");
         let slow = crate::remote::Link { latency: Duration::from_secs(1), bytes_per_second: 1e9, speed: 1.0 };
@@ -2992,8 +2998,10 @@ mod tests {
         let mut build = Build::new("soonest", copied(), &[("a", "0.1\n"), ("b", "0.1\n")]);
         let first = TempCache::new("soonest-first");
         build.options.cache = Some(first.0.clone());
-        build.ran(&[]);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
+        build.ran(&[]);
         // a worker which takes ten times as long as here would finish them later than here, and one which takes half
         // as long, sooner, so of the two, that one takes them
         let link = |speed| crate::remote::Link { latency: Duration::from_millis(1), bytes_per_second: 1e9, speed };
@@ -3024,8 +3032,10 @@ mod tests {
         let mut build = Build::new("speed", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
         let first = TempCache::new("speed-first");
         build.options.cache = Some(first.0.clone());
-        build.ran(&[]);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
+        build.ran(&[]);
         let store = TempCache::new("speed-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
         assert!(build.options.workers[0].capabilities().is_ok());
@@ -3233,8 +3243,10 @@ mod tests {
         let mut build = Build::new("interrupts", copied(), &[("a", "0\n"), ("b", "0\n")]);
         let first = TempCache::new("interrupts-first");
         build.options.cache = Some(first.0.clone());
-        build.ran(&[]);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
+        build.ran(&[]);
         let store = TempCache::new("interrupts-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
         assert!(build.options.workers[0].capabilities().is_ok());
@@ -3308,8 +3320,10 @@ mod tests {
         let mut build = Build::new("marks", graph, &files);
         let first = TempCache::new("marks-first");
         build.options.cache = Some(first.0.clone());
-        build.ran(&[]);
+        // with the one job the build has later, so that how long each edge took is measured without the others
+        // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
+        build.ran(&[]);
         // the edge which reads what it was not sent fails there, and runs here, so it is marked to run here
         let store = TempCache::new("marks-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
@@ -3732,13 +3746,20 @@ mod tests {
         let graph = graph()
             .rule("sleep", &[("command", "sleep $time && touch $out")])
             .edge_with("sleep", &["a"], &[], &[("time", "0.05")])
-            .edge_with("sleep", &["b"], &[], &[("time", "0.6")])
-            .edge_with("sleep", &["c"], &[], &[("time", "0.3")]);
+            .edge_with("sleep", &["b"], &[], &[("time", "1.2")])
+            .edge_with("sleep", &["c"], &[], &[("time", "0.6")]);
         let mut build = Build::new("implicit-job", graph.finish(), &[]);
         build.options.jobs = 2;
+        // within 1.2 s, as `b` takes, and the start of `a` and `c` one after the other, rather than 1.8 s, as `c` takes
+        // after `b`, and theirs, where starting the test helper, as on Windows, is not quick
+        let started = Instant::now();
+        let status = Command::new(crate::test_helper::program()).args([crate::test_helper::FLAG, "true"]).status();
+        assert!(status.unwrap().success());
+        let starting = started.elapsed();
         let start = Instant::now();
         assert_eq!(build.ran(&[]).len(), 3);
-        assert!(start.elapsed() < Duration::from_millis(800), "{:?}", start.elapsed());
+        let budget = Duration::from_millis(1500) + 2 * starting;
+        assert!(start.elapsed() < budget, "{:?}, where starting a program takes {starting:?}", start.elapsed());
     }
 
     #[test]
