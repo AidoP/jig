@@ -398,7 +398,7 @@ pub enum Message {
     },
     /// A program which a wrapper installed by `jig install --proxy` builds, as it or the configuration is out of date,
     /// before running it. It is reported by `jig build --proxy`, with the severity recorded when configuring.
-    /// A `jig` was run which did not configure the project, while the one which did regenerates `build.ninja`. It is
+    /// A `jig` was run which did not configure the project, while the one which did regenerates rig's graph. It is
     /// reported by the commands which build the project, with the severity recorded when configuring.
     OtherJig {
         running: String,

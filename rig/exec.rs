@@ -1673,7 +1673,7 @@ impl Run<'_, '_> {
     /// edge it depends on left its outputs alone, or as it is hashed and its inputs' contents are as they were.
     ///
     /// It is checked again once the edges it depends on have run, if one of them left its outputs alone, by the inputs
-    /// which make it run, so that another which it depends on only through an order-only input may have changed.
+    /// which make it run, so that another which it depends on only through what it is built after may have changed.
     ///
     /// A hashed edge is checked again whatever the edges it depends on did, as it compares the contents of its inputs,
     /// rather than whether they were built again.
@@ -1697,8 +1697,8 @@ impl Run<'_, '_> {
         let edge = self.edges[index];
         self.inputs.insert(index, plan::input_stamps(self.graph, self.state, edge, &mut self.stamps));
         let data = self.graph.edge(edge);
-        // the directories of the outputs and depfile are created first, as ninja creates them, which the command
-        // fails without if it needs them
+        // the directories of the outputs and depfile are created first, which the command fails without if it needs
+        // them
         let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
         for path in outputs.chain(data.depfile()) {
             // each directory once, as many outputs share one
@@ -2077,17 +2077,18 @@ pub(crate) fn run_command(
     (outcome, output)
 }
 
-/// Shows a build as ninja does on a terminal which is not smart: the status and description of each edge once it
+/// Shows a build, line by line, where the output is not a terminal which can be redrawn: the status and description
+/// of each edge once it
 /// finishes, or as it starts for a console edge, which then has the terminal, followed by its output. A failed edge
 /// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown, and
 /// with `verbose`, each edge is shown by its command rather than its description.
 ///
 /// Without `colour`, as where the output is not a terminal, the escape sequences which colour what the commands
-/// printed are left out, as ninja leaves them out, so that commands can be told to print in colour, as rustc is with
+/// printed are left out, so that commands can be told to print in colour, as rustc is with
 /// `--color=always`, whose output is captured rather than a terminal, without their actions depending on where the
 /// build's output goes.
 ///
-/// [`Self::in_place`] shows the build as ninja does on a smart terminal, with a line for each of the edges which run
+/// [`Self::in_place`] shows the build on a terminal, with a line for each of the edges which run
 /// at once, updated in place with escape sequences: each edge which is running, by the order it started in, with how
 /// long it has run, as `[ 2/15] RUSTC liba.rlib (3m)`, and a line whose edge has finished, while no other has taken
 /// its place, as `[  /15] -`. Each line is cut to the terminal's width, so that none wraps. What finishes is not kept,

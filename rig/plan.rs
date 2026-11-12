@@ -1,10 +1,12 @@
 //! Planning a build: which edges must run to bring targets up to date, and why.
 //!
 //! An edge must run if it has no record, its outputs or command have changed, one of its outputs is missing or is not
-//! what the edge produced, the inputs it declares have changed, an input is produced by an edge which must run, or the
-//! stamp of an input, declared or discovered from its depfile, differs from the one recorded. Order-only inputs are
-//! built first, but do not make an edge run. The command of a generator edge may change without it running, as ninja
-//! allows.
+//! what the edge produced, the inputs and dependencies it declares have changed, one of them is produced by an edge
+//! which must run, or the stamp of one of them, or of an input discovered from its depfile, differs from the one
+//! recorded. An input which is missing, and which no edge produces, is an error, while a dependency or a discovered
+//! input which is missing runs the edge, which is then up to date until it is there again. What an edge is built
+//! after is built first, but does not make it run. The command of a generator edge may change without it running, as
+//! the generator writes the graph which has it.
 //!
 //! An alias is out of date if an input of it is produced by an edge which must run, or if it has no inputs and is not a
 //! file. An edge which takes an alias as an input takes the inputs of the alias instead, so that it runs when one of
@@ -269,7 +271,7 @@ pub fn record(
 }
 
 /// Returns the targets which are built when none are requested: the defaults, or without them, every node which is
-/// produced by an edge and is not an input of one, as ninja builds.
+/// produced by an edge and is not an input of one.
 #[must_use]
 pub fn default_targets(graph: &Graph) -> Vec<NodeId> {
     if !graph.defaults().is_empty() {
@@ -624,7 +626,7 @@ mod tests {
     fn chain(dependencies: &[&str]) -> Graph {
         let inputs: Vec<&str> = ["a.c", "|"].into_iter().chain(dependencies.iter().copied()).collect();
         let graph = cc().edge("cc", &["a.o"], &inputs).edge("cc", &["lib.a"], &["a.o"]);
-        graph.edge("cc", &["app"], &["lib.a", "main.c"]).edge("phony", &["all"], &["app"]).finish()
+        graph.edge("cc", &["app"], &["lib.a", "main.c"]).edge("alias", &["all"], &["app"]).finish()
     }
 
     #[test]
@@ -707,12 +709,12 @@ mod tests {
         let with_flags = |flags: &str| {
             let graph = graph().variable("flags", flags).rule("cc", &[("command", "cc $flags $in -o $out")]);
             let graph = graph.rule("gen", &[("command", "gen $flags"), ("generator", "1")]);
-            graph.edge("cc", &["a.o"], &["a.c"]).edge("gen", &["build.ninja"], &["a.c"]).finish()
+            graph.edge("cc", &["a.o"], &["a.c"]).edge("gen", &["graph"], &["a.c"]).finish()
         };
         let mut build = Build::new("command", with_flags(""), &["a.c"]);
         build.run(&[], &[]);
         build.graph = with_flags("-O");
-        // except a generator, as in ninja
+        // except a generator, whose command is in the graph it writes
         assert_eq!(build.plan(&[]).unwrap(), [("a.o".into(), Reason::CommandChanged)]);
     }
 
@@ -733,7 +735,7 @@ mod tests {
     fn builds_again_when_inputs_are_declared() {
         let mut build = Build::new("declared", chain(&["a.h"]), &["a.c", "a.h", "main.c", "b.c"]);
         build.run(&["all"], &[]);
-        // an implicit input, which is not part of the command
+        // a dependency, which is not part of the command
         build.graph = chain(&["a.h", "b.c"]);
         assert_eq!(build.plan(&["a.o"]).unwrap(), [("a.o".into(), Reason::InputsChanged)]);
     }
@@ -768,8 +770,8 @@ mod tests {
 
     #[test]
     fn aliases() {
-        let graph = cc().edge("phony", &["sources"], &["a.c", "b.c"]).edge("cc", &["out"], &["|", "sources"]);
-        let graph = graph.edge("phony", &["force"], &[]).edge("cc", &["forced"], &["|", "force"]);
+        let graph = cc().edge("alias", &["sources"], &["a.c", "b.c"]).edge("cc", &["out"], &["|", "sources"]);
+        let graph = graph.edge("alias", &["force"], &[]).edge("cc", &["forced"], &["|", "force"]);
         let mut build = Build::new("aliases", graph.finish(), &["a.c", "b.c"]);
         build.run(&["out"], &[]);
         // an edge which takes an alias as an input runs when an input of the alias changes

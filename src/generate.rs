@@ -422,11 +422,11 @@ fn write_graph(
     for custom in &project.customs {
         // a test is run by `jig test`, which builds its inputs and program with this target first
         let CustomKind::Command { outputs, default, .. } = &custom.kind else {
-            let phony = Path::new("test").join(&custom.name);
+            let alias = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
             let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
-            graph.alias(&phony, &as_paths(&inputs))?;
-            tests.push(phony);
+            graph.alias(&alias, &as_paths(&inputs))?;
+            tests.push(alias);
             continue;
         };
         let outputs = at.paths(outputs);
@@ -446,11 +446,11 @@ fn write_graph(
             ..Default::default()
         })?;
         // so that the outputs can be built by name
-        let phony = Path::new("custom").join(&custom.name);
-        graph.alias(&phony, &as_paths(&outputs))?;
-        everything.push(phony.clone());
+        let alias = Path::new("custom").join(&custom.name);
+        graph.alias(&alias, &as_paths(&outputs))?;
+        everything.push(alias.clone());
         if *default {
-            defaults.push(phony);
+            defaults.push(alias);
         }
     }
 
@@ -676,10 +676,10 @@ fn write_graph(
                 pass_env: rust.pass_env,
                 ..Default::default()
             })?;
-            let phony = Path::new("doc").join(name);
-            graph.alias(&phony, &[&index])?;
-            everything.push(phony.clone());
-            docs.push(phony);
+            let alias = Path::new("doc").join(name);
+            graph.alias(&alias, &[&index])?;
+            everything.push(alias.clone());
+            docs.push(alias);
         }
         if unit.test {
             flags.plain(&["--test"]);
@@ -715,9 +715,9 @@ fn write_graph(
                 placement: placement.clone(),
                 ..Default::default()
             })?;
-            let phony = Path::new("lint").join(name);
-            graph.alias(&phony, &[&output])?;
-            lints.push(phony);
+            let alias = Path::new("lint").join(name);
+            graph.alias(&alias, &[&output])?;
+            lints.push(alias);
         }
         let diagnostics = at.path(&unit.diagnostics());
         let exec = rust.exec("rustc", &metadata_emit(&outdir, &output, false), &flags, Some(&diagnostics));

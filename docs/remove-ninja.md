@@ -1,7 +1,8 @@
 # Removing ninja
 
 A plan for removing ninja support from jig and rig altogether, so that rig is the only engine, and the description of
-a build is rig's own rather than ninja's.
+a build is rig's own rather than ninja's. **Done:** every step below has been carried out, and what each found and
+changed is recorded with it.
 
 It reverses decision 4 of [the build engine's plan](build-engine.md#decisions), that generating `build.ninja` would
 stay supported permanently as a second engine. That decision was made while rig was new, and ninja was the reference
@@ -225,10 +226,19 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      `impure_functions` and `impure_functions_allowed`, an `echo` program, whose diagnostics show the lines which run
      it, so they keep running `echo`, which a Windows machine with Git has.
 
-7. **Rewrite the documentation.** The README, `build-engine.md` and the module and function docs describe jig and rig
-   without ninja: rig's behaviour by itself, as its console's output, rather than by what ninja does. Phases which
-   describe history, as phase 1's "with ninja's behaviour", stay as they were, with a note that ninja was since
-   removed. Decision 4 says ninja was removed, and why.
+7. **Done: rewrite the documentation.** The README, `build-engine.md` and the module and function docs describe jig
+   and rig without ninja: rig's behaviour by itself, as its console's output, rather than by what ninja does.
+   - `build-engine.md` is titled as rig's, says at its start that ninja was removed, and describes jig's use of ninja
+     in the past tense, as what the plan began from. Its design describes rig's edges by their inputs, dependencies and
+     what they are built after, and its API sketch is the API as it is. The phases, which are history, stay as they
+     were written, under a note that ninja was since removed. The risk of matching ninja's behaviour is now that of
+     behaving as expected without it, which the model of the differential tests answers, and decision 4 says that
+     ninja was removed, and why.
+   - The module and function docs of jig and rig no longer explain what they do by ninja, as `plan.rs` the rules of
+     a plan, now with dependencies, `exec::Console` what it shows, and the attributes of crates and custom commands
+     what builds them. The test helper's graphs name an alias `alias` rather than `phony`.
+   - What still names ninja is history, as the differential test's account of its oracle, and the tests which check
+     that a build directory has no `build.ninja`, and that `JIG_ENGINE=ninja` is ignored.
 
 ## Risks
 

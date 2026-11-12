@@ -46,15 +46,15 @@ pub struct Custom {
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
 pub enum CustomKind {
-    /// A build command, which ninja runs to build its outputs.
+    /// A build command, which rig runs to build its outputs.
     Command {
         outputs: Vec<PathBuf>,
-        /// Whether the outputs are built by `ninja` without targets.
+        /// Whether the outputs are built by `jig build` without targets.
         default: bool,
         /// Where `jig install` installs the outputs, if it does.
         install: Install,
     },
-    /// A test, which has no outputs and is run by `jig test` rather than ninja.
+    /// A test, which has no outputs and is run by `jig test` rather than by rig.
     Test {
         /// The index of the runner of the test's target, which runs its command, as with the test harness of a crate.
         runner: Option<usize>,
@@ -514,7 +514,7 @@ impl Project {
         Some(Runner { command: arguments, program: Some(program) })
     }
     /// Report the outputs of custom commands and generated files which are, or are within or contain, the output of a
-    /// crate or of another custom command or generated file, which ninja would build twice, or in place of a directory,
+    /// crate or of another custom command or generated file, which rig would build twice, or in place of a directory,
     /// or would replace a file which is written when configuring.
     ///
     /// The outputs are kept in order of their paths as well, in which the paths within a path come directly after it, so

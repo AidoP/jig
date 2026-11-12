@@ -10,7 +10,7 @@ use super::value::{Ref, Referent};
 use super::{Project, normalize};
 
 /// A file declared by a `file` statement, whose contents are known once the configuration is read, so it is written
-/// then, rather than by ninja, which could not write contents with a newline.
+/// then, rather than by a command which rig runs.
 pub struct GeneratedFile {
     pub name: String,
     pub name_span: Span,

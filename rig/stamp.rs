@@ -36,7 +36,7 @@ impl Stamp {
             Self::File { size, .. } | Self::Content { size, .. } => *size,
         }
     }
-    /// Returns the stamp of a file as it is now, following symbolic links, as ninja does.
+    /// Returns the stamp of a file as it is now, following symbolic links.
     ///
     /// A file which cannot be read, other than one which is missing, is taken as missing, so that what depends on it
     /// is built, which reports the error.

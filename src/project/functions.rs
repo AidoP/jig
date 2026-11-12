@@ -677,7 +677,7 @@ impl Project {
             if dir.as_os_str().is_empty() {
                 continue;
             }
-            // a directory which is missing is recorded as missing, as ninja would otherwise find it out of date each
+            // a directory which is missing is recorded as missing, as rig would otherwise find it out of date each
             // time, and configure the project again endlessly, while it configures the project again once it exists
             self.depend_on_path(&dir);
             if let Some(path) = crate::platform::program_in(&dir, name) {
@@ -688,8 +688,8 @@ impl Project {
     }
     /// Add a path which the configuration depends on, if it exists.
     ///
-    /// A missing dependency is always out of date, which would regenerate the configuration endlessly, so a path which
-    /// does not exist is recorded as missing instead, which is checked before ninja runs.
+    /// A path which is missing is recorded as missing instead, in the graph's depfile, as rig takes a missing input it
+    /// discovered as out of date, until the edge which generates the graph has run without it.
     pub(super) fn depend_on_path(&mut self, path: &Path) {
         if path.exists() {
             self.depend(path.to_path_buf());

@@ -13,7 +13,7 @@ pub struct Crate {
     pub dir: PathBuf,
     pub kind: Kind,
     pub builtin: bool,
-    /// Whether the crate is built by `ninja` without targets.
+    /// Whether the crate is built by `jig build` without targets.
     pub default: bool,
     /// Whether the crate's tests are built as a test harness, and registered as a test named after the crate.
     pub test: bool,

@@ -1,42 +1,44 @@
-# Replacing ninja with an internal build engine
+# rig, jig's build engine
 
-This is a plan for replacing ninja, which `jig build`, `jig test`, `jig check`, `jig lint`, `jig run` and
-`jig install` all run, with a build engine of jig's own. The engine is called `rig`.
+rig is the build engine which `jig build`, `jig test`, `jig check`, `jig lint`, `jig run` and `jig install` all run. It
+began as a plan for replacing ninja, which jig ran at first, and this document keeps that plan, as the phases which
+built rig, beside the design it arrived at. ninja has since been removed altogether, as
+[removing ninja](remove-ninja.md) describes: jig builds with rig alone.
 
 Goals:
 
-1. Fast and parallel: no slower than ninja on a no-op build, and faster on a full one.
+1. Fast and parallel: no slower than ninja was on a no-op build, and faster on a full one.
 2. Optional hashing of contents, which is more correct than comparing timestamps.
 3. Usable as a standalone crate, with no knowledge of jig.
 4. A global build cache, shared between checkouts and projects.
 5. Distributed builds, on workers of several platforms.
 
-## How jig uses ninja today
+## How jig used ninja
 
-Knowing exactly what ninja does for jig now sets the minimum the engine has to do, and shows the workarounds it can
-remove.
+What ninja did for jig, when this plan began, set the minimum the engine had to do, and showed the workarounds it could
+remove. None of it is left: jig builds rig's graph through its API, runs programs without a shell, and runs no ninja.
 
-- **Writing the graph.** `src/ninja.rs` writes `build.ninja` with five rules (`configure`, `rustc`, `rustdoc`,
+- **Writing the graph.** `src/ninja.rs` wrote `build.ninja` with five rules (`configure`, `rustc`, `rustdoc`,
   `clippy`, `rustc-check`, plus `custom`) and `phony` aliases (`custom/<name>`, `test/<name>`, `check/<label>`,
-  `lint/<name>`, `doc/<name>`, `lint`, `doc`). It uses explicit, implicit and order-only inputs, `default`,
+  `lint/<name>`, `doc/<name>`, `lint`, `doc`). It used explicit, implicit and order-only inputs, `default`,
   `deps = gcc` depfiles, `pool = console`, and `generator = 1`.
-- **Running it.** `Configured::ninja` (`src/configured.rs`) runs `ninja` in the build directory. That happens in
+- **Running it.** `Configured::ninja` (`src/configured.rs`) ran `ninja` in the build directory. That happened in
   `main.rs` (`build`), `test_runner.rs`, `check.rs` (`--quiet check/<label>`), `run.rs`, `lint.rs` and `install.rs`.
-- **Regenerating itself.** `Configured::reconfigure` runs `ninja build.ninja` and filters out the line
-  `ninja: no work to do.`. The configure edge depends on `build.ninja.d`, which lists every file the configuration
-  read, and on `reconfigure.stamp`. jig touches that stamp itself when a path the configuration recorded as missing
-  comes into existence.
-- **Asking whether something is up to date.** `install.rs` runs `ninja -n <target>` and searches the output for
+- **Regenerating itself.** `Configured::reconfigure` ran `ninja build.ninja` and filtered out the line
+  `ninja: no work to do.`. The configure edge depended on `build.ninja.d`, which listed every file the configuration
+  read, and on `reconfigure.stamp`. jig touched that stamp itself when a path the configuration recorded as missing
+  came into existence.
+- **Asking whether something is up to date.** `install.rs` ran `ninja -n <target>` and searched the output for
   `ninja: no work to do.`.
 - **Working around ninja's limits.**
-  - Every command goes through `sh`, so arguments are shell-quoted and `$` is escaped. The toolchain is set with a
-    shell prefix (`toolchain::shell_prefix`), and so are crate environment variables (`$crate-env`).
-  - Paths or values containing a line break are refused (`Error::LineBreak`, `has_line_break`), because ninja has no
-    escape for them.
-  - `install.rs` doesn't run ninja when nothing is stale, because older ninja versions print "no work to do" even
+  - Every command went through `sh`, so arguments were shell-quoted and `$` was escaped. The toolchain was set with a
+    shell prefix (`toolchain::shell_prefix`), and so were crate environment variables (`$crate-env`).
+  - Paths or values containing a line break were refused (`Error::LineBreak`, `has_line_break`), because ninja has no
+    escape for them. Only paths still are, as a depfile lists each on a line.
+  - `install.rs` didn't run ninja when nothing was stale, because older ninja versions print "no work to do" even
     with `--quiet`.
-- **Bootstrapping.** `bootstrap.ninja` builds `build/bootstrap/jig` with a single `rustc` command. CI installs ninja on
-  every runner.
+- **Bootstrapping.** `bootstrap.ninja` built `build/bootstrap/jig` with a single `rustc` command, and CI installed
+  ninja on every runner. `bootstrap.sh` now builds it with rustc alone.
 
 jig depends on nothing but `std`, and has no `Cargo.toml`. The engine keeps it that way: it has no dependencies either,
 though it may use `unsafe` and `extern "C"` declarations of the system's C library where `std` has no API, kept in one
@@ -46,17 +48,17 @@ platform module (`rig/sys.rs`).
 
 - **The graph is built through an API, not parsed from text.** jig hands the engine a graph directly. The engine saves
   it in its own binary format, as jig saves `.jig`, so that `jig build` can load it without evaluating the
-  configuration again. rig reads no text format of its own, and no ninja files: a graph is only ever built through
-  the API, or loaded from the binary format.
+  configuration again. rig reads no text format: a graph is only ever built through the API, or loaded from the
+  binary format.
 - **Actions are argument vectors, not shell strings.** An action has a program, arguments, environment variables, a
   working directory and optional redirections. Spawning programs directly means no `sh`, no quoting, no `$` escaping
   and no line-break limit. It also makes an action precise enough to hash for the cache and to send to a worker. A
-  `Shell` action remains for commands that really need a shell.
+  command which needs a shell runs one itself, as `sh -c`.
 - **Rebuild when what was recorded differs, not when an input is newer than an output.** For each edge, the engine
   records the stamps of its inputs when the edge runs. The edge is dirty when any current stamp differs from the
   recorded one. That treats a file whose timestamp goes backwards (a `git checkout`, a restored backup, clock skew) as
-  changed, which ninja's "newer than" comparison doesn't. In timestamp mode the stamp is the file's metadata; in hash
-  mode it is a hash of the contents.
+  changed, which a "newer than" comparison, as ninja's was, doesn't. In timestamp mode the stamp is the file's
+  metadata; in hash mode it is a hash of the contents.
 - **Layered.** The local engine, the cache and distribution are separate layers on one interface: an action and the
   hashes of its inputs go in, and outputs come out. Each layer can be built, tested and turned on by itself.
 - **Crash-safe without signal handlers.** State is written as an append-only log, each record checked when read, and a
@@ -92,32 +94,28 @@ platform module (`rig/sys.rs`).
 - `rig/` also has a `Cargo.toml`, with no dependencies and `publish = false`, so that cargo projects can use it as a
   git or path dependency. It isn't published on crates.io, and cargo doesn't build jig itself.
 
-API sketch:
+Building a graph and bringing it up to date, as the README's example does in full:
 
 ```rust
 let mut graph = rig::Graph::new();
-let src = graph.file("src/lib.rs");
-let out = graph.file("build/liba.rlib");
-graph.edge(rig::Edge {
-    action: rig::Action::exec("rustc").args([...]).env("RUSTUP_TOOLCHAIN", "stable").cwd(root),
-    inputs: vec![src], implicit: vec![], order_only: vec![],
-    outputs: vec![out], implicit_outputs: vec![],
-    depfile: Some(rig::Depfile::gcc("build/liba.rlib.d")),
-    pool: None, flags: rig::Flags::RESTAT | rig::Flags::CACHEABLE,
-    ..Default::default()
-});
-graph.alias("lib/a", [out]);              // in place of `phony`
-graph.default([out]);
-graph.save("build/graph")?;              // jig generate
+let (source, object) = (graph.file("hello.c"), graph.file("hello.o"));
+graph.add_edge(rig::Edge {
+    kind: rig::EdgeKind::Command(rig::Exec { program: "cc".into(), args: ..., ..rig::Exec::default() }),
+    outputs: vec![object],
+    inputs: vec![source],
+    depfile: Some("hello.d".into()),
+    ..rig::Edge::default()
+})?;
+graph.add_alias("hello", &[object])?;
+graph.add_default(&[object]);
+graph.save(Path::new("build/graph"))?;                 // jig generate
 
-let graph = rig::Graph::load("build/graph")?;   // jig build
-let report = rig::Engine::new(&graph, rig::Options { jobs, mode: rig::Mode::Hash, .. })
-    .observer(&mut ui)
-    .build(&["lib/a"])?;
+let graph = rig::Graph::load(Path::new("build/graph"))?;   // jig build
+let mut state = rig::state::State::open(Path::new("build/.rig"))?;
+let report = rig::exec::build(&graph, &mut state, &options, &["hello"], &mut console)?;
 ```
 
-`Engine::plan(targets)`, a dry run, returns the dirty edges. That replaces `ninja -n` and the search for
-"no work to do" in `install.rs`.
+`rig::plan::plan(...)`, a dry run, returns the edges which must run, and why.
 
 ### Graph and graph format
 
@@ -125,14 +123,16 @@ let report = rig::Engine::new(&graph, rig::Options { jobs, mode: rig::Mode::Hash
   file's bytes, as `.jig` does, so loading is one read and a validation pass, with no allocation per path.
 - The format starts with magic bytes and a version, and ends with a checksum. A version mismatch means "regenerate",
   as for `.jig` now.
-- The engine supports the edge features jig uses: explicit, implicit and order-only inputs; implicit outputs; aliases
-  (`phony`); defaults; gcc-style depfiles; pools, including an exclusive `console` pool; and generator edges.
+- An edge has outputs, of which some may be early, as rustc's metadata; inputs, which must be there or be built;
+  dependencies, which may be missing, as a crate whose use was removed with it; and what it is built after, without
+  depending on it. Beside edges, a graph has aliases, defaults, gcc-style depfiles, an exclusive `console` pool, and
+  generator edges.
   - **restat.** After an edge runs, the engine stats its outputs again. Dependents run only if an output changed.
   - **Missing-path inputs.** The input changes when a path that didn't exist comes into existence. That replaces
     `reconfigure.stamp` and the touch in `Configured::locate`.
 - **Generator edges are built first.** Before building anything else, the engine brings the edge that generates the
-  graph up to date. If that edge ran, the engine loads the graph again and starts over, as ninja does with
-  `build.ninja`. When jig is the generator, it runs in the same process, so no second `jig` is spawned.
+  graph up to date. If that edge ran, the engine loads the graph again and starts over. When jig is the generator, it
+  runs in the same process, so no second `jig` is spawned.
 
 ### State log
 
@@ -160,8 +160,8 @@ An edge is dirty if any of these holds:
 What a stamp is depends on the mode:
 
 - **`timestamp` (the default, and the only mode until phase 3).** The stamp is the mtime and the size, which come
-  from the same `stat` call, so it's as cheap as ninja. It catches more changes, since a different size or an older
-  mtime counts as a change.
+  from the same `stat` call, so it's as cheap as ninja's was. It catches more changes, since a different size or an
+  older mtime counts as a change.
 - **`hash`.** The stamp is a BLAKE3 hash of the contents. The metadata stamp above is a cache key for the hash, so an
   unchanged file is never read twice. A file whose mtime falls in the same tick as when it was recorded is hashed
   again: the "racy git" problem.
@@ -176,7 +176,7 @@ against the official test vectors. It's chosen over SHA-256 because, without SHA
 faster and can hash large files in parallel.
 
 Scanning is parallel. On a no-op build, most of the time goes to stat calls, so they're spread over the worker pool,
-as hashing is. This is where the engine beats ninja's single thread on large graphs.
+as hashing is. This is where the engine beat ninja's single thread on large graphs.
 
 ### Batched stat, and why there is no io_uring
 
@@ -197,15 +197,15 @@ files to hash them, which, unlike `statx`, can complete asynchronously, but only
 
 ### Environment variables
 
-ninja tracks no environment variables. A command inherits the environment that ninja was run with, and changing a
-variable rebuilds nothing. jig works around this in several places, and in others it simply can't track them:
+ninja tracked no environment variables. A command inherited the environment that ninja was run with, and changing a
+variable rebuilt nothing. jig worked around this in several places, and in others it simply couldn't track them:
 
 - **The configuration.** `env()` is an error by default (`diagnostic/impure`), because the build isn't reconfigured
   when the variable changes. A project can only allow it, and then it is not tracked.
 - **Searching `PATH`.** `which` and the program probes depend on the directories they search, but not on `PATH`
   itself. A program found again after `PATH` changes is found only because a directory changed.
 - **rustc.** rustc writes `# env-dep:NAME=VALUE` lines into its dep-info for the variables that `env!` and
-  `option_env!` read. Cargo rebuilds when those change; ninja ignores the lines.
+  `option_env!` read. Cargo rebuilds when those change; ninja ignored the lines.
 - **Custom commands and tests.** They read whatever they like from the inherited environment (`CC`, `CFLAGS`, `LANG`,
   ...), and none of it is tracked.
 - **Variables jig sets.** A crate's `env` attribute and the toolchain's `RUSTUP_TOOLCHAIN` are tracked only because
@@ -252,7 +252,7 @@ value. A variable is never sent to a cache or worker unless the action declares 
   whole tree can be stopped when the build fails or is interrupted.
 - **Priority.** Ready edges are ordered by the longest path from them to the end of the build, weighted by durations
   from the log. Edges with no history count as 1, so a deep chain of crates isn't started last.
-- **Jobs.** The default number of jobs is ninja's: two more than `std::thread::available_parallelism` when there are
+- **Jobs.** The default number of jobs is two more than `std::thread::available_parallelism` when there are
   more than two, or one more with two, or two with one, as commands spend time waiting on files and processes.
 - **Jobserver.** The engine runs a GNU make jobserver, using the `fifo:` form on Unix, and passes it to children in
   `MAKEFLAGS` and `CARGO_MAKEFLAGS`. rustc then shares tokens for its codegen threads instead of oversubscribing the
@@ -261,13 +261,14 @@ value. A variable is never sent to a cache or worker unless the action declares 
 - **Output.**
   - A program's stdout and stderr are captured together and printed in one piece when it finishes.
   - The `console` pool gets the terminal.
-  - The status line works as ninja's does. `--quiet` prints only what programs print.
+  - The status line shows `[finished/total]` and each edge's description, or on a terminal, the edges which are
+    running, updated in place. `--quiet` prints only what programs print.
   - A JSON event stream is available for tools.
-  - `jig check` reads events instead of filtering ninja's text.
+  - `jig check` reads events rather than filtering text.
 - **Pipelining.** Cargo starts dependents as soon as rustc has written a crate's `.rmeta`. The engine lets an action
   report that an output is ready before the action finishes, from the `--json=artifacts` notifications on rustc's
   stderr, and starts edges that need only that output. jig would emit `--emit=metadata,link` and pass `.rmeta` to
-  dependents that don't link. On deep crate graphs this is the largest gain over ninja on a full build.
+  dependents that don't link. On deep crate graphs this was the largest gain over ninja on a full build.
 
 ### The global cache
 
@@ -366,6 +367,10 @@ Distribution reuses the cache's blob store and keys. A remote execution is a cac
 
 Each phase can be merged and released by itself, and the test suite (`test/main.rs`, `test/perf.rs`) passes at the
 end of each one.
+
+The phases are a record of how rig was built, and stay as they were written, ninja and all: while they ran, jig still
+generated `build.ninja`, and rig was checked against ninja. ninja has since been removed, along with `rig::ninja`,
+shell actions, `JIG_ENGINE` and the tests which ran ninja, as [removing ninja](remove-ninja.md) describes.
 
 ### Phase 0: separate jig from ninja (done)
 
@@ -1768,8 +1773,9 @@ implementation of that trait, so `generate.rs` doesn't change.
   jobserver, the depfile parser, and the system calls (`signal`, `kill`, `mkfifo`, `ioctl`). That's a deliberate
   cost for having no dependencies. The `unsafe` code is confined to `rig/sys.rs`, with a safe interface and tests of
   its own. TLS is avoided by relying on ssh or a proxy instead of implementing it.
-- **Matching ninja's behaviour.** jig's users can run ninja in the build directory directly. Keeping `build.ninja`,
-  and the differential tests, limits what breaks.
+- **Behaving as expected without ninja to compare with.** ninja was the oracle of rig's differential tests, and a
+  user could run it in the build directory. Since it was removed, the differential tests check rig against a model
+  of what a build must do, which was itself checked against ninja on every seed before ninja was removed.
 - **Cache correctness depends on complete inputs.** Only rustc and rustdoc, whose depfiles are complete, are cached by
   default. Toolchain identity and remapped paths are tested by comparing a cached result with a fresh run.
 - **The first build of an edge can't be distributed** until its inputs are known. That makes distribution most useful
@@ -1783,6 +1789,9 @@ implementation of that trait, so `generate.rs` doesn't change.
    wasn't worth maintaining; see [Batched stat](#batched-stat-and-why-there-is-no-io_uring).
 3. **Change detection.** Timestamps, with the mtime and the size from the same `stat` call. Hash mode stays in the
    plan, as an option for phase 3 and the cache, but isn't the default.
-4. **ninja.** Generating `build.ninja` remains supported, permanently, as a second engine.
+4. **ninja.** Removed. It was kept, as a second engine, while rig replaced it, but once nothing depended on it,
+   keeping it meant writing every command as a shell line, refusing what ninja couldn't express, as a line break in an
+   argument, and keeping two engines' behaviour alike. It is gone without a deprecation period, as
+   [removing ninja](remove-ninja.md) records.
 5. **Packaging.** `rig/` has a `Cargo.toml`, so cargo projects can use it from git or a local path. It isn't
    published on crates.io.
