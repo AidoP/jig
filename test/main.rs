@@ -1423,32 +1423,36 @@ set a try(upper('unclosed'
 
 #[test]
 fn impure_functions() {
+    // what `run` runs is the test helper, while the custom command, which is not run, runs `echo`
     let project = Project::new("impure", &[("Jig", "\
 declare a
-set a run('echo', 'a')
-@if run('true') == ''
+set a run('HELPER', '--rig-test-helper', 'echo', 'a')
+@if run('HELPER', '--rig-test-helper', 'true') == ''
 custom c
-    command 'echo' run('echo', 'x')
-log note try(run('echo', 'y'), 'fallback')
+    command 'echo' run('HELPER', '--rig-test-helper', 'echo', 'x')
+log note try(run('HELPER', '--rig-test-helper', 'echo', 'y'), 'fallback')
 @if false
 log note 'skipped'
-@else-if run('echo', 'z') != ''
+@else-if run('HELPER', '--rig-test-helper', 'echo', 'z') != ''
 log note 'else'
 ")]);
+    // the calls as the file has them, which a diagnostic shows, underlined
+    let call = |word: &str| format!("run('{}', '--rig-test-helper', 'echo', '{word}')", helper());
+    let underline = |word: &str| "^".repeat(call(word).len());
     project.configure().failed()
         // the call is reported, with a suggestion to allow it for the statement
-        .stderr("\
+        .stderr(&format!("\
 error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes
  --> Jig:2:7
   |
-2 | set a run('echo', 'a')
-  |       ^^^^^^^^^^^^^^^^
+2 | set a {}
+  |       {}
 suggestion: allow it for the statement with `@with`
  --> Jig:2:1
   |
 2 + @with diagnostic/impure as 'allow'
-2 | set a run('echo', 'a')
-")
+2 | set a {}
+", call("a"), underline("a"), call("a")))
         // in a meta-statement, the suggestion is before the meta-statement
         .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:3:5")
         .stderr("suggestion: allow it for the statement with `@with`\n --> Jig:3:1")
@@ -1459,7 +1463,12 @@ suggestion: allow it for the statement with `@with`
         .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:6:14")
         .stderr("note: y")
         // `@with` cannot be before `@else-if`, so there is no suggestion
-        .stderr("error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> Jig:9:10\n  |\n9 | @else-if run('echo', 'z') != ''\n  |          ^^^^^^^^^^^^^^^^\nnote: else")
+        .stderr(&format!(
+            "error[impure]: function \"run\" is impure, as the build is not reconfigured when its value changes\n --> \
+             Jig:9:10\n  |\n9 | @else-if {} != ''\n  |          {}\nnote: else",
+            call("z"),
+            underline("z"),
+        ))
         .stderr("configuration failed with 5 errors");
 }
 
@@ -1468,12 +1477,12 @@ fn impure_functions_allowed() {
     let project = Project::new("impure-allowed", &[
         ("Jig", "\
 @with diagnostic/impure as 'allow'
-log note 'home is {run('echo', env('HOME'))}'
+log note 'home is {run('HELPER', '--rig-test-helper', 'echo', env('HOME'))}'
 @with diagnostic/impure as 'warning'
 use 'sub'
-log note run('echo', 'again')
+log note run('HELPER', '--rig-test-helper', 'echo', 'again')
 "),
-        ("sub/Jig", "log note run('echo', 'sub')\n"),
+        ("sub/Jig", "log note run('HELPER', '--rig-test-helper', 'echo', 'sub')\n"),
     ]);
     let output = project.configure_with(&[("HOME", "/home/test")]).failed();
     output
