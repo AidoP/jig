@@ -71,9 +71,20 @@ Meanwhile ninja has become a constraint more than an alternative:
   `reconfigure.stamp` from before is left as it is, unread.
 - **No shell actions.** rig runs programs only. A command which needs a shell runs one itself, as `sh -c '...'`, as the
   integration tests' custom commands already do.
+- **Inputs and dependencies, rather than explicit and implicit inputs.** ninja splits an edge's inputs by whether
+  `$in` names them, which means nothing once rig runs each edge's arguments as they are. rig splits them instead by
+  what a missing one means:
+  - an **input** is a file the edge reads, which must be there: one which is missing, and which no edge produces, is
+    an error before anything runs, as `MissingInput` is now. A crate's sources, a custom command's `input`s, its
+    program given by a path, a linker script and a target's specification are inputs.
+  - a **dependency** is a file the edge depends on, which runs it again when it changes, but which may be missing: one
+    which is missing, and which no edge produces, makes the edge out of date, rather than an error, and the edge runs,
+    so that whatever reads it, as rustc, says why if it needs it. The crates a crate uses, as an `extern crate` which
+    was deleted along with its declaration, and what a crate's or command's `depends` names, are dependencies, as are
+    the inputs an edge discovers in its depfile, as they are now.
+  - order-only inputs stay as they are, as **`after`**: built first, but neither read nor depended on.
 - **`jig graph` stays, in a form of jig's own.** Its ninja-style statements are replaced, as their `|` and `||`
-  separators and the split of inputs into explicit and implicit only mean something to ninja, where explicit inputs
-  are what `$in` expands to. rig runs each edge's arguments as they are, so the split is meaningless for it.
+  separators only mean something to ninja.
 
 ## `jig graph`'s new form
 
@@ -84,6 +95,7 @@ each of what it has, as `key = value`, and a blank line:
 x86_64-unknown-linux-gnu/libutil.rlib x86_64-unknown-linux-gnu/libutil.rmeta
     description = RUSTC x86_64-unknown-linux-gnu/libutil.rlib
     inputs = ../util.rs
+    dependencies = x86_64-unknown-linux-gnu/libcore.rmeta
     after = gen.rs
     command = rustc --crate-type=lib --crate-name=util ... ../util.rs
     depfile = x86_64-unknown-linux-gnu/libutil.rlib.d
@@ -98,8 +110,8 @@ default custom/copy x86_64-unknown-linux-gnu/libutil.rlib
 
 - **`outputs`,** in the header, are every file the edge writes, as rig has no other kind but the early ones, which
   `early` names again.
-- **`inputs`** are every file it depends on, each once, in the order the graph has them, the explicit then the
-  implicit, without the duplicates the split made, as `../app.rs | libutil.rlib libutil.rlib` was.
+- **`inputs`** are the files it reads which must be there, and **`dependencies`** those which may be missing, as
+  above, each once, without the duplicates ninja's split made, as `../app.rs | libutil.rlib libutil.rlib` was.
 - **`after`** are the order-only inputs: built first, but not depended on, so that a change to one doesn't run the edge.
 - **`alias`,** for an alias, the targets it names, in place of a description and command.
 - The other keys are as they are now: `command`, `depfile`, `discover`, `early`, `pass-env`, `pool`, `cache`,
@@ -153,9 +165,17 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
    - `Action::Shell`, `sys::shell` and the graph format's shell actions go, which changes the graph format's version,
      so that a graph from before is generated again. `Action` is a program alone, which may be a shell a command
      names, as `sh -c`.
-   - rig's graph may also keep a node list per edge for outputs, inputs and order-only inputs alone, merging the
-     explicit and implicit ones, as nothing tells them apart once `$in` and `$out` are gone; whether it does is
-     decided as the step is done, by whether it simplifies rig, as `jig graph` merges them either way.
+   - rig's graph keeps, for each edge, its outputs, its early outputs, its inputs, its dependencies and its
+     order-only inputs, in place of ninja's explicit and implicit outputs and inputs, which changes the graph format's
+     version. Its plan errors for a missing input which no edge produces, as now, but takes a missing dependency as
+     out of date, as a discovered one is, so that a crate whose `extern crate` was deleted with what it used is
+     built again, and rustc says why, if it still needs it. jig's `Edge` gives each list, and decides which of an
+     edge's files are inputs and which dependencies, as the decision above lists them.
+     - rig, plan: a missing input which no edge produces is an error, and a missing dependency runs its edge, and
+       an edge which no longer needs it is up to date once it has run.
+     - Integration: a crate which used another, once both the other and its `extern crate` are removed, is built
+       again, without an error from rig.
+
 5. **Give `jig graph` its new form,** as above, with the README, the module's documentation and the integration tests'
    harness and expectations changed to it.
 6. **Make the integration tests independent of POSIX shell.** The 18 integration tests ignored on Windows for running
