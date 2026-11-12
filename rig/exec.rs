@@ -2778,9 +2778,10 @@ mod tests {
     /// or on Windows on Arm.
     const SLOW: &str = "sleep 1 && touch $out";
 
-    /// The rule of the slow edge of [`copied`], which holds the one job for 0.3 s, which the times of its tests' links,
-    /// workers and copies are chosen against.
-    const BRIEF: &str = "sleep 0.3 && touch $out";
+    /// The rule of the slow edge of [`copied`], which holds the one job for 0.6 s, which the times of its tests' links,
+    /// workers and copies are chosen against: half a second longer than a copy of 0.1 s, so that it is the first to
+    /// run however long the test helper takes to start, as on macOS, where that varies by more than 0.2 s.
+    const BRIEF: &str = "sleep 0.6 && touch $out";
 
     /// Remove outputs, so that their edges run again.
     fn remove(build: &Build, outputs: &[&str]) {
@@ -2939,9 +2940,9 @@ mod tests {
         // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
         build.ran(&[]);
-        // over a link with a second's latency, sending takes longer than the slow edge has left, or the others take
+        // over a link with two seconds' latency, sending takes longer than the slow edge has left, or the others take
         let store = TempCache::new("waits-store");
-        let slow = crate::remote::Link { latency: Duration::from_secs(1), bytes_per_second: 1e9, speed: 1.0 };
+        let slow = crate::remote::Link { latency: Duration::from_secs(2), bytes_per_second: 1e9, speed: 1.0 };
         build.options.workers = vec![linked(&store, slow)];
         remove(&build, &["slow", "a.o", "b.o"]);
         let second = TempCache::new("waits-second");
@@ -2997,10 +2998,10 @@ mod tests {
 
     #[test]
     fn sends_edges_to_the_worker_they_finish_soonest_on() {
-        // the edges which copy their inputs take 0.1 s here, while the slow edge holds the one job for 0.3 s, as it is
+        // the edges which copy their inputs take 0.1 s here, while the slow edge holds the one job for 0.6 s, as it is
         // the first to run only if it took longer when it last ran, by enough that the copies, which start a process
-        // more, do not overtake it on a machine which starts them slowly, as with 0.2 s on macOS, where one of them
-        // took the job, and the worker ran only the other
+        // more, do not overtake it on a machine which starts them slowly, as with 0.2 s and then 0.3 s on macOS, where
+        // one of them took the job, and the worker ran only the other
         let mut build = Build::new("soonest", copied(), &[("a", "0.1\n"), ("b", "0.1\n")]);
         let first = TempCache::new("soonest-first");
         build.options.cache = Some(first.0.clone());
