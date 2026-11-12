@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use crate::builder::Request;
 use crate::configured::{Configured, Output};
-#[cfg(unix)]
-use crate::generate::shell_quote;
 use crate::project::{self, Message, Severity};
 use crate::{Error, database};
 
@@ -332,3 +330,8 @@ fn find_program<'a>(
     database.installs.iter().find(|file| file.program && destination(prefix, file) == wrapper)
 }
 
+/// Quote a string as a single argument for `sh`.
+#[cfg(unix)]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}

@@ -155,16 +155,18 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      its project and 100 ms for one which is up to date, and the differential test checks rig against the model alone.
    - **Checked.** Every test passes on Linux, with `JIG_ENGINE=ninja` set as well, and under Wine, all but those which
      need tools the Wine prefix lacks (nightly, clippy, `echo` and `sh`) pass, 21 being ignored on Windows.
-3. **Describe builds as rig's, rather than through ninja's rules.**
+3. **Done: describe builds as rig's, rather than through ninja's rules.**
    - jig builds rig's graph through rig's own API, `Graph::add_edge` and `add_alias`, with each edge's program,
-     arguments, environment, working directory, stderr file, description and depfile given directly, rather than
-     through rules with `$in`, `$out` and variables, which a `Manifest` evaluates.
-   - The `Graph` trait, `Rule`, `Edge`'s `rule` and `variables`, `Tee`, `RigGraph`'s `Manifest` and the rules
-     `generate.rs` declares go. `Flags` holds arguments alone, and `ninja_quote`, `crate_env` and
-     `toolchain::shell_prefix` go. `shell_quote` stays only where a command line is shown, as `-v` and `jig graph`
-     show one.
-   - `jig graph`'s output for the integration tests' projects is compared before and after, so that the rework changes
-     nothing that is built. This is done before step 5 changes its form, so that the comparison is of like with like.
+     arguments, environment, working directory, stderr file, description and depfile given directly. `RigGraph`
+     interns the paths of an `Edge` and adds it; there are no rules, variables or `Manifest`.
+   - The `Graph` trait, `Rule`, `Edge`'s `rule` and `variables`, and `src/graph.rs` are gone, with `path_string` now in
+     `rig_graph`. `Flags` holds arguments alone, and `ninja_quote`, `crate_env` and `toolchain::shell_prefix` are gone.
+     `shell_quote` is left only in `install.rs`, where the wrappers `--proxy` installs are shell scripts.
+   - The differential test builds a `rig::Graph` directly, with its commands as shell lines until step 4.
+   - **Checked.** `jig graph`, as text and as JSON, is the same before and after for every project the integration
+     tests configure, 119 of them. A description no longer quotes its path for `sh`, as ninja's `$out` did, which none
+     of them has a reason to. The differential test agrees with the model on 128 seeds, and under Wine the integration
+     tests pass as they did after step 2.
 4. **Remove `rig::ninja` and shell actions from rig.**
    - `rig::testing::Graphs` builds rig's test graphs through the API, with programs rather than shell lines. A test's
      commands, as `cat`, `cp`, `sleep` and writing a depfile, are done by the test harness itself, run again as a

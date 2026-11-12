@@ -48,7 +48,7 @@ pub fn show(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), Error>
             "--json" => json = true,
             option if option.starts_with('-') => return Err(Error::RigArgument(option.into())),
             // as the graph has them, with `/`, which a path on Windows may be written without
-            output => outputs.push(crate::graph::path_string(std::path::Path::new(output))),
+            output => outputs.push(crate::rig_graph::path_string(std::path::Path::new(output))),
         }
     }
     let project = Configured::find(Output::Stderr)?;

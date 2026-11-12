@@ -278,7 +278,7 @@ impl Builder for Rig<'_> {
         }
         options.keep_going = args.keep_going.unwrap_or(usize::from(!request.keep_going));
         // as the graph has them, with `/`, which a path on Windows may be written without
-        let given = args.targets.iter().map(|target| crate::graph::path_string(Path::new(target)));
+        let given = args.targets.iter().map(|target| crate::rig_graph::path_string(Path::new(target)));
         let given: Vec<String> = given.collect();
         let mut targets: Vec<&str> = given.iter().map(String::as_str).collect();
         targets.extend_from_slice(request.targets);

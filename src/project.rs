@@ -32,8 +32,8 @@ use value::Ref;
 
 use customs::{Custom, Runner};
 
-/// Whether text has a line break, which ninja cannot write, as it has no escape for one: a `$` before a newline continues
-/// the line, and a carriage return is only taken before a newline.
+/// Whether text has a line break, which a path cannot have, as a depfile lists each path on a line, with no escape for
+/// one.
 pub fn has_line_break(text: &str) -> bool {
     text.contains(['\n', '\r'])
 }
