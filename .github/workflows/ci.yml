@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# a push to a pull request cancels what still runs for its earlier commits, which the slow RISC-V runners would
+# otherwise spend their time on, while every commit to main is tested
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 env:
   # the minimum supported Rust version, which the README gives too
   MSRV: "1.97"
