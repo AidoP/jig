@@ -6,13 +6,11 @@
 //! relative to the project root.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::graph::{Edge, Graph, Rule};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
-use crate::rig_graph::{self, RigGraph};
+use crate::rig_graph::{self, Edge, RigGraph};
 use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 
 /// Write the files generated from a project, which has been read and checked.
@@ -34,13 +32,13 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     identify_linkers(&mut project, &crates);
     write_depfile(&project, &at, &build_dir)?;
     let units = units(&project, &crates, sysroot, &build_dir);
-    let mut graph = RigGraph::new(build_dir.join(rig_graph::FILE));
-    write_graph(&mut graph, &project, &crates, &units, &installed, input, &at)?;
+    let graph = RigGraph::new(build_dir.join(rig_graph::FILE));
+    write_graph(graph, &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
     write_database(&project, &units, &installed, input, &at, &build_dir)
 }
 
-/// Rebases the paths of a project, relative to its root, for ninja, which runs in the build directory.
+/// Rebases the paths of a project, relative to its root, for rig, which runs in the build directory.
 ///
 /// Every path is relative to the build directory, so that what rustc, which also runs there, is given and writes does
 /// not depend on where the project is: a path within the build directory is relative to it, and any other leads out of
@@ -368,7 +366,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
 
 /// Write the build graph of a project.
 fn write_graph(
-    graph: &mut dyn Graph,
+    mut graph: RigGraph,
     project: &Project,
     crates: &[Crate],
     units: &[Unit],
@@ -389,86 +387,30 @@ fn write_graph(
     // rig caches the results of rustc and clippy, by the identity of the toolchain, when it caches, but not of rustdoc,
     // which writes a directory
     let cache = project.cache.as_deref();
-    // the configure tool and custom commands run from the project root, as their arguments are relative to it
-    let cd = format!("cd {} &&", ninja_quote(&at.root.display().to_string()));
-
     // the graph regenerates itself with the configure tool which generated it, and again when the tool changes, so a
     // project which builds the tool, such as its own, has it built first
     let exe = std::env::current_exe().ok();
     let configure = exe.clone().unwrap_or_else(|| "jig".into());
-    // with the toolchain it was configured with
+    // with the toolchain it was configured with, from the project root, as its arguments are relative to it
     let toolchain = project.toolchain.as_deref();
-    let plus = toolchain.map(|toolchain| format!(" {}", ninja_quote(&format!("+{toolchain}")))).unwrap_or_default();
-    let command = format!(
-        "{cd} {}{plus} generate {}",
-        ninja_quote(&configure.display().to_string()),
-        ninja_quote(&input.display().to_string()),
-    );
-    // rustc and custom commands run with the toolchain, even when ninja is run directly
-    let env = toolchain::shell_prefix(toolchain).replace('$', "$$");
-    graph.rule(&Rule {
-        name: "configure",
-        command: &command,
-        description: "CONFIGURE $out",
-        console: true,
-        depfile: Some("$out.d"),
-        generator: true,
-    })?;
     let exe = at.paths(&exe);
     let mut args: Vec<String> = toolchain.map(|toolchain| format!("+{toolchain}")).into_iter().collect();
     args.extend(["generate".to_string(), input.display().to_string()]);
-    let exec = program(&configure.display().to_string(), args, Some(&at.root), Vec::new());
-    graph.edge(&Edge {
-        rule: "configure",
-        outputs: &[Path::new(generated)],
+    let generated = Path::new(generated);
+    graph.edge(Edge {
+        description: describe("CONFIGURE", generated),
+        outputs: &[generated],
         inputs: &[&at.path(input)],
         implicit: &as_paths(&exe),
-        exec: Some(&exec),
+        exec: program(&configure.display().to_string(), args, Some(&at.root), Vec::new()),
+        depfile: Some(&depfile_of(generated)),
+        console: true,
+        generator: true,
         hashed,
         ..Default::default()
     })?;
 
-    graph.variable("edition", "2024")?;
-    // the temporary files rustc writes to `--out-dir` are kept in the build directory, in a directory for each edge, as
-    // they are named after the crate, which may be compiled for several targets, or as a test harness, at once
-    // `crate-env` is the environment variables of a crate, before rustc, as `sh` takes them
-    let rustc = &format!("{env}$crate-env rustc --color=always --out-dir=$tmpdir --emit=link=$out ${{emit-metadata}}--emit=dep-info=$depfile --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in");
-    graph.rule(&Rule {
-        name: "rustc",
-        command: rustc,
-        description: "RUSTC $out",
-        depfile: Some("$out.d"),
-        ..Default::default()
-    })?;
-
-    // rustdoc only writes dep-info with unstable options, so the documentation depends on the crate's check instead,
-    // which is built again when its sources change, and the crates for a target are documented together, as rustdoc
-    // locks the files they share
-    graph.rule(&Rule {
-        name: "rustdoc",
-        command: &format!("{env}$crate-env rustdoc --color=always --out-dir=$outdir --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in"),
-        description: "RUSTDOC $out",
-        ..Default::default()
-    })?;
-
-    // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to date
-    graph.rule(&Rule {
-        name: "clippy",
-        command: &format!("{env}$crate-env clippy-driver --color=always --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics"),
-        description: "CLIPPY $out",
-        depfile: Some("$out.d"),
-        ..Default::default()
-    })?;
-
-    graph.rule(&Rule {
-        name: "rustc-check",
-        command: &format!("{env}$crate-env rustc --error-format=json --out-dir=$outdir --emit=metadata=$out --emit=dep-info=$out.d --crate-type=$crate-type --crate-name=$crate-name --edition=$edition $flags $in 2> $diagnostics"),
-        description: "CHECK $out",
-        depfile: Some("$out.d"),
-        ..Default::default()
-    })?;
-
-    // the targets built by `ninja` without any, which are all targets if there are none
+    // the targets built without any, which are all targets if there are none
     let mut defaults: Vec<PathBuf> = Vec::new();
     // what is built without defaults, which is all but the checks, which are for rust-analyzer
     let mut everything: Vec<PathBuf> = Vec::new();
@@ -477,13 +419,6 @@ fn write_graph(
     // the lints of the crates, which are not built without targets, like the checks
     let mut lints: Vec<PathBuf> = Vec::new();
 
-    // the command of an edge is `command-line`, as its `command` would replace the rule's
-    graph.rule(&Rule {
-        name: "custom",
-        command: &format!("{cd} {env}$command-line"),
-        description: "CUSTOM $name",
-        ..Default::default()
-    })?;
     let mut tests = Vec::new();
     for custom in &project.customs {
         // a test is run by `jig test`, which builds its inputs and program with this target first
@@ -495,22 +430,18 @@ fn write_graph(
             tests.push(phony);
             continue;
         };
-        // ninja runs commands with `sh`, which must not split or expand the arguments
-        let command: Vec<_> = custom.command.iter().map(|argument| shell_quote(argument)).collect();
-        let command = command.join(" ").replace('$', "$$");
         let outputs = at.paths(outputs);
         // from the project root, as a path relative to the build directory, so that the action does not depend on where
         // the project is, as for the key of the cache
         let root = at.path(&at.root);
         let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), toolchain_env(toolchain));
-        graph.edge(&Edge {
-            rule: "custom",
+        graph.edge(Edge {
+            description: format!("CUSTOM {}", custom.name),
             outputs: &as_paths(&outputs),
             inputs: &as_paths(&at.paths(&custom.inputs)),
             implicit: &as_paths(&at.paths(&custom.program)),
             order_only: &as_paths(&at.paths(&custom.depends)),
-            variables: &[("command-line", &command), ("name", &custom.name)],
-            exec: Some(&exec),
+            exec,
             hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
             cache: custom.cache.as_deref(),
             pass_env: &custom.pass_env,
@@ -571,7 +502,6 @@ fn write_graph(
         let harness_externs = externs(true, false);
         let harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
         let harness_deps = deps_of(&harness_externs);
-        let crate_env = crate_env(&c.env);
         // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
         // test harness and any crate but a library, which then depends on it
         let link_script = c.link_script.as_ref().or_else(|| project.target(&c.target)?.link_script.as_ref());
@@ -620,10 +550,8 @@ fn write_graph(
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
         let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
-        // a library writes its metadata too, which rig is told of as rustc writes it, with JSON, which ninja is not
+        // a library writes its metadata too, which rig is told of as rustc writes it, with JSON
         let metadata = (c.kind == Kind::Lib).then(|| at.path(&c.metadata()));
-        let emit_metadata =
-            metadata.as_ref().map(|path| format!("--emit=metadata={} ", ninja_quote(&path.display().to_string())));
         let mut leading = rustc_emit(&tmpdir, &output).to_vec();
         if let Some(path) = &metadata {
             // rustc colours what it renders in JSON as it would have printed it, taking no `--color` with JSON
@@ -637,28 +565,22 @@ fn write_graph(
         }
         let placement = placement(unit, units, project, linked);
         let early: Vec<&Path> = metadata.iter().map(PathBuf::as_path).collect();
-        graph.edge(&Edge {
-            rule: "rustc",
+        graph.edge(Edge {
+            description: describe("RUSTC", &output),
             outputs: &[&output],
             implicit_outputs: &early,
             early: &early,
             inputs: &[&input],
             implicit: if linked { &link_deps } else { &deps },
             order_only: &as_paths(&depends),
-            variables: &[
-                ("crate-name", &c.name),
-                ("crate-type", crate_type),
-                ("flags", crate_flags.ninja()),
-                ("tmpdir", &tmpdir.display().to_string()),
-                ("crate-env", &crate_env),
-                ("emit-metadata", emit_metadata.as_deref().unwrap_or_default()),
-            ],
-            exec: Some(&exec),
+            depfile: Some(&depfile_of(&output)),
+            discover: Some(discovery(&exec)),
+            exec,
             hashed,
             pass_env: rust.pass_env,
             cache,
             placement: placement.clone(),
-            discover: Some(discovery(&exec)),
+            ..Default::default()
         })?;
         everything.push(output.clone());
         if c.test {
@@ -669,26 +591,20 @@ fn write_graph(
             let harness = at.path(&c.test_harness());
             let mut exec = rust.exec("rustc", &rustc_emit(&tmpdir, &harness), &test_flags, None);
             exec.env.extend(linker_env(&codegen, &c.target, project));
-            graph.edge(&Edge {
-                rule: "rustc",
+            graph.edge(Edge {
+                description: describe("RUSTC", &harness),
                 outputs: &[&harness],
                 inputs: &[&input],
                 implicit: &harness_link_deps,
                 order_only: &as_paths(&depends),
-                variables: &[
-                    ("crate-name", &c.name),
-                    ("crate-type", crate_type),
-                    ("flags", test_flags.ninja()),
-                    ("tmpdir", &tmpdir.display().to_string()),
-                    ("crate-env", &crate_env),
-                ],
-                exec: Some(&exec),
+                depfile: Some(&depfile_of(&harness)),
+                discover: Some(discovery(&exec)),
+                exec,
                 hashed,
                 pass_env: rust.pass_env,
                 cache,
                 // the test harness links, as a binary does
                 placement: self::placement(unit, units, project, true),
-                discover: Some(discovery(&exec)),
                 ..Default::default()
             })?;
         }
@@ -696,20 +612,14 @@ fn write_graph(
             let tmpdir = Path::new("tmp").join(&c.target).join("unwind").join(&c.name);
             let copy = at.path(&c.unwind_output());
             let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &copy), &harness_flags, None);
-            graph.edge(&Edge {
-                rule: "rustc",
+            graph.edge(Edge {
+                description: describe("RUSTC", &copy),
                 outputs: &[&copy],
                 inputs: &[&input],
                 implicit: &as_paths(&harness_deps),
                 order_only: &as_paths(&depends),
-                variables: &[
-                    ("crate-name", &c.name),
-                    ("crate-type", crate_type),
-                    ("flags", harness_flags.ninja()),
-                    ("tmpdir", &tmpdir.display().to_string()),
-                    ("crate-env", &crate_env),
-                ],
-                exec: Some(&exec),
+                depfile: Some(&depfile_of(&copy)),
+                exec,
                 hashed,
                 pass_env: rust.pass_env,
                 cache,
@@ -742,7 +652,6 @@ fn write_graph(
         let codegen = if unit.harness { harness_codegen(&unit.codegen) } else { unit.codegen.clone() };
         let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &codegen, &root, at);
         flags.cfg(&unit.cfg);
-        let crate_env = crate_env(&unit.env);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
         let rust = Rust { crate_type, name, input: &root, env, pass_env: &unit.pass_env, toolchain };
         // a check writes metadata, rather than linking
@@ -757,19 +666,15 @@ fn write_graph(
             let doc_dir = at.path(&unit.doc_dir()).display().to_string();
             let leading = ["--color=always".to_string(), format!("--out-dir={doc_dir}")];
             let exec = rust.exec("rustdoc", &leading, &flags, None);
-            graph.edge(&Edge {
-                rule: "rustdoc",
+            // rustdoc only writes dep-info with unstable options, so the documentation depends on the crate's check
+            // instead, which is built again when its sources change, and the crates for a target are documented
+            // together, as rustdoc locks the files they share
+            graph.edge(Edge {
+                description: describe("RUSTDOC", &index),
                 outputs: &[&index],
                 inputs: &[&root],
                 implicit: &implicit,
-                variables: &[
-                    ("crate-name", &unit.name),
-                    ("crate-type", unit.kind.crate_type()),
-                    ("flags", flags.ninja()),
-                    ("outdir", &doc_dir),
-                    ("crate-env", &crate_env),
-                ],
-                exec: Some(&exec),
+                exec,
                 hashed,
                 pass_env: rust.pass_env,
                 ..Default::default()
@@ -797,26 +702,21 @@ fn write_graph(
             }
             let emit = metadata_emit(&outdir, &output, true);
             let exec = rust.exec("clippy-driver", &emit, &lint_flags, Some(&diagnostics));
-            graph.edge(&Edge {
-                rule: "clippy",
+            // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to
+            // date
+            graph.edge(Edge {
+                description: describe("CLIPPY", &output),
                 outputs: &[&output],
                 implicit_outputs: &[&diagnostics],
                 inputs: &[&root],
                 implicit: &deps,
-                variables: &[
-                    ("crate-name", &unit.name),
-                    ("crate-type", unit.kind.crate_type()),
-                    ("flags", lint_flags.ninja()),
-                    ("outdir", &outdir.display().to_string()),
-                    ("diagnostics", &diagnostics.display().to_string()),
-                    ("crate-env", &crate_env),
-                ],
-                exec: Some(&exec),
+                depfile: Some(&depfile_of(&output)),
+                discover: Some(discovery(&exec)),
+                exec,
                 hashed,
                 pass_env: rust.pass_env,
                 cache,
                 placement: placement.clone(),
-                discover: Some(discovery(&exec)),
                 ..Default::default()
             })?;
             let phony = Path::new("lint").join(name);
@@ -825,26 +725,19 @@ fn write_graph(
         }
         let diagnostics = at.path(&unit.diagnostics());
         let exec = rust.exec("rustc", &metadata_emit(&outdir, &output, false), &flags, Some(&diagnostics));
-        graph.edge(&Edge {
-            rule: "rustc-check",
+        graph.edge(Edge {
+            description: describe("CHECK", &output),
             outputs: &[&output],
             implicit_outputs: &[&diagnostics],
             inputs: &[&root],
             implicit: &deps,
-            variables: &[
-                ("crate-name", &unit.name),
-                ("crate-type", unit.kind.crate_type()),
-                ("flags", flags.ninja()),
-                ("outdir", &outdir.display().to_string()),
-                ("diagnostics", &diagnostics.display().to_string()),
-                ("crate-env", &crate_env),
-            ],
-            exec: Some(&exec),
+            depfile: Some(&depfile_of(&output)),
+            discover: Some(discovery(&exec)),
+            exec,
             hashed,
             pass_env: rust.pass_env,
             cache,
             placement,
-            discover: Some(discovery(&exec)),
             ..Default::default()
         })?;
         graph.alias(&Path::new("check").join(&unit.label), &[&output])?;
@@ -860,16 +753,26 @@ fn write_graph(
     let installed = at.paths(installed.iter().map(|file| &file.path));
     graph.alias(Path::new("install"), &as_paths(&installed))?;
 
-    // without a `default` statement, ninja would build every target, including the checks
+    // every target but the checks, if no crate or command is built by default
     let defaults = if defaults.is_empty() { everything } else { defaults };
-    if !defaults.is_empty() {
-        graph.default(&as_paths(&defaults))?;
-    }
+    graph.default(&as_paths(&defaults));
 
     graph.finish()
 }
 
-/// Returns paths borrowed as the `Path`s of a ninja statement.
+/// Returns what is shown while an edge which writes `output` runs, as `RUSTC <output>`.
+fn describe(action: &str, output: &Path) -> String {
+    format!("{action} {}", rig_graph::path_string(output))
+}
+
+/// Returns the depfile of an edge which writes `output`, beside it.
+fn depfile_of(output: &Path) -> PathBuf {
+    let mut depfile = output.as_os_str().to_owned();
+    depfile.push(".d");
+    depfile.into()
+}
+
+/// Returns paths borrowed as the `Path`s of an edge.
 fn as_paths(paths: &[PathBuf]) -> Vec<&Path> {
     paths.iter().map(PathBuf::as_path).collect()
 }
@@ -946,13 +849,13 @@ fn write_database(
         let runner = project.target(&unit.target).and_then(|target| target.runner);
         let runner = runner.map(|runner| project.runners[runner].command.clone()).unwrap_or_default();
         // a target as the graph has it, which is built by it
-        let (path, target) = (unit.output.display().to_string(), crate::graph::path_string(&at.path(&unit.output)));
+        let (path, target) = (unit.output.display().to_string(), rig_graph::path_string(&at.path(&unit.output)));
         programs.push((name, path, target, runner, unit.default));
     }
 
     let test_tags = project.test_tags();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
-    let install_targets = installed.iter().map(|file| crate::graph::path_string(&at.path(&file.path)));
+    let install_targets = installed.iter().map(|file| rig_graph::path_string(&at.path(&file.path)));
     let install_targets: Vec<_> = install_targets.collect();
     let mut database = database::Database {
         input: &input,
@@ -1025,7 +928,7 @@ fn rustc_flags(
     at: &Rebase,
 ) -> Flags {
     let mut flags = Flags::default();
-    flags.quoted(&at.remap(root_module));
+    flags.extend(&at.remap(root_module));
     match &target.spec {
         Some(spec) => flags.plain(&[&format!("--target={}", at.path(spec).display()), "-Zunstable-options"]),
         None => flags.plain(&[&format!("--target={}", target.target)]),
@@ -1128,52 +1031,27 @@ fn harness_codegen(codegen: &[String]) -> Vec<String> {
     codegen.iter().filter(|option| !option.starts_with("panic=")).cloned().collect()
 }
 
-/// The flags of rustc, rustdoc or clippy, both as the arguments of the program, which rig runs directly, and as they are
-/// written to `build.ninja`, whose commands `sh` runs, with `$` escaped for ninja.
+/// The flags of rustc, rustdoc or clippy, as the arguments of the program, which rig runs directly, without a shell.
 #[derive(Clone, Default)]
 struct Flags {
     args: Vec<String>,
-    /// The flags for `build.ninja`, each after a space.
-    ninja: String,
 }
 impl Flags {
-    /// Add arguments, which are written to `build.ninja` as they are, as `sh` takes them as they are.
     fn plain(&mut self, args: &[&str]) {
-        for arg in args {
-            self.ninja.push(' ');
-            self.ninja.push_str(arg);
-            self.args.push((*arg).to_string());
-        }
+        self.args.extend(args.iter().map(|arg| (*arg).to_string()));
     }
-    /// Add arguments, each quoted for `sh` in `build.ninja`, as a path may have spaces, and ninja would take a `$` as a
-    /// variable.
-    fn quoted(&mut self, args: &[String]) {
-        for arg in args {
-            let _ = write!(self.ninja, " {}", ninja_quote(arg));
-            self.args.push(arg.clone());
-        }
+    fn extend(&mut self, args: &[String]) {
+        self.args.extend_from_slice(args);
     }
-    /// Add a codegen option, `-C <option>=<value>`, quoted for `sh` in `build.ninja` if it has to be, as a value, such
-    /// as of `llvm-args`, may have spaces, and ninja would take a `$` as a variable.
+    /// Add a codegen option, `-C <option>=<value>`.
     fn codegen(&mut self, option: &str) {
-        let escaped = option.replace('$', "$$");
-        if escaped.contains(|c: char| !c.is_ascii_alphanumeric() && !"-_=.,/+$".contains(c)) {
-            let _ = write!(self.ninja, " -C {}", shell_quote(&escaped));
-        } else {
-            let _ = write!(self.ninja, " -C {escaped}");
-        }
         self.args.extend(["-C".to_string(), option.to_string()]);
     }
-    /// Add the `--cfg` flags of configuration options, each quoted for `sh` in `build.ninja`.
+    /// Add the `--cfg` flags of configuration options.
     fn cfg(&mut self, cfg: &[String]) {
         for option in cfg {
-            let _ = write!(self.ninja, " --cfg {}", ninja_quote(option));
             self.args.extend(["--cfg".to_string(), option.clone()]);
         }
-    }
-    /// Returns the flags as `build.ninja` has them.
-    fn ninja(&self) -> &str {
-        self.ninja.strip_prefix(' ').unwrap_or(&self.ninja)
     }
 }
 
@@ -1249,25 +1127,6 @@ fn program(program: &str, args: Vec<String>, dir: Option<&Path>, env: Vec<(Strin
 /// Returns a program run from the build directory, as rustc is, whose paths are relative to it.
 fn program_in_build_dir(name: &str, args: Vec<String>, env: Vec<(String, String)>) -> rig::Exec {
     program(name, args, None, env)
-}
-
-/// Returns environment variables as the assignments which `sh` takes before a command, quoted for it, with `$` escaped
-/// for ninja.
-fn crate_env(env: &[(String, String)]) -> String {
-    env.iter().fold(String::new(), |mut assignments, (name, value)| {
-        let _ = write!(assignments, "{name}={} ", ninja_quote(value));
-        assignments
-    })
-}
-
-/// Quote a string as a single argument for `sh`, in a ninja command.
-fn ninja_quote(s: &str) -> String {
-    shell_quote(s).replace('$', "$$")
-}
-
-/// Quote a string as a single argument for `sh`.
-pub fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Returns which workers rig may send a crate's commands to, beside those with its toolchain: those of the same release
@@ -1423,6 +1282,8 @@ fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result
 
 #[cfg(test)]
 mod benches {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::bench::{assert_linear, configure};
 

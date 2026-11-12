@@ -1,9 +1,8 @@
 //! Differential tests of rig against a model of what a build must do, in the unit tests.
 //!
-//! Each test generates a random graph from a seed, writes it through jig's [`Graph`] trait as rig's graph, and builds
-//! it with rig. A random sequence of edits follows, each followed by a build with rig, and by the [`Model`], after
-//! which rig must have run the edges the model did, with the same outcome, and the outputs must be as the model has
-//! them.
+//! Each test generates a random graph from a seed, writes it as rig's graph, and builds it with rig. A random sequence
+//! of edits follows, each followed by a build with rig, and by the [`Model`], after which rig must have run the edges
+//! the model did, with the same outcome, and the outputs must be as the model has them.
 //!
 //! The model is the oracle: a simulation of the graph, without files or processes, which says which edges must run by
 //! rig's rules, and what each of them writes, small enough to be read in one sitting. ninja was the oracle before it,
@@ -18,11 +17,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
-use crate::graph::{Edge, Graph, Rule};
-use crate::rig_graph::{self, RigGraph};
+use crate::rig_graph;
 
 /// A pseudo-random number generator, xorshift64*, which is enough to choose graphs and edits from a seed.
 struct Random(u64);
@@ -103,9 +101,9 @@ fn generate(random: &mut Random) -> Generated {
                 implicit.push(input);
             }
         }
-        // an alias is only an implicit input, as it is not a file which `$in` could name, and not of a restat edge, as
-        // ninja runs such an edge again the next time it builds after it left its output alone, though nothing it
-        // depends on changed, which rig does not
+        // an alias is only an implicit input, as it is not a file which `cat` could read, and not of a restat edge, as
+        // when the model was checked against ninja, which runs such an edge again the next time it builds after it left
+        // its output alone, though nothing it depends on changed, which rig does not
         if rule != "gen" && !aliases.is_empty() && random.chance(25) {
             implicit.push(random.pick(&aliases).0.clone());
         }
@@ -135,73 +133,58 @@ fn generate(random: &mut Random) -> Generated {
     Generated { sources, edges, aliases }
 }
 
-/// Write a generated graph through jig's [`Graph`] trait, as rig's graph.
+/// Write a generated graph as rig's graph, with shell commands, which rig runs with `sh`.
 fn write(generated: &Generated, dir: &Path) {
-    let mut graph = RigGraph::new(dir.join(rig_graph::FILE));
-    let log = format!(" && echo $id >> {LOG}");
-    let step = format!("cat $in /dev/null > $out$extra{log}");
-    let discover = format!("cat $in $headers /dev/null > $out && echo \"$out: $headers\" > $out.d{log}");
-    let restat = format!("cat $in > $out.tmp && (cmp -s $out.tmp $out || mv $out.tmp $out); rm -f $out.tmp{log}");
-    let rules = [
-        Rule { name: "step", command: &step, description: "STEP $out", ..Default::default() },
-        Rule {
-            name: "discover",
-            command: &discover,
-            description: "DISCOVER $out",
-            depfile: Some("$out.d"),
-            ..Default::default()
-        },
-        Rule { name: "gen", command: &restat, description: "GEN $out", ..Default::default() },
-    ];
-    for rule in &rules {
-        graph.rule(rule).unwrap_or_else(|error| panic!("{error}"));
-    }
-    let paths = |paths: &[String]| paths.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let mut graph = rig::Graph::new();
+    let mut nodes = |paths: &[String]| paths.iter().map(|path| graph.file(path)).collect::<Vec<_>>();
+    let mut edges = Vec::new();
     for (id, spec) in generated.edges.iter().enumerate() {
-        let id = id.to_string();
-        // the variables of an edge are evaluated where it is defined, before `$out` is, so the output is named
-        let extra = spec.implicit_outputs.iter().fold(String::new(), |mut extra, output| {
-            let _ = write!(extra, " && cp {} {output}", spec.output);
-            extra
+        let (inputs, output) = (spec.inputs.join(" "), &spec.output);
+        let log = format!(" && echo {id} >> {LOG}");
+        let (description, command, depfile) = match spec.rule {
+            "step" => {
+                let copies = spec.implicit_outputs.iter().fold(String::new(), |mut copies, copy| {
+                    let _ = write!(copies, " && cp {output} {copy}");
+                    copies
+                });
+                ("STEP", format!("cat {inputs} /dev/null > {output}{copies}{log}"), None)
+            },
+            "discover" => {
+                let headers = spec.discovered.join(" ");
+                let command = format!(
+                    "cat {inputs} {headers} /dev/null > {output} && echo \"{output}: {headers}\" > {output}.d{log}"
+                );
+                ("DISCOVER", command, Some(format!("{output}.d")))
+            },
+            _ => {
+                // the output is left alone if it would not change
+                let tmp = format!("{output}.tmp");
+                let kept = format!("cmp -s {tmp} {output} || mv {tmp} {output}");
+                let command = format!("cat {inputs} > {tmp} && ({kept}); rm -f {tmp}{log}");
+                ("GEN", command, None)
+            },
+        };
+        edges.push(rig::Edge {
+            kind: rig::EdgeKind::Command(rig::Action::Shell(command)),
+            description: format!("{description} {output}"),
+            outputs: nodes(std::slice::from_ref(output)),
+            implicit_outputs: nodes(&spec.implicit_outputs),
+            inputs: nodes(&spec.inputs),
+            implicit: nodes(&spec.implicit),
+            order_only: nodes(&spec.order_only),
+            depfile,
+            restat: spec.rule == "gen",
+            ..rig::Edge::default()
         });
-        let headers = spec.discovered.join(" ");
-        let output = [spec.output.clone()];
-        let lists = [&output[..], &spec.implicit_outputs, &spec.inputs, &spec.implicit, &spec.order_only];
-        let [outputs, implicit_outputs, inputs, implicit, order_only] = lists.map(paths);
-        let mut variables = vec![("id", id.as_str()), ("extra", extra.as_str()), ("headers", headers.as_str())];
-        if spec.rule == "gen" {
-            variables.push(("restat", "1"));
-        }
-        graph
-            .edge(&Edge {
-                rule: spec.rule,
-                outputs: &as_paths(&outputs),
-                implicit_outputs: &as_paths(&implicit_outputs),
-                inputs: &as_paths(&inputs),
-                implicit: &as_paths(&implicit),
-                order_only: &as_paths(&order_only),
-                variables: &variables,
-                // the commands are shell commands, which rig runs with `sh`
-                exec: None,
-                hashed: false,
-                cache: None,
-                pass_env: &[],
-                placement: rig::Placement::default(),
-                discover: None,
-                early: &[],
-            })
-            .unwrap_or_else(|error| panic!("{error}"));
     }
-    for (name, targets) in &generated.aliases {
-        let targets = paths(targets);
-        let targets: Vec<&Path> = targets.iter().map(PathBuf::as_path).collect();
-        graph.alias(Path::new(name), &targets).unwrap_or_else(|error| panic!("{error}"));
+    let aliases: Vec<_> = generated.aliases.iter().map(|(name, targets)| (name, nodes(targets))).collect();
+    for edge in edges {
+        graph.add_edge(edge).unwrap_or_else(|error| panic!("{error}"));
     }
-    graph.finish().unwrap_or_else(|error| panic!("{error}"));
-}
-
-fn as_paths(paths: &[PathBuf]) -> Vec<&Path> {
-    paths.iter().map(PathBuf::as_path).collect()
+    for (name, targets) in aliases {
+        graph.add_alias(name, &targets).unwrap_or_else(|error| panic!("{error}"));
+    }
+    graph.save(&dir.join(rig_graph::FILE)).unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// A model of a build of a generated graph, which says which edges must run, and what they write, without files or
@@ -319,7 +302,7 @@ impl<'a> Model<'a> {
     /// Run an edge, as its command does, recording what it read and wrote.
     fn run(&mut self, id: usize) {
         let spec = &self.generated.edges[id];
-        // `cat $in`, and the headers which an edge which discovers reads
+        // `cat` of its inputs, and the headers which an edge which discovers reads
         let read = spec.inputs.iter().chain(&spec.discovered).map(|input| self.contents(input)).collect::<String>();
         // a restat edge leaves its output alone, and its time, if it would not change
         if spec.rule != "gen" || self.files.get(&spec.output).is_none_or(|(contents, _)| *contents != read) {
@@ -422,7 +405,7 @@ fn apply(edit: &Edit, dir: &Path) {
         },
         // written again unchanged, so that its time is the file system's clock, as the outputs' are, rather than the
         // precise time now, which can be later than an output written after it within the file system's tick, which
-        // ninja from 1.12 finds is older than its input
+        // would be older than its input
         Edit::Touch(path) => {
             let path = dir.join(path);
             let contents = std::fs::read(&path).unwrap();

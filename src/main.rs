@@ -11,7 +11,6 @@ mod database;
 #[cfg(test)]
 mod differential;
 mod generate;
-mod graph;
 mod install;
 mod lint;
 mod project;

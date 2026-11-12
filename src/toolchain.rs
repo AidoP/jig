@@ -1,7 +1,7 @@
 //! rustup toolchains, which are selected with `+<toolchain>` before the command, as with cargo.
 //!
 //! A toolchain is selected by running rustup's proxies, such as `rustc`, with `RUSTUP_TOOLCHAIN`, which jig gives each
-//! command it runs, and `build.ninja` gives each of its commands, once the project is configured with it.
+//! command it runs, and rig's graph gives each of its commands, once the project is configured with it.
 
 use std::ffi::OsString;
 use std::iter::Peekable;
@@ -42,14 +42,6 @@ pub fn parse(args: &mut Peekable<impl Iterator<Item = OsString>>) -> Result<Opti
 pub fn apply(command: &mut Command, toolchain: Option<&str>) {
     if let Some(toolchain) = toolchain {
         command.env(VARIABLE, toolchain);
-    }
-}
-
-/// Returns the prefix of a command run by `sh` which runs it with a toolchain, if there is one.
-pub fn shell_prefix(toolchain: Option<&str>) -> String {
-    match toolchain {
-        Some(toolchain) => format!("{VARIABLE}={} ", crate::generate::shell_quote(toolchain)),
-        None => String::new(),
     }
 }
 
