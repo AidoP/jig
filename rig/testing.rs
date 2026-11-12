@@ -59,7 +59,7 @@ impl Graphs {
         self.rules.insert(name.into(), bindings);
         self
     }
-    /// Add an edge by a rule, or an alias, by `phony`, whose inputs are followed by `|` and its dependencies, then `||`
+    /// Add an edge by a rule, or an alias, by `alias`, whose inputs are followed by `|` and its dependencies, then `||`
     /// and what it is built after.
     pub(crate) fn edge(self, rule: &str, outputs: &[&str], inputs: &[&str]) -> Self {
         self.edge_with(rule, outputs, inputs, &[])
@@ -82,7 +82,7 @@ impl Graphs {
             after: nodes(&after),
             ..Edge::default()
         };
-        if rule != "phony" {
+        if rule != "alias" {
             let scope = Scope { outputs, inputs: &inputs, edge: variables, graph: &self.variables };
             let bindings = &self.rules[rule];
             let binding = |key: &str| bindings.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
