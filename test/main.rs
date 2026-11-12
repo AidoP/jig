@@ -4047,7 +4047,11 @@ target wrapped
     assert_contains(&output.graph, "\ntest/app@wrapped\n    alias = wrapped/test/app wrap.sh\n");
     assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE}\n"));
     // the runner runs the harness, which is its last argument, while without one the harness runs directly
-    let database = std::fs::read(project.dir.join(".jig")).unwrap();
+    // with the paths jig joins, which have `\\` on Windows, as with `/`, as on Unix, as each is a byte
+    let mut database = std::fs::read(project.dir.join(".jig")).unwrap();
+    if cfg!(windows) {
+        database.iter_mut().filter(|byte| **byte == b'\\').for_each(|byte| *byte = b'/');
+    }
     let strings = |strings: &[&str]| {
         let mut bytes = (strings.len() as u32).to_le_bytes().to_vec();
         for s in strings {
