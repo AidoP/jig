@@ -3028,8 +3028,9 @@ mod tests {
 
     #[test]
     fn measures_how_fast_workers_run_edges() {
-        // an edge which took 0.2 s here, which a worker runs as fast, is measured as taking as long there
-        let mut build = Build::new("speed", copied(), &[("a", "0.2\n"), ("b", "0.2\n")]);
+        // an edge which took 0.5 s here, which a worker runs as fast, is measured as taking as long there, as long enough
+        // that what the worker takes beside running it, as to start the test helper, slowly on Windows, is a small part
+        let mut build = Build::new("speed", copied(), &[("a", "0.5\n"), ("b", "0.5\n")]);
         let first = TempCache::new("speed-first");
         build.options.cache = Some(first.0.clone());
         // with the one job the build has later, so that how long each edge took is measured without the others
