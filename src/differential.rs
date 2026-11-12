@@ -1,9 +1,14 @@
-//! Differential tests of rig against ninja, in the unit tests.
+//! Differential tests of rig against a model of what a build must do, and against ninja where it is installed, in the
+//! unit tests.
 //!
 //! Each test generates a random graph from a seed, writes it through jig's [`Graph`] trait as both `build.ninja` and
-//! rig's graph, and builds it with ninja in one directory and rig in another, of the same files. A random sequence of
-//! edits follows, each followed by a build with both, after which the same edges must have run, with the same
-//! outcome, and the outputs must be the same.
+//! rig's graph, and builds it with rig, and ninja if it is installed, each in a directory of its own, of the same
+//! files. A random sequence of edits follows, each followed by a build with each, and by the [`Model`], after which
+//! the same edges must have run, with the same outcome, and the outputs must be the same, as the model has them.
+//!
+//! The model is the oracle: a simulation of the graph, without files or processes, which says which edges must run by
+//! rig's rules, and what each of them writes, small enough to be read in one sitting. ninja was the oracle before it,
+//! and checks it while it is installed, so that the model starts out agreeing with what it replaces.
 //!
 //! The graphs have explicit, implicit and order-only inputs, implicit outputs, aliases, edges which discover inputs
 //! from their depfiles, and restat edges, which leave an output alone when it would not change. The edits change the
@@ -14,7 +19,7 @@
 //! The tests are skipped where ninja is not installed. `JIG_DIFFERENTIAL_SEEDS` sets the number of seeds, which is
 //! `16` by default.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -207,6 +212,151 @@ fn as_paths(paths: &[PathBuf]) -> Vec<&Path> {
     paths.iter().map(PathBuf::as_path).collect()
 }
 
+/// A model of a build of a generated graph, which says which edges must run, and what they write, without files or
+/// processes: each file has its contents and the logical time it was last written, and each edge which has run, the
+/// times of its inputs and outputs then, as rig records their stamps.
+///
+/// An edge which is wanted runs if it has not run, or one of its outputs is missing, or was written since by other than
+/// it, or one of its inputs, with the targets of an alias in its place, and the headers it discovered when it last ran,
+/// has another time than it had then. Its order-only inputs are built first, but do not run it. The edges are generated
+/// in an order in which each comes after those it depends on, so a build runs them in that order.
+struct Model<'a> {
+    generated: &'a Generated,
+    files: HashMap<String, (String, u64)>,
+    clock: u64,
+    /// For each edge which has run, the times of its inputs and outputs when it last did, and what it discovered.
+    records: HashMap<usize, Record>,
+}
+
+struct Record {
+    inputs: Vec<(String, Option<u64>)>,
+    outputs: Vec<(String, Option<u64>)>,
+    discovered: Vec<String>,
+}
+
+impl<'a> Model<'a> {
+    fn new(generated: &'a Generated) -> Self {
+        let mut model = Self { generated, files: HashMap::new(), clock: 0, records: HashMap::new() };
+        for (i, source) in generated.sources.iter().enumerate() {
+            model.write(source, format!("source {i}\n"));
+        }
+        model
+    }
+    fn write(&mut self, path: &str, contents: String) {
+        self.clock += 1;
+        self.files.insert(path.into(), (contents, self.clock));
+    }
+    fn time(&self, path: &str) -> Option<u64> {
+        self.files.get(path).map(|&(_, time)| time)
+    }
+    fn contents(&self, path: &str) -> String {
+        self.files.get(path).map(|(contents, _)| contents.clone()).unwrap_or_default()
+    }
+    fn apply(&mut self, edit: &Edit) {
+        match edit {
+            Edit::Change(path) => {
+                let contents = self.contents(path) + "changed\n";
+                self.write(path, contents);
+            },
+            Edit::Touch(path) => {
+                let contents = self.contents(path);
+                self.write(path, contents);
+            },
+            Edit::Delete(path) => {
+                self.files.remove(path);
+            },
+            Edit::Nothing => (),
+        }
+    }
+    /// Returns the inputs an edge depends on, with the targets of an alias in its place, and those it discovered.
+    fn inputs(&self, id: usize) -> Vec<String> {
+        let spec = &self.generated.edges[id];
+        let aliases = |input: &String| match self.generated.aliases.iter().find(|(name, _)| name == input) {
+            Some((_, targets)) => targets.clone(),
+            None => vec![input.clone()],
+        };
+        let mut inputs: Vec<String> = spec.inputs.iter().chain(&spec.implicit).flat_map(aliases).collect();
+        inputs.extend(self.records.get(&id).into_iter().flat_map(|record| record.discovered.iter().cloned()));
+        inputs
+    }
+    fn outputs(&self, id: usize) -> Vec<String> {
+        let spec = &self.generated.edges[id];
+        std::iter::once(&spec.output).chain(&spec.implicit_outputs).cloned().collect()
+    }
+    /// Returns the edges which building targets wants, the edges which produce them and those they depend on, or every
+    /// edge without targets.
+    fn wanted(&self, targets: &[&str]) -> BTreeSet<usize> {
+        let edges = &self.generated.edges;
+        if targets.is_empty() {
+            return (0..edges.len()).collect();
+        }
+        let writes = |spec: &Spec, path: &str| spec.output == path || spec.implicit_outputs.iter().any(|o| o == path);
+        let producer = |path: &str| edges.iter().position(|spec| writes(spec, path));
+        let mut wanted = BTreeSet::new();
+        let mut stack: Vec<usize> = targets.iter().filter_map(|target| producer(target)).collect();
+        while let Some(id) = stack.pop() {
+            if wanted.insert(id) {
+                let order_only = edges[id].order_only.iter().cloned();
+                let inputs = self.inputs(id).into_iter().chain(order_only);
+                stack.extend(inputs.filter_map(|input| producer(&input)));
+            }
+        }
+        wanted
+    }
+    /// Build targets, returning the edges which ran, in the order they did.
+    fn build(&mut self, targets: &[&str]) -> BTreeSet<usize> {
+        let mut ran = BTreeSet::new();
+        for id in self.wanted(targets) {
+            let inputs: Vec<(String, Option<u64>)> = self.inputs(id).into_iter().map(|input| {
+                let time = self.time(&input);
+                (input, time)
+            }).collect();
+            let outputs: Vec<(String, Option<u64>)> =
+                self.outputs(id).into_iter().map(|output| (output.clone(), self.time(&output))).collect();
+            let up_to_date = self.records.get(&id).is_some_and(|record| {
+                outputs.iter().all(|(_, time)| time.is_some()) && record.outputs == outputs && record.inputs == inputs
+            });
+            if up_to_date {
+                continue;
+            }
+            self.run(id);
+            ran.insert(id);
+        }
+        ran
+    }
+    /// Run an edge, as its command does, recording what it read and wrote.
+    fn run(&mut self, id: usize) {
+        let spec = &self.generated.edges[id];
+        // `cat $in`, and the headers which an edge which discovers reads
+        let read = spec.inputs.iter().chain(&spec.discovered).map(|input| self.contents(input)).collect::<String>();
+        // a restat edge leaves its output alone, and its time, if it would not change
+        if spec.rule != "gen" || self.files.get(&spec.output).is_none_or(|(contents, _)| *contents != read) {
+            self.write(&spec.output, read.clone());
+        }
+        for output in &spec.implicit_outputs {
+            self.write(output, read.clone());
+        }
+        // recorded once it has run, as rig records it, with its inputs as it read them, and what it discovered
+        let discovered = spec.discovered.clone();
+        self.records.insert(id, Record { inputs: Vec::new(), outputs: Vec::new(), discovered });
+        let inputs = self.inputs(id).into_iter().map(|input| {
+            let time = self.time(&input);
+            (input, time)
+        }).collect();
+        let outputs = self.outputs(id).into_iter().map(|output| (output.clone(), self.time(&output))).collect();
+        if let Some(record) = self.records.get_mut(&id) {
+            record.inputs = inputs;
+            record.outputs = outputs;
+        }
+    }
+    /// Returns the contents of the outputs, as [`outputs`] reads them from a build's directory.
+    fn outputs_contents(&self) -> Vec<(String, Option<String>)> {
+        let edges = self.generated.edges.iter();
+        let paths = edges.flat_map(|spec| std::iter::once(&spec.output).chain(&spec.implicit_outputs));
+        paths.map(|path| (path.clone(), self.files.get(path).map(|(contents, _)| contents.clone()))).collect()
+    }
+}
+
 /// What a build did: whether it succeeded, and the ids of the edges which ran.
 #[derive(Debug, PartialEq, Eq)]
 struct Ran {
@@ -306,10 +456,11 @@ fn outputs(generated: &Generated, dir: &Path) -> Vec<(String, Option<String>)> {
     paths.map(|path| (path.clone(), std::fs::read_to_string(dir.join(path)).ok())).collect()
 }
 
-/// Build a graph generated from a seed with both ninja and rig, through a sequence of edits, comparing them after each.
+/// Build a graph generated from a seed with rig, and ninja if it is installed, through a sequence of edits, comparing
+/// each with the model after each.
 ///
-/// With `verbose`, each step is shown, with what each engine did, and what ninja showed.
-fn compare(seed: u64, verbose: bool) {
+/// With `verbose`, each step is shown, with what each did, and what ninja showed.
+fn compare(seed: u64, verbose: bool, with_ninja: bool) {
     let mut random = Random::new(seed);
     let generated = generate(&mut random);
     let base = std::env::temp_dir().join(format!("jig-differential-{}-{seed}", std::process::id()));
@@ -322,6 +473,7 @@ fn compare(seed: u64, verbose: bool) {
         }
     }
     write(&generated, &ninja_dir, &rig_dir);
+    let mut model = Model::new(&generated);
     let describe = || std::fs::read_to_string(ninja_dir.join(crate::ninja::FILE)).unwrap_or_default();
     let mut edit = Edit::Nothing;
     for step in 0..12 {
@@ -333,39 +485,47 @@ fn compare(seed: u64, verbose: bool) {
             Vec::new()
         };
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-        let (ninja, shown) = build_ninja(&ninja_dir, &targets);
+        let expected = Ran { succeeded: true, edges: model.build(&targets) };
         let rig = build_rig(&rig_dir, &targets);
+        let context = || format!("seed {seed}, step {step}, after {edit:?}, building {targets:?}");
         if verbose {
-            eprintln!("step {step}, after {edit:?}, building {targets:?}:");
-            eprintln!("  ninja: {ninja:?}\n  rig:   {rig:?}\n{shown}");
+            eprintln!("{}:\n  model: {expected:?}\n  rig:   {rig:?}", context());
         }
-        assert_eq!(
-            rig,
-            ninja,
-            "seed {seed}, step {step}, after {edit:?}, building {targets:?}: rig (left), ninja (right), in\n{}",
-            describe(),
-        );
-        assert_eq!(outputs(&generated, &rig_dir), outputs(&generated, &ninja_dir), "seed {seed}, step {step}");
+        assert_eq!(rig, expected, "{}: rig (left), the model (right), in\n{}", context(), describe());
+        assert_eq!(outputs(&generated, &rig_dir), model.outputs_contents(), "{}", context());
+        // and ninja, which the model replaces, agrees with it, while it is installed
+        if with_ninja {
+            let (ninja, shown) = build_ninja(&ninja_dir, &targets);
+            if verbose {
+                eprintln!("  ninja: {ninja:?}\n{shown}");
+            }
+            assert_eq!(ninja, expected, "{}: ninja (left), the model (right), in\n{}", context(), describe());
+            assert_eq!(outputs(&generated, &ninja_dir), model.outputs_contents(), "{}", context());
+        }
         edit = choose_edit(&mut random, &generated);
-        // past the granularity of the file system's clock, so that ninja finds a changed file is newer
+        // past the granularity of the file system's clock, so that a changed file has a new time
         std::thread::sleep(Duration::from_millis(15));
-        apply(&edit, &ninja_dir);
+        model.apply(&edit);
         apply(&edit, &rig_dir);
+        if with_ninja {
+            apply(&edit, &ninja_dir);
+        }
     }
     let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
-fn rig_builds_as_ninja_does() {
-    if !Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success()) {
-        eprintln!("ninja is not installed, so rig is not compared with it");
-        return;
+#[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
+fn rig_builds_as_the_model_says() {
+    let with_ninja = Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success());
+    if !with_ninja {
+        eprintln!("ninja is not installed, so rig is compared with the model alone");
     }
     // the builds would slow the micro-benchmarks, which run beside the test
     let _timing = crate::bench::TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // one seed, to look into a difference
     if let Ok(seed) = std::env::var("JIG_DIFFERENTIAL_SEED") {
-        compare(seed.parse().unwrap(), true);
+        compare(seed.parse().unwrap(), true, with_ninja);
         return;
     }
     let seeds = std::env::var("JIG_DIFFERENTIAL_SEEDS").map_or(16, |seeds| seeds.parse().unwrap());
@@ -379,7 +539,7 @@ fn rig_builds_as_ninja_does() {
                     if seed >= seeds {
                         break;
                     }
-                    compare(seed, false);
+                    compare(seed, false, with_ninja);
                 }
             });
         }
