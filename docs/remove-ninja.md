@@ -223,8 +223,8 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      stack with `ulimit`.
    - **Checked.** Every test passes on Linux. Under Wine, 163 integration tests pass, from 150, and 7 are ignored,
      from 21. The 12 which fail need what the Wine prefix lacks: nightly, rustup, clippy and a custom target, and for
-     `impure_functions` and `impure_functions_allowed`, an `echo` program, whose diagnostics show the lines which run
-     it, so they keep running `echo`, which a Windows machine with Git has.
+     `impure_functions` and `impure_functions_allowed`, an `echo` program. **Since:** those two run the test helper
+     too, their diagnostics showing the lines which run it, with its path, so they pass under Wine without `echo`.
 
 7. **Done: rewrite the documentation.** The README, `build-engine.md` and the module and function docs describe jig
    and rig without ninja: rig's behaviour by itself, as its console's output, rather than by what ninja does.
