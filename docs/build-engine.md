@@ -531,7 +531,9 @@ implementation of that trait, so `generate.rs` doesn't change.
      they check that nothing ran, as no `CLIPPY` line is shown. Under rig they look in rig's log instead of using
      `ninja -t deps`. With `JIG_ENGINE=rig`, all 160 integration tests
      and the unit and perf tests pass, and CI runs the suite a second time with it.
-6. **Done:** differential tests, `src/differential.rs`, in jig's unit tests.
+6. **Done:** differential tests, `src/differential.rs`, in jig's unit tests. Since, as ninja is being removed, a model
+   of what a build must do is the oracle, which ninja checked while it was here; see
+   [removing ninja](remove-ninja.md), step 1.
    - **What a seed does.** It generates a random graph and writes it through jig's `Graph` trait, as `build.ninja` in
      one directory and rig's graph in another, with the same sources.
      - The graph can have explicit, implicit and order-only inputs, implicit outputs, output subdirectories, and

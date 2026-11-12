@@ -125,12 +125,20 @@ harness finds an edge's block by its header, rather than a `build` line.
 
 Each step leaves every test passing, on every platform CI runs, and is a commit or a few on their own.
 
-1. **Replace the differential test's oracle.** `src/differential.rs` checks rig against ninja on random graphs. With
-   ninja gone, it checks rig against a model instead: a small, obviously correct function in the test which, given a
-   graph, the files' times, sizes and contents, and the record of the last build, says which edges must run, as
-   ninja's rules have it, with rig's known differences, as a source whose time goes back. The random graphs and edits
-   stay; ninja's run becomes the model's. While ninja is still here, the model is checked against ninja on the same
-   seeds, so that it starts out agreeing with what it replaces.
+1. **Done: replace the differential test's oracle.** `src/differential.rs` checks rig against `Model`, a simulation of
+   a generated graph without files or processes, about 150 lines, which says which edges a build must run, and what
+   each writes.
+   - **What it models.** Each file has its contents and the logical time it was last written. An edge which is wanted
+     runs if it hasn't run, an output is missing or was written since by other than it, or an input, with the targets
+     of an alias in its place and the headers it discovered, has another time than when it last ran. Order-only inputs
+     are built first, without running it. It runs as its command does: `cat` of its inputs, and its discovered headers,
+     a copy for its implicit output, and a restat edge leaves its output, and its time, alone if it wouldn't change.
+   - **What it checks.** After each build, rig must have run the edges the model says, and every output must have the
+     contents the model has. Where ninja is installed, ninja is held to the model as well, as it was the oracle the
+     model replaces, until step 2 removes it.
+   - **Checked.** 256 seeds against the model alone, and 64 against the model and ninja, agree. A model which takes
+     touching a file as no change, or whose restat edges always write, fails on most of the first 16 seeds.
+   - It is ignored on Windows until step 4, as the generated commands are shell lines.
 2. **Remove the ninja engine from jig.**
    - `JIG_ENGINE` is no longer read. `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`, `NinjaOnWindows` and
      `GraphOfNinja` go. `Configured` has no engine; `builder()` is rig's. The `Builder` trait, which only rig
