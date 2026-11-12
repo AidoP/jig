@@ -62,38 +62,78 @@ Meanwhile ninja has become a constraint more than an alternative:
   `[finished/total] description`, the status lines in place, `restat`, `generator`, the `console` pool, aliases,
   implicit and order-only inputs, and depfiles in the form gcc and rustc write.
 
+## Decided
+
+- **No deprecation period.** Nothing depends on ninja support, so it is removed outright.
+- **No compatibility for what is removed.** `JIG_ENGINE` is no longer read, whatever it is set to, rather than being an
+  error for `ninja`. Nor does anything else which only ninja needed keep a shim: `newline-in-argument` is no longer a
+  diagnostic, so its name is unknown like any other, and a build directory's `build.ninja`, `build.ninja.d` or
+  `reconfigure.stamp` from before is left as it is, unread.
+- **No shell actions.** rig runs programs only. A command which needs a shell runs one itself, as `sh -c '...'`, as the
+  integration tests' custom commands already do.
+- **`jig graph` stays, in a form of jig's own.** Its ninja-style statements are replaced, as their `|` and `||`
+  separators and the split of inputs into explicit and implicit only mean something to ninja, where explicit inputs
+  are what `$in` expands to. rig runs each edge's arguments as they are, so the split is meaningless for it.
+
+## `jig graph`'s new form
+
+Each edge is a block, headed by its outputs, which a reader or a tool looks it up by, followed by an indented line for
+each of what it has, as `key = value`, and a blank line:
+
+```text
+x86_64-unknown-linux-gnu/libutil.rlib x86_64-unknown-linux-gnu/libutil.rmeta
+    description = RUSTC x86_64-unknown-linux-gnu/libutil.rlib
+    inputs = ../util.rs
+    after = gen.rs
+    command = rustc --crate-type=lib --crate-name=util ... ../util.rs
+    depfile = x86_64-unknown-linux-gnu/libutil.rlib.d
+    early = x86_64-unknown-linux-gnu/libutil.rmeta
+    cache = a207ba36...
+
+test/app
+    alias = x86_64-unknown-linux-gnu/test/app
+
+default custom/copy x86_64-unknown-linux-gnu/libutil.rlib
+```
+
+- **`outputs`,** in the header, are every file the edge writes, as rig has no other kind but the early ones, which
+  `early` names again.
+- **`inputs`** are every file it depends on, each once, in the order the graph has them, the explicit then the
+  implicit, without the duplicates the split made, as `../app.rs | libutil.rlib libutil.rlib` was.
+- **`after`** are the order-only inputs: built first, but not depended on, so that a change to one doesn't run the edge.
+- **`alias`,** for an alias, the targets it names, in place of a description and command.
+- The other keys are as they are now: `command`, `depfile`, `discover`, `early`, `pass-env`, `pool`, `cache`,
+  `target`, `tags`, `any-host`, `generator`, `restat` and `hashed`, without `shell`.
+- `--json` has the same keys, with `outputs` and the others which are lists as arrays, and the command in parts.
+
+Its documentation, in the README and the module, describes it without reference to ninja, and the integration tests'
+harness finds an edge's block by its header, rather than a `build` line.
+
 ## Steps
 
 Each step leaves every test passing, on every platform CI runs, and is a commit or a few on their own.
 
-1. **Deprecate `JIG_ENGINE=ninja`.** `jig generate` and every command which configures warns that ninja is deprecated
-   and will be removed, while it still works. The README and `build-engine.md` say so. This step is only worth taking
-   if anyone builds with ninja who should be told first; otherwise it is left out, and step 2 removes it outright.
+1. **Replace the differential test's oracle.** `src/differential.rs` checks rig against ninja on random graphs. With
+   ninja gone, it checks rig against a model instead: a small, obviously correct function in the test which, given a
+   graph, the files' times, sizes and contents, and the record of the last build, says which edges must run, as
+   ninja's rules have it, with rig's known differences, as a source whose time goes back. The random graphs and edits
+   stay; ninja's run becomes the model's. While ninja is still here, the model is checked against ninja on the same
+   seeds, so that it starts out agreeing with what it replaces.
 2. **Remove the ninja engine from jig.**
-   - `JIG_ENGINE=ninja` is an error, saying ninja was removed, and any other value but `rig` is still an error, so
-     that a script which sets it fails clearly rather than building otherwise. Later, `JIG_ENGINE` can be ignored.
-   - `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`, `NinjaOnWindows` and `GraphOfNinja` go. `Configured` has
-     no engine; `builder()` is rig's. The `Builder` trait, which only rig implements then, can go too, or stay as the
-     seam the tests use.
+   - `JIG_ENGINE` is no longer read. `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`, `NinjaOnWindows` and
+     `GraphOfNinja` go. `Configured` has no engine; `builder()` is rig's. The `Builder` trait, which only rig
+     implements then, goes, unless the tests need it as a seam.
    - `reconfigure.stamp` goes, with `Configured::locate`'s checks of missing paths and variables, and the database's
-     `missing` and `env_hashes`, as rig's graph depends on them through `graph.d`. The database's version changes. A
-     build directory with a stamp, or a `build.ninja`, from before, is left as it is, as nothing reads them.
-   - `newline-in-argument` goes, as no argument has to be on a line. Its name stays reserved for a while, so that
-     `@with diagnostic/newline-in-argument` in a project is an unknown diagnostic only once it is removed.
+     `missing` and `env_hashes`, as rig's graph depends on them through `graph.d`. The database's version changes.
+   - `newline-in-argument` goes, as no argument has to be on a line.
    - `jig build`'s options are rig's, documented as such, rather than "a subset of ninja's".
    - CI's `ninja` job goes, and `bootstrap.sh` configures for rig alone.
    - The tests: the harness generates only rig's graph, and `Output::ninja`, `Project::ninja`, `ninja_in`,
      `raw_ninja`, `ninja_depfile`, `has_ninja` and `rig_engine` go. The three tests of `build.ninja` go, as what they
      tested goes; what else they check, as the configure edge's command and inputs, and paths rebased to the build
      directory, is checked by `jig graph`. The checks of how ninja quotes a command, or which run ninja, go.
-   - `test/perf.rs` compares rig with its own budgets alone.
-3. **Replace the differential test's oracle.** `src/differential.rs` checks rig against ninja on random graphs. With
-   ninja gone, it checks rig against a model instead: a small, obviously correct function in the test which, given a
-   graph, the files' times, sizes and contents, and the record of the last build, says which edges must run, as
-   ninja's rules have it, with rig's known differences, as a source whose time goes back. The random graphs and edits
-   stay; ninja's run becomes the model's. Before ninja goes, the model is checked against ninja on the same seeds, so
-   that it starts out agreeing with what it replaces. This step is done before step 2 removes ninja from CI.
-4. **Describe builds as rig's, rather than through ninja's rules.**
+   - `test/perf.rs` compares rig with its own budgets alone, and the differential test with its model alone.
+3. **Describe builds as rig's, rather than through ninja's rules.**
    - jig builds rig's graph through rig's own API, `Graph::add_edge` and `add_alias`, with each edge's program,
      arguments, environment, working directory, stderr file, description and depfile given directly, rather than
      through rules with `$in`, `$out` and variables, which a `Manifest` evaluates.
@@ -101,19 +141,23 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      `generate.rs` declares go. `Flags` holds arguments alone, and `ninja_quote`, `crate_env` and
      `toolchain::shell_prefix` go. `shell_quote` stays only where a command line is shown, as `-v` and `jig graph`
      show one.
-   - What `jig graph` shows is the same, as it shows rig's graph, which is the same: each edge's program, arguments,
-     description and depfile are what the rules evaluated to. A test compares `jig graph`'s output for the
-     integration tests' projects before and after, so that the rework changes nothing that is built.
-5. **Remove `rig::ninja` and shell actions from rig.**
+   - `jig graph`'s output for the integration tests' projects is compared before and after, so that the rework changes
+     nothing that is built. This is done before step 5 changes its form, so that the comparison is of like with like.
+4. **Remove `rig::ninja` and shell actions from rig.**
    - `rig::testing::Graphs` builds rig's test graphs through the API, with programs rather than shell lines. A test's
      commands, as `cat`, `cp`, `sleep` and writing a depfile, are done by the test harness itself, run again as a
      helper program with its arguments, as a test harness can find its own executable, so that the tests need neither
      `sh` nor coreutils, and run on Windows. The 44 tests ignored on Windows run there.
-   - `rig::ninja`, `Manifest`, `Build` and `Error::Manifest` go. This changes rig's public API, which its
-     `Cargo.toml` makes usable from cargo projects; as rig isn't published, its users are told in the README.
+   - `rig::ninja`, `Manifest`, `Build` and `Error::Manifest` go. The README shows a cargo project using rig how to
+     build a graph through the API.
    - `Action::Shell`, `sys::shell` and the graph format's shell actions go, which changes the graph format's version,
-     so that a graph from before is generated again. `jig graph`'s `shell` key goes; as it was documented as stable,
-     its removal is noted, as no graph jig writes ever had it.
+     so that a graph from before is generated again. `Action` is a program alone, which may be a shell a command
+     names, as `sh -c`.
+   - rig's graph may also keep a node list per edge for outputs, inputs and order-only inputs alone, merging the
+     explicit and implicit ones, as nothing tells them apart once `$in` and `$out` are gone; whether it does is
+     decided as the step is done, by whether it simplifies rig, as `jig graph` merges them either way.
+5. **Give `jig graph` its new form,** as above, with the README, the module's documentation and the integration tests'
+   harness and expectations changed to it.
 6. **Make the integration tests independent of POSIX shell.** The 18 integration tests ignored on Windows for running
    POSIX shell use a helper program instead, as rig's do: a small test crate of the project, as `jig-test-tool`, which
    copies, writes, prints its arguments and fails with a status, as the tests' custom commands need. Those which test
@@ -125,27 +169,14 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
 
 ## Risks
 
-- **Losing the oracle.** ninja is the independent implementation rig's incremental builds were checked against. Step 3
+- **Losing the oracle.** ninja is the independent implementation rig's incremental builds were checked against. Step 1
   replaces it with a model, which is only as good as it is simple. It is checked against ninja before ninja goes, and
   kept small enough to be read in one sitting.
-- **Users of ninja.** A project, or a script, which builds with `JIG_ENGINE=ninja`, or runs ninja on `build.ninja`
-  directly, as an IDE might, stops working. Step 1 tells them first, if there are any.
-- **rig's API.** `rig::ninja::Manifest` is how a cargo project using rig would most easily have built a graph. Its
-  removal needs the README to show building a graph through the API instead.
-- **The rework of step 4.** `generate.rs` is most of jig's code which describes builds; rewriting how it describes them
+- **The rework of step 3.** `generate.rs` is most of jig's code which describes builds; rewriting how it describes them
   risks changing what is built. `jig graph`'s output for every integration test's project, compared before and after,
   is the check that it doesn't.
-
-## Decisions to make
-
-1. **A deprecation period, step 1.** Whether anyone uses `JIG_ENGINE=ninja` who should be warned first, or it is
-   removed outright.
-2. **`JIG_ENGINE`.** Whether it stays as an error for `ninja`, then is ignored, or is removed at once, so that any
-   value is ignored.
-3. **Shell actions, step 5.** Whether rig keeps `Action::Shell` for its users, as a convenience, though jig no longer
-   makes them, or drops it, which the plan assumes.
-4. **`jig graph`'s form.** It is written as ninja's statements are, which stays familiar without ninja. The plan keeps
-   it, and only changes its documentation to describe it without reference to ninja.
+- **rig's API.** `rig::ninja::Manifest` was the easiest way for a cargo project using rig to build a graph. Nothing
+  depends on it, but the API which replaces it should be as easy, which step 4's rewrite of rig's own tests shows.
 
 ## Not in this plan
 
