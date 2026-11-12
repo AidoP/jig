@@ -194,8 +194,18 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
      which lost a dependency runs, and is then up to date; an integration test, that a crate whose used crate and
      `extern crate` were removed is built again. Under Wine, the integration tests pass as they did after step 3.
 
-5. **Give `jig graph` its new form,** as above, with the README, the module's documentation and the integration tests'
-   harness and expectations changed to it.
+5. **Done: give `jig graph` its new form,** as above, with the README, the module's documentation, the usage and the
+   integration tests' harness and expectations changed to it.
+   - Each edge is a block headed by its outputs, with `inputs`, `dependencies` and `after` as keys after its
+     description, an alias's targets as `alias`, and `default` before the default targets. Paths are quoted for `sh`
+     where they need to be, as the words of a command are, rather than escaped with `$`. The JSON has no `kind`, and
+     leaves out the lists an edge does not have, as it does its other keys.
+   - jig gives each path of an edge's list once, and leaves out of its dependencies the files which are its inputs,
+     so that `libutil.rlib` is no longer listed twice, as a crate used and a library linked.
+   - The harness finds an edge's block by its first output, and `files_of` gives its lists, which the tests compare
+     whole, rather than finding a `build` line.
+   - **Checked.** Every test passes on Linux, and under Wine, the integration tests pass as they did after step 4.
+
 6. **Make the integration tests independent of POSIX shell.** The 18 integration tests ignored on Windows for running
    POSIX shell use a helper program instead, as rig's do: a small test crate of the project, as `jig-test-tool`, which
    copies, writes, prints its arguments and fails with a status, as the tests' custom commands need. Those which test

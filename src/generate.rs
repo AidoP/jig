@@ -44,7 +44,7 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
 /// not depend on where the project is: a path within the build directory is relative to it, and any other leads out of
 /// it with `..`, from where the build directory is once symbolic links are followed, so that it leads to the same file
 /// when the build directory is a link. rustc writes the paths of sources in its dep-info as it is given them, which
-/// ninja finds, while what it writes elsewhere, such as in diagnostics and debug info, is remapped to be relative to the
+/// rig reads, while what it writes elsewhere, such as in diagnostics and debug info, is remapped to be relative to the
 /// project root, by [`Rebase::remap`].
 struct Rebase {
     /// The project root, which is absolute.
@@ -108,9 +108,9 @@ fn relative_to(dir: &Path, path: &Path) -> PathBuf {
     if relative.as_os_str().is_empty() { PathBuf::from(".") } else { relative }
 }
 
-/// Returns a path with its `.` and `..` components resolved, for ninja.
+/// Returns a path with its `.` and `..` components resolved, for rig's graph.
 ///
-/// Ninja removes a `..` with the component before it, without following symbolic links, but a `..` after a symbolic
+/// A `..` is removed with the component before it, without following symbolic links, but a `..` after a symbolic
 /// link leaves the directory the link points to, rather than the one containing the link. So a symbolic link followed
 /// by `..` is resolved first, and the path is otherwise left as it is, including the paths which do not exist yet.
 fn normalize(path: &Path) -> PathBuf {
@@ -167,7 +167,7 @@ pub struct Unit {
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
     pub doc: Option<String>,
-    /// Whether the crate is built by `ninja` without targets, which `jig run` prefers.
+    /// Whether the crate is built by `jig build` without targets, which `jig run` prefers.
     pub default: bool,
     /// The name of the crate's lint, `lint/<name>`, if it is edited, so that it is linted.
     pub lint: Option<String>,

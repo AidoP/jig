@@ -3,33 +3,35 @@
 //!
 //! What it shows is a stable interface: a later jig may add keys, but doesn't change or remove those it has.
 //!
-//! The text has a statement for each edge, as ninja's `build` statements are written, in the order the graph has them,
-//! followed by the default targets:
+//! The text has a block for each edge, in the order the graph has them, headed by its outputs, followed by an indented
+//! line for each of what it has, as `<key> = <value>`, and a blank line, then the default targets:
 //!
 //! ```text
-//! build <output> ...: command|phony [<input> ...] [| <dependency> ...] [|| <after> ...]
+//! <output> ...
 //!     <key> = <value>
+//!
 //! default <target> ...
 //! ```
 //!
-//! Its paths are relative to the build directory, with `/` between their components on every platform, and a path
-//! with a space, `|`, `:` or `$` has it escaped with `$`, as ninja escapes it. The lines under a statement are those of
-//! what the edge has, in this order:
+//! Its paths are relative to the build directory, with `/` between their components on every platform, and each path
+//! and word is quoted for `sh` where it needs to be, as a command line has it. The lines of an edge are those of what
+//! it has, in this order:
 //!
 //! - `description`, as a build shows it, unless it has none, as an alias.
-//! - `command`, the command line, as `-v` shows it, with each word quoted for `sh` where it needs to be: its working
-//!   directory, relative to the build directory, with `cd`, its variables, the program and its arguments, and the
-//!   file stderr is written to, if it has one, with `2>`.
+//! - `inputs`, the files it reads, which must be there, `dependencies`, those it depends on, which may be missing, as a
+//!   crate it uses, and `after`, those which are built before it, but which it neither reads nor depends on.
+//! - `alias`, for an alias, the targets it names, in place of a description and a command.
+//! - `command`, the command line, as `-v` shows it: its working directory, relative to the build directory, with `cd`,
+//!   its variables, the program and its arguments, and the file stderr is written to, if it has one, with `2>`.
 //! - `depfile`, `discover`, the command which writes the depfile without running the edge, `early`, the outputs it
 //!   reports as it writes them, `pass-env`, the variables it passes on, a word each.
 //! - `pool = console`, `cache`, the identity it is cached by, `target`, `tags` and `any-host`, which workers run it.
 //! - `generator`, `restat` and `hashed`, each `= true`, if it is.
 //!
 //! The JSON is an object of `edges`, an array of an object for each, and of `defaults`, an array of paths. An edge has
-//! `outputs`, `kind`, `command` or `phony`, `inputs`, `dependencies` and `after`, then the keys of the text, in its
-//! order, but for `command`, which it has in parts: `program`, `args`, an array, `env`, an array of `[name, value]`
-//! pairs, `dir` and `stderr`. Those which are lists in the text are arrays, a flag is `true`, and what an edge does not
-//! have is left out.
+//! `outputs`, then the keys of the text, in its order, but for `command`, which it has in parts: `program`, `args`,
+//! `env`, an array of `[name, value]` pairs, `dir` and `stderr`. Those which are lists in the text are arrays, a flag
+//! is `true`, and what an edge does not have is left out.
 
 use std::fmt::Write as _;
 
@@ -82,9 +84,20 @@ enum Value {
 
 /// Returns what is shown of an edge, beside its paths, in order.
 fn fields(graph: &rig::Graph, edge: rig::EdgeRef<'_>, text: bool) -> Vec<(&'static str, Value)> {
+    let paths = |nodes: &[rig::NodeId]| nodes.iter().map(|&node| graph.path(node).to_string()).collect::<Vec<_>>();
     let mut fields = Vec::new();
     if !edge.description().is_empty() {
         fields.push(("description", Value::Text(edge.description().into())));
+    }
+    if *edge.kind() == rig::EdgeKind::Alias {
+        fields.push(("alias", Value::Words(paths(edge.inputs()))));
+        return finish(graph, edge, fields);
+    }
+    let lists = [("inputs", edge.inputs()), ("dependencies", edge.dependencies()), ("after", edge.after())];
+    for (key, nodes) in lists {
+        if !nodes.is_empty() {
+            fields.push((key, Value::Words(paths(nodes))));
+        }
     }
     match edge.kind() {
         rig::EdgeKind::Alias => {},
@@ -153,39 +166,12 @@ fn finish(
     fields
 }
 
-/// Returns a path as the text has it, with what would end it, or a list of them, escaped with `$`, as ninja does.
-fn escape(path: &str) -> String {
-    let mut escaped = String::new();
-    for c in path.chars() {
-        if matches!(c, ' ' | '|' | ':' | '$') {
-            escaped.push('$');
-        }
-        escaped.push(c);
-    }
-    escaped
-}
-
 /// Returns the edges as text.
 fn to_text(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> String {
     let mut text = String::new();
-    let paths = |nodes: &[rig::NodeId]| -> String {
-        nodes.iter().fold(String::new(), |mut paths, &node| {
-            paths.push(' ');
-            paths.push_str(&escape(graph.path(node)));
-            paths
-        })
-    };
+    let paths = |nodes: &[rig::NodeId]| nodes.iter().map(|&node| quote(graph.path(node))).collect::<Vec<_>>().join(" ");
     for &edge in edges {
-        let kind = if *edge.kind() == rig::EdgeKind::Alias { "phony" } else { "command" };
-        let _ = write!(text, "build{}", paths(edge.outputs()));
-        let _ = write!(text, ": {kind}{}", paths(edge.inputs()));
-        if !edge.dependencies().is_empty() {
-            let _ = write!(text, " |{}", paths(edge.dependencies()));
-        }
-        if !edge.after().is_empty() {
-            let _ = write!(text, " ||{}", paths(edge.after()));
-        }
-        text.push('\n');
+        let _ = writeln!(text, "{}", paths(edge.outputs()));
         for (key, value) in fields(graph, edge, true) {
             match value {
                 Value::Text(value) => _ = writeln!(text, "    {key} = {value}"),
@@ -204,7 +190,7 @@ fn to_text(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
         text.push('\n');
     }
     if defaults && !graph.defaults().is_empty() {
-        let _ = writeln!(text, "default{}", paths(graph.defaults()));
+        let _ = writeln!(text, "default {}", paths(graph.defaults()));
     }
     text
 }
@@ -224,14 +210,7 @@ fn to_json(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
     let paths = |nodes: &[rig::NodeId]| list(&mut nodes.iter().map(|&node| string(graph.path(node))));
     let mut entries = Vec::new();
     for &edge in edges {
-        let kind = if *edge.kind() == rig::EdgeKind::Alias { "phony" } else { "command" };
-        let mut entry = vec![
-            format!("\"outputs\": {}", paths(edge.outputs())),
-            format!("\"kind\": {}", string(kind)),
-            format!("\"inputs\": {}", paths(edge.inputs())),
-            format!("\"dependencies\": {}", paths(edge.dependencies())),
-            format!("\"after\": {}", paths(edge.after())),
-        ];
+        let mut entry = vec![format!("\"outputs\": {}", paths(edge.outputs()))];
         for (key, value) in fields(graph, edge, false) {
             let value = match value {
                 Value::Text(value) => string(&value),
@@ -254,8 +233,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escapes_paths_as_ninja_does() {
-        assert_eq!(escape("a b|c:d$e"), "a$ b$|c$:d$$e");
+    fn quotes_words_for_sh() {
+        assert_eq!(quote("a b"), "'a b'");
         assert_eq!(quote("it's"), "'it'\\''s'");
         assert_eq!(quote("--crate-type=lib"), "--crate-type=lib");
     }

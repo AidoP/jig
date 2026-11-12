@@ -61,20 +61,28 @@ impl RigGraph {
     pub fn new(path: PathBuf) -> Self {
         Self { path, graph: rig::Graph::new() }
     }
-    /// Returns the nodes of paths, adding those which are not in the graph.
+    /// Returns the nodes of paths, each once, adding those which are not in the graph.
     fn nodes(&mut self, paths: &[&Path]) -> Vec<rig::NodeId> {
-        paths.iter().map(|path| self.graph.file(&path_string(path))).collect()
+        let mut nodes = Vec::with_capacity(paths.len());
+        for path in paths {
+            let node = self.graph.file(&path_string(path));
+            if !nodes.contains(&node) {
+                nodes.push(node);
+            }
+        }
+        nodes
     }
     pub fn edge(&mut self, edge: Edge) -> Result<(), Error> {
-        let outputs = self.nodes(edge.outputs);
+        let (outputs, inputs) = (self.nodes(edge.outputs), self.nodes(edge.inputs));
         let early = self.nodes(edge.early);
         debug_assert!(early.iter().all(|node| outputs.contains(node)));
         let edge = rig::Edge {
             kind: rig::EdgeKind::Command(edge.exec),
             description: edge.description,
             outputs,
-            inputs: self.nodes(edge.inputs),
-            dependencies: self.nodes(edge.dependencies),
+            // a file which is read is not a dependency as well
+            dependencies: self.nodes(edge.dependencies).into_iter().filter(|node| !inputs.contains(node)).collect(),
+            inputs,
             after: self.nodes(edge.after),
             depfile: edge.depfile.map(path_string),
             pool: if edge.console { rig::Pool::Console } else { rig::Pool::Default },

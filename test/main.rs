@@ -119,17 +119,24 @@ fn rebased(project: &Project, path: &Path) -> String {
     relative
 }
 
-/// Returns the statement of an edge which produces an output, with what is under it, in rig's graph as `jig graph`
-/// shows it.
+/// Returns the block of an edge in rig's graph, as `jig graph` shows it, whose first output is `output`, with its
+/// header, the outputs, and the lines under it.
 #[track_caller]
 fn statement<'a>(text: &'a str, output: &str) -> &'a str {
     // a library has its metadata as an output after it, and a check its diagnostics
-    let found = |prefix: String| text.find(&prefix);
-    let Some(start) = found(format!("build {output}:")).or_else(|| found(format!("build {output} "))) else {
-        panic!("no statement for {output:?}:\n{text}");
-    };
-    let rest = &text[start..];
-    &rest[..rest.find("\n\n").unwrap_or(rest.len())]
+    let block = text.split("\n\n").map(|block| block.trim_start_matches('\n')).find(|block| {
+        block.lines().next().and_then(|header| header.split(' ').next()) == Some(output)
+    });
+    block.unwrap_or_else(|| panic!("no block for {output:?}:\n{text}"))
+}
+
+/// Returns the lists of the files of an edge's block, as `jig graph` shows them: its `inputs`, `dependencies` and
+/// `after`, a line each, without their indent, and without those it does not have.
+fn files_of(block: &str) -> String {
+    let lists = block.lines().filter_map(|line| line.strip_prefix("    "));
+    let keys = ["inputs = ", "dependencies = ", "after = "];
+    let lists = lists.filter(|line| keys.iter().any(|key| line.starts_with(key)));
+    lists.fold(String::new(), |lists, line| lists + line + "\n")
 }
 
 /// Returns text, as `jig graph` shows it, with the `\` between the components of paths on Windows as `/`, and each word
@@ -242,15 +249,15 @@ impl Output {
         assert!(found, "stderr does not contain {expected:?}:\n{}", self.stderr);
         self
     }
-    /// Returns the statement of rig's graph, as `jig graph` shows it, of the edge which produces an output, with what
-    /// is under it.
+    /// Returns the block of rig's graph, as `jig graph` shows it, of the edge whose first output is `output`.
     #[track_caller]
     fn build(&self, output: &str) -> &str {
         statement(&self.graph, output)
     }
-    /// Returns the outputs of the crates' statements, rather than their checks.
+    /// Returns the first outputs of the crates' blocks, rather than their checks.
     fn outputs(&self) -> Vec<&str> {
-        let outputs = self.graph.lines().filter_map(|line| line.strip_prefix("build ")?.split([':', ' ']).next());
+        let headers = self.graph.split("\n\n").filter_map(|block| block.trim_start_matches('\n').lines().next());
+        let outputs = headers.filter_map(|header| header.split(' ').next());
         outputs.filter(|output| Path::new(output).extension().is_some_and(|extension| extension == "rlib")).collect()
     }
 }
@@ -286,11 +293,13 @@ fn slashed(text: &str) -> String {
 }
 
 /// Assert that text contains `needle`, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
-/// Assert that a statement of rig's graph, as `jig graph` shows it, has a line, and a part of its command, each as it is,
-/// or with the paths shown with `\\` on Windows taken as with `/`.
+/// Assert that an edge's block in rig's graph, as `jig graph` shows it, has the lists of files given, unless they are
+/// empty, and a part of its command, as it is, or with the paths shown with `\\` on Windows taken as with `/`.
 #[track_caller]
-fn assert_statement(statement: &str, line: &str, command: &str) {
-    assert_contains(statement, line);
+fn assert_statement(statement: &str, lists: &str, command: &str) {
+    if !lists.is_empty() {
+        assert_eq!(files_of(statement), lists, "{statement}");
+    }
     let found = statement.lines().find_map(|line| line.strip_prefix("    command = "));
     assert_contains(&format!("{} ", found.unwrap_or_default()), command);
 }
@@ -374,7 +383,7 @@ fn crate_default_path() {
     ]);
     let host = project.host();
     let output = project.configure().ok();
-    assert_contains(output.build(&format!("{host}/libutil2.rlib")), ": command ../lib/util2/lib.rs\n");
+    assert_eq!(files_of(output.build(&format!("{host}/libutil2.rlib"))), "inputs = ../lib/util2/lib.rs\n");
 }
 
 #[test]
@@ -426,7 +435,7 @@ crate kernel 'kernel.rs'
     let compiler_builtins_metadata = format!("{host}/libcompiler_builtins.rmeta");
 
     let app = output.build(&format!("{host}/libapp.rlib"));
-    assert_contains(app, &format!("| {compiler_builtins_metadata} {core_metadata}\n"));
+    assert_contains(app, &format!("\n    dependencies = {compiler_builtins_metadata} {core_metadata}\n"));
     assert_contains(
         app,
         &format!("--extern compiler_builtins={compiler_builtins_metadata} --extern core={core_metadata}"),
@@ -457,7 +466,7 @@ fn use_adds_dependency() {
     // a library is compiled against the metadata of the libraries it uses
     let util = format!("{host}/libutil.rmeta");
     let app = output.build(&format!("{host}/libapp.rlib"));
-    assert_contains(app, &format!("| {util}\n"));
+    assert_contains(app, &format!("\n    dependencies = {util}\n"));
     assert_contains(app, &format!("--extern util={util}"));
     // while what links uses their libraries
     let util = format!("{host}/libutil.rlib");
@@ -2690,7 +2699,7 @@ fn flycheck_replays_diagnostics() {
     project.configure().ok();
     let graph = project.configure().graph;
     // checks are ordinary edges, which save their diagnostics
-    assert_contains(&graph, &format!("build check/app@{host}: phony {host}/check/libapp.rmeta\n"));
+    assert_contains(&graph, &format!("check/app@{host}\n    alias = {host}/check/libapp.rmeta\n"));
     assert_contains(&graph, &format!("--extern util={host}/check/libutil.rmeta"));
 
     // the diagnostics of the crates it depends on are replayed too
@@ -2750,16 +2759,18 @@ custom tool
     let output = project.configure().ok();
     // `input` and `output` are the paths, as the arguments of the program, run from the project root
     assert_contains(output.build("../out/copy.txt"), "\
-build ../out/copy.txt: command ../sub/in.txt
+../out/copy.txt
     description = CUSTOM copy
+    inputs = ../sub/in.txt
     command = cd .. && sh -c 'cat \"$1\" > \"$2\"; echo \"a  b\" >> \"$2\"' sh sub/in.txt out/copy.txt");
     // a program which is a path is relative to the file, and a dependency
     assert_contains(output.build("../out/tool.txt"), "\
-build ../out/tool.txt: command ../sub/tool.sh
+../out/tool.txt
     description = CUSTOM tool
+    inputs = ../sub/tool.sh
     command = cd .. && ./sub/tool.sh out/tool.txt 'a b' 8");
     // a command's outputs can be built by its name
-    assert_contains(&output.graph, "\nbuild custom/copy: phony ../out/copy.txt\n");
+    assert_contains(&output.graph, "\ncustom/copy\n    alias = ../out/copy.txt\n");
     let built = jig_command().args(["build", "custom/copy", "custom/tool"]).current_dir(&project.dir).output().unwrap();
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stdout));
     assert_eq!(std::fs::read_to_string(project.dir.join("out/copy.txt")).unwrap(), "hello\na  b\n");
@@ -2853,8 +2864,9 @@ custom pack
     // each item of a list is a separate argument
     output.stderr("note: -O,dtb,a b,\n");
     assert_contains(output.build("out.bin"), "\
-build out.bin: command ../a.dts ../b.dtsi ../c.dtsi
+out.bin
     description = CUSTOM pack
+    inputs = ../a.dts ../b.dtsi ../c.dtsi
     command = cd .. && tool -O dtb -o build/out.bin a.dts b.dtsi c.dtsi");
 }
 
@@ -2980,7 +2992,7 @@ log note '{kernel-link.output} {len(kernel-link.content)} {empty.output}'
     assert_eq!(std::fs::read_to_string(project.dir.join("build/empty")).unwrap(), "");
     output.stderr("note: build/link/kernel.x 46 build/empty\n");
     // and is referred to by its name, as a custom command is
-    assert_contains(&output.graph, "\nbuild copy: command link/kernel.x\n");
+    assert_eq!(files_of(statement(&output.graph, "copy")), "inputs = link/kernel.x\n");
     assert_contains(output.build(&format!("{host}/app{EXE}")), "-C link-arg=-Tlink/kernel.x");
     // the configuration depends on it, so that it is written again if it is removed
     assert_contains(&project.depfile(), " link/kernel.x empty\n");
@@ -3248,8 +3260,8 @@ test arguments
     make_executable(&project.dir.join("sub/check.sh"), &project.dir.join("sub/check.sh"));
     let output = project.configure().ok();
     // a test's target builds its inputs and program, and `test` builds those of every test
-    assert_contains(&output.graph, "\nbuild test/generated: phony gen.txt ../sub/check.sh\n");
-    assert_contains(&output.graph, "\nbuild test: phony test/generated test/fails test/passes test/arguments\n");
+    assert_contains(&output.graph, "\ntest/generated\n    alias = gen.txt ../sub/check.sh\n");
+    assert_contains(&output.graph, "\ntest\n    alias = test/generated test/fails test/passes test/arguments\n");
 
     let run = |names: &[&str]| {
         let output = jig_command().arg("test").args(names).current_dir(&project.dir).output().unwrap();
@@ -3357,7 +3369,7 @@ mod tests {
     assert_contains(output.build(&format!("{host}/test/app{EXE}")), &format!(
         "--extern util={host}/libutil.rlib --test",
     ));
-    assert_contains(&output.graph, &format!("\nbuild test/app: phony {host}/test/app{EXE}\n"));
+    assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE}\n"));
     let run = jig_command().arg("test").current_dir(&project.dir).output().unwrap();
     let stdout = String::from_utf8(run.stdout).unwrap();
     assert!(!run.status.success());
@@ -3406,13 +3418,14 @@ log note '{app.doc} {plain.doc}'
     // the crate is documented as it is checked, with the metadata of the crates it uses, which its documentation is
     // built again when its sources change, as is the crate's own
     let doc = output.build(&format!("{host}/doc/app/index.html"));
-    assert_contains(doc, &format!(
-        "build {host}/doc/app/index.html: command ../app.rs | {host}/check/libutil.rmeta {host}/check/libapp.rmeta\n",
-    ));
+    assert_eq!(
+        files_of(doc),
+        format!("inputs = ../app.rs\ndependencies = {host}/check/libutil.rmeta {host}/check/libapp.rmeta\n"),
+    );
     assert_contains(doc, &format!(" rustdoc --color=always --out-dir={host}/doc --crate-type=bin --crate-name=app "));
     assert_contains(doc, &format!(" -L dependency={host}/check --extern util={host}/check/libutil.rmeta --cfg fancy "));
-    assert_contains(&output.graph, &format!("\nbuild doc/app: phony {host}/doc/app/index.html\n"));
-    assert_contains(&output.graph, "\nbuild doc: phony doc/app doc/util\n");
+    assert_contains(&output.graph, &format!("\ndoc/app\n    alias = {host}/doc/app/index.html\n"));
+    assert_contains(&output.graph, "\ndoc\n    alias = doc/app doc/util\n");
     // and without defaults, it is built with everything else
     assert!(output.graph.lines().any(|line| line.starts_with("default ") && line.contains(" doc/util")), "{}", output.graph);
     assert!(!output.graph.contains("doc/plain"), "{}", output.graph);
@@ -3445,16 +3458,15 @@ log note clippy/
     output.stderr("note: must_use_candidate: allow, needless-return: deny, pedantic: warn\n");
     // a crate is linted as it is checked, with the levels set where it is declared, where groups are given first
     let app = output.build(&format!("{host}/lint/libapp.rmeta"));
-    assert_contains(app, &format!(
-        "build {host}/lint/libapp.rmeta {host}/lint/app.txt: command ../app.rs | {host}/check/libutil.rmeta\n",
-    ));
+    assert!(app.starts_with(&format!("{host}/lint/libapp.rmeta {host}/lint/app.txt\n")), "{app}");
+    assert_eq!(files_of(app), format!("inputs = ../app.rs\ndependencies = {host}/check/libutil.rmeta\n"));
     assert_contains(app, &format!("\
  --crate-type=bin --crate-name=app --edition=2024 --target={host} -L dependency={host}/check \
 --extern util={host}/check/libutil.rmeta -W clippy::pedantic -A clippy::must_use_candidate -D clippy::needless_return \
 ../app.rs 2> {host}/lint/app.txt\n"));
     assert_contains(output.build(&format!("{host}/lint/libutil.rmeta")), "\
  -W clippy::pedantic -A clippy::must_use_candidate ../util.rs 2>");
-    assert_contains(&output.graph, "\nbuild lint: phony lint/app lint/util\n");
+    assert_contains(&output.graph, "\nlint\n    alias = lint/app lint/util\n");
     // and again when any of its sources change, which rustc lists
     assert_contains(app, &format!(" --emit=dep-info={host}/lint/libapp.rmeta.d "));
     assert_contains(app, &format!("\n    depfile = {host}/lint/libapp.rmeta.d\n"));
@@ -3670,11 +3682,11 @@ custom image
     // everything which is built is in the build directory, with the graph, as the commands run there
     assert!(!project.dir.join("build").exists());
     let graph = &output.graph;
-    assert_contains(graph, &format!("\nbuild {host}/libkernel.rlib {host}/libkernel.rmeta: command ../kernel.rs\n"));
+    assert_eq!(files_of(statement(graph, &format!("{host}/libkernel.rlib"))), "inputs = ../kernel.rs\n");
     assert_contains(graph, &format!("-L dependency={host}"));
-    assert_contains(graph, &format!("\nbuild {host}/test/kernel{EXE}: command ../kernel.rs\n"));
-    assert_contains(graph, &format!("\nbuild {host}/check/libkernel.rmeta {host}/check/kernel.json: command"));
-    assert_contains(graph, &format!("\nbuild image: command {host}/libkernel.rlib\n"));
+    assert_eq!(files_of(statement(graph, &format!("{host}/test/kernel{EXE}"))), "inputs = ../kernel.rs\n");
+    assert_contains(graph, &format!("\n{host}/check/libkernel.rmeta {host}/check/kernel.json\n"));
+    assert_eq!(files_of(statement(graph, "image")), format!("inputs = {host}/libkernel.rlib\n"));
     // with a directory for the temporary files of each edge, as they are named after the crate
     assert_contains(graph, &format!(" --out-dir=tmp/{host}/kernel "));
     assert_contains(graph, &format!(" --out-dir=tmp/{host}/test/kernel "));
@@ -3721,11 +3733,12 @@ fn regenerates_itself() {
     let project = Project::new("regenerate", &[("Jig", "crate app 'app.rs'\n"), ("app.rs", "")]);
     let output = project.configure().ok();
     let statement = output.build("graph");
-    let line = statement.lines().next().unwrap_or_default();
-    // relative to the build directory, unless it is on another drive, on Windows
-    assert!(line.starts_with("build graph: command ../Jig ") && line.ends_with(&format!("/jig{EXE}")), "{line}");
+    // its inputs are the root file and the tool, relative to the build directory, unless it is on another drive, on
+    // Windows
+    let line = statement.lines().find_map(|line| line.strip_prefix("    inputs = ")).unwrap_or_default();
+    assert!(line.starts_with("../Jig ") && line.ends_with(&format!("/jig{EXE}")), "{statement}");
     if !cfg!(windows) {
-        assert!(line.ends_with(&format!(" {}", rebased(&project, &configure_path()))), "{line}");
+        assert!(line.ends_with(&format!(" {}", rebased(&project, &configure_path()))), "{statement}");
     }
     let configure = slashed_words(&configure_path().display().to_string());
     assert_statement(statement, "", &format!(" && {configure} generate Jig "));
@@ -3752,9 +3765,10 @@ fn rebased_paths() {
     };
     jig(&["generate", "Jig"]);
     let graph = jig(&["graph"]);
-    assert!(graph.starts_with(&format!("build graph: command ../Jig jig{EXE}\n")), "{graph}");
-    assert_contains(&graph, &format!("\nbuild jig{EXE}: command ../app.rs\n"));
-    assert_contains(&graph, &format!("\nbuild {host}/libapp.rlib {host}/libapp.rmeta: command ../app.rs\n"));
+    assert!(graph.starts_with("graph\n"), "{graph}");
+    assert_eq!(files_of(statement(&graph, "graph")), format!("inputs = ../Jig jig{EXE}\n"));
+    assert_eq!(files_of(statement(&graph, &format!("jig{EXE}"))), "inputs = ../app.rs\n");
+    assert_eq!(files_of(statement(&graph, &format!("{host}/libapp.rlib"))), "inputs = ../app.rs\n");
     // rustc writes its working directory as the project root, and the paths of sources relative to it, other than in
     // its dep-info, which rig reads
     assert_contains(&graph, &format!(" --remap-path-prefix={dir}/build=. --remap-path-prefix=..= --target="));
@@ -3824,7 +3838,7 @@ target my-kernel
     assert!(spec.ends_with(",\n  \"disable-redzone\": true,\n  \"os\": \"bluemetal\"\n}\n"), "{spec}");
     // crates for the target use its specification
     assert_statement(output.build("my-kernel/libkernel.rlib"), "\
-build my-kernel/libkernel.rlib my-kernel/libkernel.rmeta: command ../kernel.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
+inputs = ../kernel.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
 
     // an unchanged specification is not written again, as every crate for the target depends on it
     let modified = std::fs::metadata(project.dir.join("build/targets/my-kernel.json")).unwrap().modified().unwrap();
@@ -4012,11 +4026,11 @@ target wrapped
     let host = project.host();
     let output = project.configure_with(NIGHTLY).ok();
     // a test is named with its target unless it is the host target, and needs its runner
-    assert_contains(&output.graph, "\nbuild test/app@vm: phony vm/test/app ../run.sh\n");
-    assert_contains(&output.graph, "\nbuild test/app@plain: phony plain/test/app\n");
+    assert_contains(&output.graph, "\ntest/app@vm\n    alias = vm/test/app ../run.sh\n");
+    assert_contains(&output.graph, "\ntest/app@plain\n    alias = plain/test/app\n");
     // a runner can be what is built, such as the output of a custom command, which is built first
-    assert_contains(&output.graph, "\nbuild test/app@wrapped: phony wrapped/test/app wrap.sh\n");
-    assert_contains(&output.graph, &format!("\nbuild test/app: phony {host}/test/app{EXE}\n"));
+    assert_contains(&output.graph, "\ntest/app@wrapped\n    alias = wrapped/test/app wrap.sh\n");
+    assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE}\n"));
     // the runner runs the harness, which is its last argument, while without one the harness runs directly
     let database = std::fs::read(project.dir.join(".jig")).unwrap();
     let strings = |strings: &[&str]| {
@@ -4076,8 +4090,8 @@ target riscv64gc-unknown-none-elf
     // a builtin target keeps its specification, but can be tested
     assert_statement(output.build("riscv64gc-unknown-none-elf/test/app"), "", "\
  --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf --test ");
-    assert_contains(&output.graph, "\nbuild test/app@riscv64gc-unknown-none-elf: phony riscv64gc-unknown-none-elf/test/app\n");
-    assert_contains(&output.graph, &format!("\nbuild test/app: phony {host}/test/app{EXE}\n"));
+    assert_contains(&output.graph, "\ntest/app@riscv64gc-unknown-none-elf\n    alias = riscv64gc-unknown-none-elf/test/app\n");
+    assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE}\n"));
     assert!(!project.dir.join("build/targets").exists());
 }
 
@@ -4114,23 +4128,23 @@ log note '{my-kernel.link-script} {riscv64gc-unknown-none-elf.link-script} {my-k
     output.stderr("note: kernel/link.x build/generated.x other.x\n");
     // the script is passed to the linker, rather than written to the specification, and what is linked depends on it
     assert_statement(output.build("my-kernel/kernel"), "\
-build my-kernel/kernel: command ../kernel.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=bin --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x ");
+inputs = ../kernel.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=bin --crate-name=kernel --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x ");
     let spec = std::fs::read_to_string(project.dir.join("build/targets/my-kernel.json")).unwrap();
     assert!(!spec.contains("link.x"), "{spec}");
     // a library is not linked, but its test harness is
     assert_statement(output.build("my-kernel/libutil.rlib"), "\
-build my-kernel/libutil.rlib my-kernel/libutil.rmeta: command ../util.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
+inputs = ../util.rs targets/my-kernel.json\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel ");
     assert_statement(output.build("my-kernel/test/util"), "\
-build my-kernel/test/util: command ../util.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test ");
+inputs = ../util.rs targets/my-kernel.json ../kernel/link.x\n", "--crate-type=lib --crate-name=util --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../kernel/link.x --test ");
     // nor is a check
     let commands = output.graph.lines().filter(|line| line.starts_with("    command = "));
     assert_eq!(commands.filter(|line| line.contains("-C link-arg=-T../kernel/link.x")).count(), 2, "{}", output.graph);
     // a crate's own replaces its target's
     assert_statement(output.build("my-kernel/other"), "\
-build my-kernel/other: command ../other.rs targets/my-kernel.json ../other.x\n", "--crate-type=bin --crate-name=other --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x ");
+inputs = ../other.rs targets/my-kernel.json ../other.x\n", "--crate-type=bin --crate-name=other --edition=2024 --target=targets/my-kernel.json -Zunstable-options -L dependency=my-kernel -C link-arg=-T../other.x ");
     // a builtin target can have one with `override`, which is built first when it is generated
     assert_statement(output.build("riscv64gc-unknown-none-elf/app"), "\
-build riscv64gc-unknown-none-elf/app: command ../app.rs generated.x\n", "--crate-type=bin --crate-name=app --edition=2024 --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x ");
+inputs = ../app.rs generated.x\n", "--crate-type=bin --crate-name=app --edition=2024 --target=riscv64gc-unknown-none-elf -L dependency=riscv64gc-unknown-none-elf -C link-arg=-Tgenerated.x ");
 }
 
 #[test]
@@ -4563,7 +4577,7 @@ log note core.target == target
     // a crate is also referred to by its name alone, for the target in effect where it is referred to
     output.stderr(&format!("note: build/{host}/libcore.rlib true build/{host}/libcore.rlib\n"));
     output.stderr("note: true\n  --> Jig:23:10");
-    assert_contains(output.build("kernel.bin"), "build kernel.bin: command riscv64gc-unknown-none-elf/libkernel.rlib\n");
+    assert_eq!(files_of(output.build("kernel.bin")), "inputs = riscv64gc-unknown-none-elf/libkernel.rlib\n");
 }
 
 #[test]
@@ -4659,19 +4673,19 @@ custom c
     let host = project.host();
     let output = project.configure().ok();
     // an output is named after its command, in the build directory, unless it is replaced
-    assert_contains(output.build("apples"), "build apples: command\n    description = CUSTOM apples\n    command = cd .. && touch build/apples");
+    assert_contains(output.build("apples"), "apples\n    description = CUSTOM apples\n    command = cd .. && touch build/apples");
     output.stderr("note: build/pears build/data\n");
     // the paths of a crate or custom command are not resolved again, relative to the file which refers to them
     let example = output.build("example");
-    assert_contains(example, &format!("build example: command {host}/tool{EXE}\n"));
+    assert_eq!(files_of(statement(example, "example")), format!("inputs = {host}/tool{EXE}\n"));
     assert_statement(example, "", &format!(" && cat build/{host}/tool{EXE} build/example "));
     let b = output.build("b");
-    assert_contains(b, &format!("build b: command {host}/tool{EXE}\n"));
+    assert_eq!(files_of(statement(b, "b")), format!("inputs = {host}/tool{EXE}\n"));
     assert_statement(b, "", &format!("cd .. && ./build/{host}/tool{EXE} build/b "));
     // a path outside the project leads out of the build directory, which on Windows is from the root of its drive
     if !cfg!(windows) {
         let absolute = rebased(&project, Path::new("/tmp/absolute"));
-        assert_contains(output.build(&absolute), &format!("build {absolute}: command pears data ../sub/local.txt\n"));
+        assert_eq!(files_of(output.build(&absolute)), "inputs = pears data ../sub/local.txt\n");
     }
 }
 
@@ -5440,7 +5454,7 @@ log note install-prefix
         // where a user's own programs go on Windows
         .stderr(if cfg!(windows) { "/Programs\n" } else { "note: /usr/local\n" });
     // `install` builds what is installed
-    assert_contains(&output.graph, &format!("\nbuild install: phony {host}/tool{EXE} page.1\n"));
+    assert_contains(&output.graph, &format!("\ninstall\n    alias = {host}/tool{EXE} page.1\n"));
 }
 
 #[test]
@@ -5627,11 +5641,11 @@ fn graph_command() {
     ]);
     let host = project.host();
     let output = project.configure().ok();
-    // each edge, as ninja's statements are written, with what it has under it
-    assert_contains(&output.graph, "build copy: command ../in.txt\n    description = CUSTOM copy\n    command = cd .. && cp in.txt build/copy");
-    assert_contains(&output.graph, &format!("\nbuild {host}/libutil.rlib {host}/libutil.rmeta: command ../util.rs\n"));
+    // each edge, as a block headed by its outputs, with what it has under it
+    assert_contains(&output.graph, "copy\n    description = CUSTOM copy\n    inputs = ../in.txt\n    command = cd .. && cp in.txt build/copy");
+    assert_eq!(files_of(statement(&output.graph, &format!("{host}/libutil.rlib"))), "inputs = ../util.rs\n");
     assert_contains(&output.graph, &format!("\n    early = {host}/libutil.rmeta\n"));
-    assert_contains(&output.graph, "\nbuild custom/copy: phony copy\n\n");
+    assert_contains(&output.graph, "\ncustom/copy\n    alias = copy\n\n");
     assert_contains(&output.graph, "\ndefault custom/copy\n");
     let graph = |args: &[&str]| {
         let mut command = jig_command();
@@ -5640,14 +5654,14 @@ fn graph_command() {
     };
     // or only those of the outputs given, without the defaults
     let (ok, only, _) = graph(&["copy"]);
-    assert!(ok && only.starts_with("build copy: command ../in.txt\n") && !only.contains("default"), "{only}");
+    assert!(ok && only.starts_with("copy\n    description = CUSTOM copy\n") && !only.contains("default"), "{only}");
     // as JSON, with the command in its parts
     let (ok, json, _) = graph(&["--json", "copy"]);
     assert!(ok, "{json}");
     assert_eq!(slashed(&json), "\
 {\"edges\": [
-    {\"outputs\": [\"copy\"], \"kind\": \"command\", \"inputs\": [\"../in.txt\"], \"dependencies\": [], \"after\": [], \
-\"description\": \"CUSTOM copy\", \"program\": \"cp\", \"args\": [\"in.txt\", \"build/copy\"], \"dir\": \"..\"}
+    {\"outputs\": [\"copy\"], \"description\": \"CUSTOM copy\", \"inputs\": [\"../in.txt\"], \"program\": \"cp\", \
+\"args\": [\"in.txt\", \"build/copy\"], \"dir\": \"..\"}
 ], \"defaults\": []}
 ");
     // an output which no edge produces is an error, as is an option it doesn't take
@@ -5857,12 +5871,12 @@ log note '{app.depends} | {copy.depends} | {runs.depends} | {copy.input}'
     // the paths are resolved as inputs are, but are not inputs
     output.stderr(&format!("note: build/data | build/data extra.txt | build/{host}/app{EXE} | in.txt\n"));
     // which are built first, without rebuilding when they change
-    assert_contains(&output.graph, &format!("\nbuild {host}/app{EXE}: command ../app.rs || data\n"));
-    assert_contains(&output.graph, &format!("\nbuild {host}/test/app{EXE}: command ../app.rs || data\n"));
-    assert_contains(&output.graph, "\nbuild copy.txt: command ../in.txt || data ../extra.txt\n");
+    assert_eq!(files_of(statement(&output.graph, &format!("{host}/app{EXE}"))), "inputs = ../app.rs\nafter = data\n");
+    assert_eq!(files_of(statement(&output.graph, &format!("{host}/test/app{EXE}"))), "inputs = ../app.rs\nafter = data\n");
+    assert_eq!(files_of(statement(&output.graph, "copy.txt")), "inputs = ../in.txt\nafter = data ../extra.txt\n");
     // and which are built for a test
-    assert_contains(&output.graph, &format!("\nbuild test/app: phony {host}/test/app{EXE} data\n"));
-    assert_contains(&output.graph, &format!("\nbuild test/runs: phony {host}/app{EXE}\n"));
+    assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE} data\n"));
+    assert_contains(&output.graph, &format!("\ntest/runs\n    alias = {host}/app{EXE}\n"));
     // so that the test of the crate finds what it depends on
     let run = jig_command().args(["test", "app"]).current_dir(&project.dir).output().unwrap();
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
@@ -5884,7 +5898,7 @@ crate app 'app.rs'
 "))]);
     let output = project.configure().ok();
     // tests are allowed for the target without a `target` statement
-    assert_contains(&output.graph, &format!("\nbuild test/app@{musl}: phony {musl}/test/app\n"));
+    assert_contains(&output.graph, &format!("\ntest/app@{musl}\n    alias = {musl}/test/app\n"));
     // or with one which does not change it
     let project = Project::new("host-compatible-override", &[("Jig", &format!("\
 target {musl}
@@ -5964,7 +5978,7 @@ log note '{f.builtin} {f.test} {g.builtin} {g.test}'
     let output = project.configure().ok();
     output.stderr("note: true false true true false\n").stderr("note: false false true true\n");
     // `builtin` and `test` of crates are flags too
-    assert_contains(&output.graph, &format!("\nbuild test/g: phony {host}/test/g{EXE}\n"));
+    assert_contains(&output.graph, &format!("\ntest/g\n    alias = {host}/test/g{EXE}\n"));
     assert!(!output.graph.contains("test/f"), "{}", output.graph);
     assert_contains(&output.graph, &format!("\ndefault custom/d {host}/liba.rlib {host}/libc.rlib\n"));
     let project = Project::new("default-flag-errors", &[("Jig", "\
@@ -6210,7 +6224,7 @@ crate app 'app.rs'
     // its own, and a target which is not for Linux has no probe
     output.stderr("note: true true false\n").stderr("note: false true false\n");
     // and `test` is whether it can run by default
-    assert_contains(&output.graph, "\nbuild test/app@s390x-unknown-linux-gnu: phony s390x-unknown-linux-gnu/test/app\n");
+    assert_contains(&output.graph, "\ntest/app@s390x-unknown-linux-gnu\n    alias = s390x-unknown-linux-gnu/test/app\n");
     let project = Project::new("target-can-run-errors", &[("Jig", "\
 target powerpc64le-unknown-linux-gnu
     override

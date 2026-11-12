@@ -93,9 +93,9 @@ commands:
                          reporting its tags, and with `--install`, installing a toolchain a command needs with rustup
     workers              show the workers of the `workers` property, with their hosts, tags and toolchains
     graph [--json] [<output> ...]
-                         show rig's graph of the project, once it is up to date: each command, with its outputs,
-                         inputs and command line, as ninja's `build` statements are written, or as JSON with `--json`,
-                         or only those of the outputs given
+                         show rig's graph of the project, once it is up to date: each command, headed by its outputs,
+                         with its inputs, dependencies and command line, or as JSON with `--json`, or only those of the
+                         outputs given
     install [--proxy] [<prefix>]
                          build and install the files with `install` in a prefix, the `install-prefix` property by
                          default, or with `--proxy`, install wrappers which build and run programs, and links to
