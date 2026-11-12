@@ -1,9 +1,8 @@
 //! rig, which builds the graph from `graph` in the build directory, as [`crate::rig_graph`] writes it, keeping the
 //! state of the build in `.rig` beside it.
 //!
-//! It is used rather than ninja with `JIG_ENGINE=rig`. `jig build` takes a subset of ninja's options for it:
-//! `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would run, `-v` to show commands
-//! rather than descriptions, and `--quiet`.
+//! `jig build` takes its options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would
+//! run, `-v` to show commands rather than descriptions, and `--quiet`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -35,7 +34,7 @@ struct Args {
 }
 
 impl Args {
-    /// Parse the arguments `jig build` passes on, which are ninja's options that rig takes, and targets.
+    /// Parse the arguments `jig build` passes on, which are rig's options, and targets.
     fn parse(args: &[OsString]) -> Result<Self, Error> {
         let mut parsed = Self::default();
         let mut args = args.iter().map(|arg| arg.to_string_lossy().into_owned());
@@ -150,7 +149,7 @@ impl Rig<'_> {
         output: Output,
     ) -> Result<bool, Error> {
         let (graph, mut state, file) = self.loaded()?;
-        // rustc and clippy print in colour, which is left out where the output is not in colour, as ninja does
+        // rustc and clippy print in colour, which is left out where the output is not in colour
         let (mut out, colour, fd): (Box<dyn std::io::Write>, bool, i32) = match output {
             Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout()), 1),
             Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr()), 2),
@@ -474,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_ninja_options() {
+    fn parses_options() {
         let args = parse(&["-j", "4", "-k0", "-v", "a", "--quiet", "-n", "--", "-b"]).unwrap_or_else(|_| panic!());
         assert_eq!((args.jobs, args.keep_going), (Some(4), Some(0)));
         assert!(args.verbose && args.quiet && args.dry_run);

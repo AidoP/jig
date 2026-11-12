@@ -88,37 +88,6 @@ pub trait Graph {
     fn finish(&mut self) -> Result<(), Error>;
 }
 
-/// Writes a graph to two others, each call to the first and then the second.
-#[cfg(test)]
-pub struct Tee<'a>(pub &'a mut dyn Graph, pub &'a mut dyn Graph);
-#[cfg(test)]
-impl Graph for Tee<'_> {
-    fn variable(&mut self, name: &str, value: &str) -> Result<(), Error> {
-        self.0.variable(name, value)?;
-        self.1.variable(name, value)
-    }
-    fn rule(&mut self, rule: &Rule) -> Result<(), Error> {
-        self.0.rule(rule)?;
-        self.1.rule(rule)
-    }
-    fn edge(&mut self, edge: &Edge) -> Result<(), Error> {
-        self.0.edge(edge)?;
-        self.1.edge(edge)
-    }
-    fn alias(&mut self, name: &Path, targets: &[&Path]) -> Result<(), Error> {
-        self.0.alias(name, targets)?;
-        self.1.alias(name, targets)
-    }
-    fn default(&mut self, targets: &[&Path]) -> Result<(), Error> {
-        self.0.default(targets)?;
-        self.1.default(targets)
-    }
-    fn finish(&mut self) -> Result<(), Error> {
-        self.0.finish()?;
-        self.1.finish()
-    }
-}
-
 /// Returns a path as the graph has it, with `/` between its components, as on Unix, whichever the platform joined them
 /// with, so that a path is named the same however it was made, as `test/<name>` is.
 pub fn path_string(path: &Path) -> String {

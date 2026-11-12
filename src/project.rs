@@ -45,9 +45,6 @@ pub const MAX_USE_DEPTH: usize = 2048;
 
 pub struct Project {
     root: PathBuf,
-    /// Whether a command's arguments may have line breaks, as with rig, which runs a program with its arguments, rather
-    /// than ninja, which writes a command on a line of `build.ninja`.
-    pub line_breaks: bool,
     /// The rustup toolchain the project is configured with, which the programs `run` runs are given.
     pub toolchain: Option<String>,
     /// What identifies the toolchain, by which rig caches the results of rustc and clippy, if it caches them.
@@ -121,7 +118,6 @@ impl Project {
             dependencies: Vec::new(),
             linkers: HashMap::new(),
             missing: Vec::new(),
-            line_breaks: false,
             env: Vec::new(),
             files_idx: HashMap::new(),
             later_declared: Vec::new(),

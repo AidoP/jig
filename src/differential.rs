@@ -1,32 +1,27 @@
-//! Differential tests of rig against a model of what a build must do, and against ninja where it is installed, in the
-//! unit tests.
+//! Differential tests of rig against a model of what a build must do, in the unit tests.
 //!
-//! Each test generates a random graph from a seed, writes it through jig's [`Graph`] trait as both `build.ninja` and
-//! rig's graph, and builds it with rig, and ninja if it is installed, each in a directory of its own, of the same
-//! files. A random sequence of edits follows, each followed by a build with each, and by the [`Model`], after which
-//! the same edges must have run, with the same outcome, and the outputs must be the same, as the model has them.
+//! Each test generates a random graph from a seed, writes it through jig's [`Graph`] trait as rig's graph, and builds
+//! it with rig. A random sequence of edits follows, each followed by a build with rig, and by the [`Model`], after
+//! which rig must have run the edges the model did, with the same outcome, and the outputs must be as the model has
+//! them.
 //!
 //! The model is the oracle: a simulation of the graph, without files or processes, which says which edges must run by
 //! rig's rules, and what each of them writes, small enough to be read in one sitting. ninja was the oracle before it,
-//! and checks it while it is installed, so that the model starts out agreeing with what it replaces.
+//! and the model was checked against it, agreeing on every seed, before ninja was removed.
 //!
 //! The graphs have explicit, implicit and order-only inputs, implicit outputs, aliases, edges which discover inputs
 //! from their depfiles, and restat edges, which leave an output alone when it would not change. The edits change the
 //! contents of sources, touch them without changing them, delete outputs, and build a few targets rather than the
-//! defaults. They leave out what rig rebuilds on purpose where ninja does not, such as a source whose time goes back,
-//! or an output changed by hand.
+//! defaults. They leave out what the model leaves out, as a source whose time goes back, or an output changed by hand.
 //!
-//! The tests are skipped where ninja is not installed. `JIG_DIFFERENTIAL_SEEDS` sets the number of seeds, which is
-//! `16` by default.
+//! `JIG_DIFFERENTIAL_SEEDS` sets the number of seeds, which is `16` by default.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
-use crate::graph::{Edge, Graph, Rule, Tee};
-use crate::ninja::NinjaFile;
+use crate::graph::{Edge, Graph, Rule};
 use crate::rig_graph::{self, RigGraph};
 
 /// A pseudo-random number generator, xorshift64*, which is enough to choose graphs and edits from a seed.
@@ -140,12 +135,9 @@ fn generate(random: &mut Random) -> Generated {
     Generated { sources, edges, aliases }
 }
 
-/// Write a generated graph through jig's [`Graph`] trait, as `build.ninja` in one directory and rig's graph in
-/// another.
-fn write(generated: &Generated, ninja_dir: &Path, rig_dir: &Path) {
-    let mut ninja = NinjaFile::new(ninja_dir.join(crate::ninja::FILE)).unwrap_or_else(|error| panic!("{error}"));
-    let mut rig = RigGraph::new(rig_dir.join(rig_graph::FILE));
-    let mut graph = Tee(&mut ninja, &mut rig);
+/// Write a generated graph through jig's [`Graph`] trait, as rig's graph.
+fn write(generated: &Generated, dir: &Path) {
+    let mut graph = RigGraph::new(dir.join(rig_graph::FILE));
     let log = format!(" && echo $id >> {LOG}");
     let step = format!("cat $in /dev/null > $out$extra{log}");
     let discover = format!("cat $in $headers /dev/null > $out && echo \"$out: $headers\" > $out.d{log}");
@@ -189,7 +181,7 @@ fn write(generated: &Generated, ninja_dir: &Path, rig_dir: &Path) {
                 implicit: &as_paths(&implicit),
                 order_only: &as_paths(&order_only),
                 variables: &variables,
-                // the commands are shell commands, which both engines run with `sh`
+                // the commands are shell commands, which rig runs with `sh`
                 exec: None,
                 hashed: false,
                 cache: None,
@@ -371,13 +363,6 @@ fn take_log(dir: &Path) -> BTreeSet<usize> {
     log.lines().map(|line| line.parse().unwrap()).collect()
 }
 
-/// Build with ninja, returning what it did and what it showed.
-fn build_ninja(dir: &Path, targets: &[&str]) -> (Ran, String) {
-    let output = Command::new("ninja").arg("-C").arg(dir).args(["-j4", "-k0"]).args(targets).output().unwrap();
-    let shown = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
-    (Ran { succeeded: output.status.success(), edges: take_log(dir) }, shown)
-}
-
 fn build_rig(dir: &Path, targets: &[&str]) -> Ran {
     let graph = rig::Graph::load(&dir.join(rig_graph::FILE)).unwrap_or_else(|error| panic!("{error}"));
     let mut state = open_state(&dir.join(".rig"));
@@ -456,25 +441,20 @@ fn outputs(generated: &Generated, dir: &Path) -> Vec<(String, Option<String>)> {
     paths.map(|path| (path.clone(), std::fs::read_to_string(dir.join(path)).ok())).collect()
 }
 
-/// Build a graph generated from a seed with rig, and ninja if it is installed, through a sequence of edits, comparing
-/// each with the model after each.
+/// Build a graph generated from a seed with rig, through a sequence of edits, comparing it with the model after each.
 ///
-/// With `verbose`, each step is shown, with what each did, and what ninja showed.
-fn compare(seed: u64, verbose: bool, with_ninja: bool) {
+/// With `verbose`, each step is shown, with what rig and the model did.
+fn compare(seed: u64, verbose: bool) {
     let mut random = Random::new(seed);
     let generated = generate(&mut random);
-    let base = std::env::temp_dir().join(format!("jig-differential-{}-{seed}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    let (ninja_dir, rig_dir) = (base.join("ninja"), base.join("rig"));
-    for dir in [&ninja_dir, &rig_dir] {
-        std::fs::create_dir_all(dir).unwrap();
-        for (i, source) in generated.sources.iter().enumerate() {
-            std::fs::write(dir.join(source), format!("source {i}\n")).unwrap();
-        }
+    let dir = std::env::temp_dir().join(format!("jig-differential-{}-{seed}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (i, source) in generated.sources.iter().enumerate() {
+        std::fs::write(dir.join(source), format!("source {i}\n")).unwrap();
     }
-    write(&generated, &ninja_dir, &rig_dir);
+    write(&generated, &dir);
     let mut model = Model::new(&generated);
-    let describe = || std::fs::read_to_string(ninja_dir.join(crate::ninja::FILE)).unwrap_or_default();
     let mut edit = Edit::Nothing;
     for step in 0..12 {
         // a few targets, rather than the defaults
@@ -486,46 +466,30 @@ fn compare(seed: u64, verbose: bool, with_ninja: bool) {
         };
         let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
         let expected = Ran { succeeded: true, edges: model.build(&targets) };
-        let rig = build_rig(&rig_dir, &targets);
+        let rig = build_rig(&dir, &targets);
         let context = || format!("seed {seed}, step {step}, after {edit:?}, building {targets:?}");
         if verbose {
             eprintln!("{}:\n  model: {expected:?}\n  rig:   {rig:?}", context());
         }
-        assert_eq!(rig, expected, "{}: rig (left), the model (right), in\n{}", context(), describe());
-        assert_eq!(outputs(&generated, &rig_dir), model.outputs_contents(), "{}", context());
-        // and ninja, which the model replaces, agrees with it, while it is installed
-        if with_ninja {
-            let (ninja, shown) = build_ninja(&ninja_dir, &targets);
-            if verbose {
-                eprintln!("  ninja: {ninja:?}\n{shown}");
-            }
-            assert_eq!(ninja, expected, "{}: ninja (left), the model (right), in\n{}", context(), describe());
-            assert_eq!(outputs(&generated, &ninja_dir), model.outputs_contents(), "{}", context());
-        }
+        assert_eq!(rig, expected, "{}: rig (left), the model (right)", context());
+        assert_eq!(outputs(&generated, &dir), model.outputs_contents(), "{}", context());
         edit = choose_edit(&mut random, &generated);
         // past the granularity of the file system's clock, so that a changed file has a new time
         std::thread::sleep(Duration::from_millis(15));
         model.apply(&edit);
-        apply(&edit, &rig_dir);
-        if with_ninja {
-            apply(&edit, &ninja_dir);
-        }
+        apply(&edit, &dir);
     }
-    let _ = std::fs::remove_dir_all(&base);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 #[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
 fn rig_builds_as_the_model_says() {
-    let with_ninja = Command::new("ninja").arg("--version").output().is_ok_and(|output| output.status.success());
-    if !with_ninja {
-        eprintln!("ninja is not installed, so rig is compared with the model alone");
-    }
     // the builds would slow the micro-benchmarks, which run beside the test
     let _timing = crate::bench::TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // one seed, to look into a difference
     if let Ok(seed) = std::env::var("JIG_DIFFERENTIAL_SEED") {
-        compare(seed.parse().unwrap(), true, with_ninja);
+        compare(seed.parse().unwrap(), true);
         return;
     }
     let seeds = std::env::var("JIG_DIFFERENTIAL_SEEDS").map_or(16, |seeds| seeds.parse().unwrap());
@@ -539,7 +503,7 @@ fn rig_builds_as_the_model_says() {
                     if seed >= seeds {
                         break;
                     }
-                    compare(seed, false, with_ninja);
+                    compare(seed, false);
                 }
             });
         }

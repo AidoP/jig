@@ -137,7 +137,6 @@ const DIAGNOSTIC_IDS: &[&str] = &[
     "repeated-attribute",
     "missing-attribute",
     "redeclare-custom",
-    "newline-in-argument",
     "newline-in-path",
     "empty-path",
     "test-target",
@@ -299,8 +298,7 @@ pub enum Message {
         name: String,
         previous: Span,
     },
-    NewlineInArgument,
-    /// A path with a newline, which ninja cannot write.
+    /// A path with a newline, which a depfile cannot have.
     NewlineInPath(PathBuf),
     /// A path which is empty, which would be the directory it is relative to.
     EmptyPath,
@@ -505,13 +503,10 @@ impl core::fmt::Display for Message {
             Self::RepeatedAttribute(name) => write!(f, "attribute {name:?} cannot be repeated"),
             Self::MissingAttribute(name) => write!(f, "missing required attribute {name:?}"),
             Self::RedeclareCustom { item, name, .. } => write!(f, "redeclaration of {item} {name:?}"),
-            Self::NewlineInArgument => {
-                write!(f, "command arguments cannot contain a newline with ninja, which cannot write it")
-            },
             Self::EmptyPath => write!(f, "a path cannot be empty"),
             // with the newline escaped, as the message is on one line
             Self::NewlineInPath(path) => {
-                write!(f, "path {:?} contains a newline, which ninja cannot write", path.display().to_string())
+                write!(f, "path {:?} contains a newline, which a depfile cannot have", path.display().to_string())
             },
             Self::EmptySeparator => write!(f, "the separator cannot be empty"),
             Self::NoValues => write!(f, "there are no values to compare"),
@@ -682,7 +677,6 @@ impl Message {
             Self::RepeatedAttribute { .. } => "repeated-attribute",
             Self::MissingAttribute { .. } => "missing-attribute",
             Self::RedeclareCustom { .. } => "redeclare-custom",
-            Self::NewlineInArgument { .. } => "newline-in-argument",
             Self::NewlineInPath(_) => "newline-in-path",
             Self::EmptyPath => "empty-path",
             Self::TestTarget { .. } => "test-target",

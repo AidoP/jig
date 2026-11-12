@@ -139,20 +139,22 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
    - **Checked.** 256 seeds against the model alone, and 64 against the model and ninja, agree. A model which takes
      touching a file as no change, or whose restat edges always write, fails on most of the first 16 seeds.
    - It is ignored on Windows until step 4, as the generated commands are shell lines.
-2. **Remove the ninja engine from jig.**
-   - `JIG_ENGINE` is no longer read. `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`, `NinjaOnWindows` and
-     `GraphOfNinja` go. `Configured` has no engine; `builder()` is rig's. The `Builder` trait, which only rig
-     implements then, goes, unless the tests need it as a seam.
-   - `reconfigure.stamp` goes, with `Configured::locate`'s checks of missing paths and variables, and the database's
-     `missing` and `env_hashes`, as rig's graph depends on them through `graph.d`. The database's version changes.
-   - `newline-in-argument` goes, as no argument has to be on a line.
-   - `jig build`'s options are rig's, documented as such, rather than "a subset of ninja's".
-   - CI's `ninja` job goes, and `bootstrap.sh` configures for rig alone.
-   - The tests: the harness generates only rig's graph, and `Output::ninja`, `Project::ninja`, `ninja_in`,
-     `raw_ninja`, `ninja_depfile`, `has_ninja` and `rig_engine` go. The three tests of `build.ninja` go, as what they
-     tested goes; what else they check, as the configure edge's command and inputs, and paths rebased to the build
-     directory, is checked by `jig graph`. The checks of how ninja quotes a command, or which run ninja, go.
-   - `test/perf.rs` compares rig with its own budgets alone, and the differential test with its model alone.
+2. **Done: remove the ninja engine from jig.**
+   - `JIG_ENGINE` is no longer read, and is ignored if set. `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`,
+     `NinjaOnWindows` and `GraphOfNinja` are gone. `Configured` has no engine, and `builder()` is rig's. The `Builder`
+     trait stays as the seam `Timed` wraps.
+   - `reconfigure.stamp` is gone, with `Configured::locate`'s checks of missing paths and variables, and the
+     database's `missing`, `env` and `env_hashes`, as rig's graph depends on them through `graph.d`, which always lists
+     them. The database's version is 27.
+   - `newline-in-argument` is gone, as no argument has to be on a line. A path still can't have a line break, as a
+     depfile lists it.
+   - `jig build`'s options are documented as rig's, and CI's `ninja` job is gone.
+   - The tests: the harness generates only rig's graph. The three tests of `build.ninja` are `generates_the_graph`,
+     `regenerates_itself` and `rebased_paths`, which check the configure edge's command and inputs, and paths rebased
+     to the build directory, with `jig graph`. `test/perf.rs` holds rig to its own budgets, 1.5 s for a full build of
+     its project and 100 ms for one which is up to date, and the differential test checks rig against the model alone.
+   - **Checked.** Every test passes on Linux, with `JIG_ENGINE=ninja` set as well, and under Wine, all but those which
+     need tools the Wine prefix lacks (nightly, clippy, `echo` and `sh`) pass, 21 being ignored on Windows.
 3. **Describe builds as rig's, rather than through ninja's rules.**
    - jig builds rig's graph through rig's own API, `Graph::add_edge` and `add_alias`, with each edge's program,
      arguments, environment, working directory, stderr file, description and depfile given directly, rather than
