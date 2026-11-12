@@ -35,6 +35,8 @@ pub enum Reason {
     /// An input is produced by an edge which must run.
     InputRebuilt(String),
     InputChanged(String),
+    /// A dependency which the edge had when it last ran is missing, and no edge produces it.
+    DependencyMissing(String),
     /// An input which the edge discovered, as its depfile lists, has changed.
     DiscoveredChanged(String),
     /// An environment variable which the edge read, as its depfile lists, has changed, or been set or unset.
@@ -53,6 +55,7 @@ impl std::fmt::Display for Reason {
             Self::InputsChanged => write!(f, "its inputs have changed"),
             Self::InputRebuilt(path) => write!(f, "input {path:?} is built again"),
             Self::InputChanged(path) => write!(f, "input {path:?} has changed"),
+            Self::DependencyMissing(path) => write!(f, "dependency {path:?} is missing"),
             Self::DiscoveredChanged(path) => write!(f, "discovered input {path:?} has changed"),
             Self::EnvChanged(name) => write!(f, "environment variable {name:?} has changed"),
             Self::Forced => write!(f, "it is an alias without inputs, which is always out of date"),
@@ -182,19 +185,19 @@ fn parts_of(exec: &Exec, write: &mut dyn FnMut(&[u8])) {
     part(exec.stderr.as_deref().unwrap_or("\0"));
 }
 
-/// Returns the inputs an edge declares, explicit and implicit, with the inputs of each alias in place of the alias.
+/// Returns the inputs and dependencies an edge declares, with those of each alias in place of the alias.
 #[must_use]
 pub fn declared_inputs(graph: &Graph, edge: EdgeRef) -> Vec<NodeId> {
     let mut inputs = Vec::new();
     let mut seen = HashSet::new();
-    let mut stack: Vec<NodeId> = edge.inputs().iter().chain(edge.implicit()).rev().copied().collect();
+    let mut stack: Vec<NodeId> = edge.inputs().iter().chain(edge.dependencies()).rev().copied().collect();
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
             continue;
         }
         let alias = graph.producer(node).map(|edge| graph.edge(edge)).filter(|edge| *edge.kind() == EdgeKind::Alias);
         match alias {
-            Some(alias) => stack.extend(alias.inputs().iter().chain(alias.implicit()).rev()),
+            Some(alias) => stack.extend(alias.inputs().iter().chain(alias.dependencies()).rev()),
             None => inputs.push(node),
         }
     }
@@ -239,7 +242,7 @@ pub fn record(
 ) -> Record {
     let edge = graph.edge(edge);
     let mut outputs = Vec::new();
-    for &output in edge.outputs().iter().chain(edge.implicit_outputs()) {
+    for &output in edge.outputs() {
         stamps.forget(output);
         outputs.push((graph.path(output).to_string(), stamps.node_as(output, edge.hashed(), None)));
     }
@@ -274,11 +277,11 @@ pub fn default_targets(graph: &Graph) -> Vec<NodeId> {
     }
     let mut used = vec![false; graph.nodes()];
     for edge in graph.edges() {
-        for node in edge.inputs().iter().chain(edge.implicit()).chain(edge.order_only()) {
+        for node in edge.inputs().iter().chain(edge.dependencies()).chain(edge.after()) {
             used[node.0 as usize] = true;
         }
     }
-    let produced = graph.edges().flat_map(|edge| edge.outputs().iter().chain(edge.implicit_outputs()));
+    let produced = graph.edges().flat_map(|edge| edge.outputs().iter());
     produced.copied().filter(|node| !used[node.0 as usize]).collect()
 }
 
@@ -333,7 +336,7 @@ fn reachable(graph: &Graph, state: &State, targets: &[NodeId]) -> (Vec<NodeId>, 
             continue;
         }
         let data = graph.edge(edge);
-        let lists = [data.outputs(), data.implicit_outputs(), data.inputs(), data.implicit(), data.order_only()];
+        let lists = [data.outputs(), data.inputs(), data.dependencies(), data.after()];
         stack.extend(lists.into_iter().flatten());
         for (path, _) in state.get(first_output(graph, edge)).into_iter().flat_map(|record| &record.discovered) {
             match graph.node(path) {
@@ -358,11 +361,11 @@ impl Planner<'_, '_, '_> {
         if self.status[start.0 as usize] != Status::Unvisited {
             return Ok(());
         }
-        // each entry is an edge, its inputs, of which the first are those it declares, and the next to visit
+        // each entry is an edge, what is built first, of which the first must be there, and the next to visit
         let mut stack = vec![self.frame(start)];
         self.status[start.0 as usize] = Status::Visiting;
-        while let Some((edge, inputs, declared, next)) = stack.last_mut() {
-            let (edge, declared) = (*edge, *declared);
+        while let Some((edge, inputs, required, next)) = stack.last_mut() {
+            let (edge, required) = (*edge, *required);
             let data = self.graph.edge(edge);
             let Some(&input) = inputs.get(*next) else {
                 stack.pop();
@@ -376,10 +379,9 @@ impl Planner<'_, '_, '_> {
             let index = *next;
             *next += 1;
             let Some(producer) = self.graph.producer(input) else {
-                // a discovered input which is missing makes its edge run, rather than failing
-                if index < declared && !self.stamps.node(input).exists() {
-                    let needed_by = data.outputs().iter().chain(data.implicit_outputs()).next();
-                    let needed_by = needed_by.map(|&node| self.graph.path(node).to_string());
+                // a dependency or a discovered input which is missing makes its edge run, rather than failing
+                if index < required && !self.stamps.node(input).exists() {
+                    let needed_by = data.outputs().first().map(|&node| self.graph.path(node).to_string());
                     return Err(Error::MissingInput { input: self.graph.path(input).into(), needed_by });
                 }
                 continue;
@@ -401,15 +403,16 @@ impl Planner<'_, '_, '_> {
         }
         Ok(())
     }
-    /// Returns an edge to visit, with its inputs: those it declares, explicit, implicit and order-only, then those it
-    /// discovered when it last ran which an edge produces, which are built first, as ninja does.
+    /// Returns an edge to visit, with what is built first: its inputs and what it is built after, which must be there,
+    /// as the count of them says, then its dependencies, and the inputs it discovered when it last ran which an edge
+    /// produces, which may be missing.
     fn frame(&self, edge: EdgeId) -> (EdgeId, Vec<NodeId>, usize, usize) {
         let data = self.graph.edge(edge);
-        let inputs = data.inputs().iter().chain(data.implicit()).chain(data.order_only());
-        let mut inputs: Vec<NodeId> = inputs.copied().collect();
-        let declared = inputs.len();
+        let mut inputs: Vec<NodeId> = data.inputs().iter().chain(data.after()).copied().collect();
+        let required = inputs.len();
+        inputs.extend(data.dependencies());
         inputs.extend(self.discovered(edge));
-        (edge, inputs, declared, 0)
+        (edge, inputs, required, 0)
     }
     fn discovered(&self, edge: EdgeId) -> Vec<NodeId> {
         discovered_nodes(self.graph, self.state, edge)
@@ -428,7 +431,7 @@ impl Planner<'_, '_, '_> {
 /// Returns the first output of an edge, which its record is kept by.
 pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> &str {
     let edge = graph.edge(edge);
-    let output = edge.outputs().iter().chain(edge.implicit_outputs()).next();
+    let output = edge.outputs().iter().next();
     output.map_or("", |&node| graph.path(node))
 }
 
@@ -480,18 +483,18 @@ pub(crate) fn reason(
 ) -> Option<Reason> {
     let edge = graph.edge(id);
     let discovered = discovered_nodes(graph, state, id);
-    let rebuilt = edge.inputs().iter().chain(edge.implicit()).chain(&discovered).find(|&&input| {
+    let rebuilt = edge.inputs().iter().chain(edge.dependencies()).chain(&discovered).find(|&&input| {
         graph.producer(input).is_some_and(rebuilt)
     });
     if *edge.kind() == EdgeKind::Alias {
         if let Some(&input) = rebuilt {
             return Some(Reason::InputRebuilt(graph.path(input).into()));
         }
-        let forced = edge.inputs().is_empty() && edge.implicit().is_empty();
+        let forced = edge.inputs().is_empty() && edge.dependencies().is_empty();
         let missing = edge.outputs().iter().any(|&output| !stamps.node(output).exists());
         return (forced && missing).then_some(Reason::Forced);
     }
-    let outputs: Vec<NodeId> = edge.outputs().iter().chain(edge.implicit_outputs()).copied().collect();
+    let outputs = edge.outputs().to_vec();
     let Some(record) = outputs.first().and_then(|&first| state.get(graph.path(first))) else {
         return Some(Reason::NoRecord);
     };
@@ -524,7 +527,12 @@ pub(crate) fn reason(
     }
     for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
         let recorded = fetched_as(graph, state, path, stamp);
-        if !stamps.node_as(node, hashed_as(stamp), Some((recorded, record.start))).same(*stamp) {
+        let now = stamps.node_as(node, hashed_as(stamp), Some((recorded, record.start)));
+        // what is missing here, which no edge produces, is a dependency, as a missing input is an error
+        if !now.exists() && stamp.exists() {
+            return Some(Reason::DependencyMissing(path.clone()));
+        }
+        if !now.same(*stamp) {
             return Some(Reason::InputChanged(path.clone()));
         }
     }
@@ -581,7 +589,7 @@ mod tests {
             for (edge, _) in plan.edges {
                 let inputs = input_stamps(&self.graph, &self.state, edge, &mut stamps);
                 let data = self.graph.edge(edge);
-                for &output in data.outputs().iter().chain(data.implicit_outputs()) {
+                for &output in data.outputs() {
                     write(&self.dir.join(self.graph.path(output)), &format!("built {}", ran.len()));
                 }
                 let output = self.output(edge);
@@ -612,9 +620,9 @@ mod tests {
         graph().rule("cc", &[("command", "cc $in -o $out")])
     }
 
-    /// A chain of edges, `a.o` from `a.c` with implicit inputs, `lib.a` from it, and `app` from that, with an alias.
-    fn chain(implicit: &[&str]) -> Graph {
-        let inputs: Vec<&str> = ["a.c", "|"].into_iter().chain(implicit.iter().copied()).collect();
+    /// A chain of edges, `a.o` from `a.c` with dependencies, `lib.a` from it, and `app` from that, with an alias.
+    fn chain(dependencies: &[&str]) -> Graph {
+        let inputs: Vec<&str> = ["a.c", "|"].into_iter().chain(dependencies.iter().copied()).collect();
         let graph = cc().edge("cc", &["a.o"], &inputs).edge("cc", &["lib.a"], &["a.o"]);
         graph.edge("cc", &["app"], &["lib.a", "main.c"]).edge("phony", &["all"], &["app"]).finish()
     }
@@ -818,9 +826,31 @@ mod tests {
     }
 
     #[test]
+    fn runs_what_has_lost_a_dependency() {
+        // a dependency which is missing, and which no edge produces, is not an error, as an input is
+        let mut build = Build::new("dependencies", chain(&["gone.rlib"]), &["a.c", "main.c"]);
+        assert_eq!(build.run(&["app"], &[]), ["a.o", "lib.a", "app"]);
+        assert_eq!(build.plan(&["app"]).unwrap(), []);
+        // one which it had, which is removed, runs it, as its use may have been removed with it
+        build.write("gone.rlib", "library");
+        assert_eq!(build.run(&["app"], &[]), ["a.o", "lib.a", "app"]);
+        std::fs::remove_file(build.dir.join("gone.rlib")).unwrap();
+        let reasons = build.plan(&["a.o"]).unwrap();
+        assert_eq!(reasons, [("a.o".into(), Reason::DependencyMissing("gone.rlib".into()))]);
+        // and once it has run without it, it is up to date
+        assert_eq!(build.run(&["app"], &[]), ["a.o", "lib.a", "app"]);
+        assert_eq!(build.plan(&["app"]).unwrap(), []);
+    }
+
+    #[test]
     fn reports_missing_inputs_and_cycles() {
-        let mut build = Build::new("errors", chain(&["a.h"]), &["a.c", "main.c"]);
+        let graph = cc().edge("cc", &["a.o"], &["a.c", "a.h"]).edge("cc", &["app"], &["a.o", "||", "after"]);
+        let mut build = Build::new("errors", graph.finish(), &["a.c"]);
         let missing = "\"a.h\", needed by \"a.o\", is missing and no edge produces it";
+        assert_eq!(build.plan(&["app"]).unwrap_err().to_string(), missing);
+        // as is what an edge is built after
+        build.write("a.h", "header");
+        let missing = "\"after\", needed by \"app\", is missing and no edge produces it";
         assert_eq!(build.plan(&["app"]).unwrap_err().to_string(), missing);
         assert_eq!(build.plan(&["nothing"]).unwrap_err().to_string(), "unknown target \"nothing\"");
         let graph = cc().edge("cc", &["a"], &["b"]).edge("cc", &["b"], &["c"]).edge("cc", &["c"], &["a"]);

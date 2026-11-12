@@ -59,8 +59,8 @@ impl Graphs {
         self.rules.insert(name.into(), bindings);
         self
     }
-    /// Add an edge by a rule, or an alias, by `phony`, whose outputs are followed by `|` and its implicit outputs, and
-    /// whose inputs are followed by `|` and its implicit inputs, then `||` and its order-only inputs.
+    /// Add an edge by a rule, or an alias, by `phony`, whose inputs are followed by `|` and its dependencies, then `||`
+    /// and what it is built after.
     pub(crate) fn edge(self, rule: &str, outputs: &[&str], inputs: &[&str]) -> Self {
         self.edge_with(rule, outputs, inputs, &[])
     }
@@ -72,19 +72,18 @@ impl Graphs {
         inputs: &[&str],
         variables: &[(&str, &str)],
     ) -> Self {
-        let [outputs, implicit_outputs, _] = split(outputs);
-        let [inputs, implicit, order_only] = split(inputs);
+        let [inputs, dependencies, after] = split(inputs);
         let mut nodes = |paths: &[&str]| paths.iter().map(|path| self.graph.file(path)).collect::<Vec<_>>();
         let mut edge = Edge {
-            outputs: nodes(&outputs),
-            implicit_outputs: nodes(&implicit_outputs),
+            outputs: nodes(outputs),
+
             inputs: nodes(&inputs),
-            implicit: nodes(&implicit),
-            order_only: nodes(&order_only),
+            dependencies: nodes(&dependencies),
+            after: nodes(&after),
             ..Edge::default()
         };
         if rule != "phony" {
-            let scope = Scope { outputs: &outputs, inputs: &inputs, edge: variables, graph: &self.variables };
+            let scope = Scope { outputs, inputs: &inputs, edge: variables, graph: &self.variables };
             let bindings = &self.rules[rule];
             let binding = |key: &str| bindings.iter().find(|(name, _)| name == key).map(|(_, value)| value.as_str());
             let command = binding("command").unwrap_or_else(|| panic!("the rule {rule:?} has no command"));

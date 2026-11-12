@@ -41,9 +41,9 @@ pub struct Record {
     pub duration: u32,
     /// The hash of the edge's action, as [`crate::plan::action_hash`] finds it.
     pub action: u64,
-    /// The outputs, explicit then implicit, once the edge had run. The first is the key of the record.
+    /// The outputs, once the edge had run. The first is the key of the record.
     pub outputs: Vec<(String, Stamp)>,
-    /// The inputs the edge declares, explicit and implicit, with the inputs of aliases in their place, when it started.
+    /// The inputs and dependencies the edge declares, with those of aliases in their place, when it started.
     pub inputs: Vec<(String, Stamp)>,
     /// The inputs the edge reported in its depfile, once it had run.
     pub discovered: Vec<(String, Stamp)>,

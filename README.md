@@ -350,8 +350,8 @@ relative to, which is the error `empty-path`.
 
 `jig graph` shows rig's graph of the project, once it is up to date, for reading what it builds and how, as each of its
 commands, or with outputs, only those which produce them. Each is a statement as ninja writes them, with its outputs,
-`command` or `phony` for an alias, and its inputs, with `|` before the implicit ones and `||` before those which are
-order-only, followed by a line for each of what it has: its `description`, its `command` line, as `-v` shows it, its
+`command` or `phony` for an alias, and its inputs, with `|` before its dependencies and `||` before what it is built
+after, followed by a line for each of what it has: its `description`, its `command` line, as `-v` shows it, its
 `depfile`, the `discover` command which writes the depfile without building, the `early` outputs it reports as it writes
 them, the variables it passes on with `pass-env`, the `console` pool, the identity it is `cache`d by, the `target`,
 `tags` and `any-host` of the workers which may run it, and whether it is a `generator`, `restat` or `hashed`. Its paths

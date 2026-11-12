@@ -81,14 +81,17 @@ pub struct Edge {
     pub kind: EdgeKind,
     /// What is shown while the edge runs.
     pub description: String,
+    /// The files the edge writes, the first of which names it, and keeps its record.
     pub outputs: Vec<NodeId>,
-    /// Outputs which are not part of `$out`.
-    pub implicit_outputs: Vec<NodeId>,
+    /// The files the edge reads, which must be there: one which is missing, and which no edge produces, is an error
+    /// before anything runs.
     pub inputs: Vec<NodeId>,
-    /// Inputs which trigger a rebuild but are not part of `$in`.
-    pub implicit: Vec<NodeId>,
-    /// Inputs which must be built first but do not trigger a rebuild.
-    pub order_only: Vec<NodeId>,
+    /// The files the edge depends on, which run it again when they change, as its inputs do, but which may be missing:
+    /// one which is missing, and which no edge produces, runs the edge, which says why if it still needs it, as a
+    /// compiler whose dependency was removed with its use does not.
+    pub dependencies: Vec<NodeId>,
+    /// The files which are built before the edge, but which it neither reads nor depends on.
+    pub after: Vec<NodeId>,
     /// The depfile the action writes, in the form gcc writes, of the inputs it discovered.
     pub depfile: Option<String>,
     pub pool: Pool,
@@ -132,10 +135,11 @@ pub struct Placement {
 
 /// The lists of nodes of an edge, in the order they are stored.
 const OUTPUTS: usize = 0;
-const IMPLICIT_OUTPUTS: usize = 1;
-const INPUTS: usize = 2;
-const IMPLICIT: usize = 3;
-const ORDER_ONLY: usize = 4;
+const INPUTS: usize = 1;
+const DEPENDENCIES: usize = 2;
+const AFTER: usize = 3;
+/// The number of lists of nodes of an edge.
+pub(crate) const LISTS: usize = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EdgeData {
@@ -152,7 +156,7 @@ struct EdgeData {
     discover: Option<Exec>,
     early: Vec<NodeId>,
     /// The start and end of each list of nodes in [`Graph::ids`].
-    lists: [(u32, u32); 5],
+    lists: [(u32, u32); LISTS],
 }
 
 /// A build graph.
@@ -240,17 +244,16 @@ impl Graph {
     /// If the graph has as many edges, or nodes in their lists, as a `u32` can count, or a node is not in the graph.
     pub fn add_edge(&mut self, mut edge: Edge) -> Result<EdgeId, Error> {
         let take = std::mem::take::<Vec<NodeId>>;
-        let (outputs, implicit_outputs) = (take(&mut edge.outputs), take(&mut edge.implicit_outputs));
-        let (inputs, implicit) = (take(&mut edge.inputs), take(&mut edge.implicit));
-        let order_only = take(&mut edge.order_only);
-        self.add_edge_with(edge, [&outputs, &implicit_outputs, &inputs, &implicit, &order_only])
+        let (outputs, inputs) = (take(&mut edge.outputs), take(&mut edge.inputs));
+        let (dependencies, after) = (take(&mut edge.dependencies), take(&mut edge.after));
+        self.add_edge_with(edge, [&outputs, &inputs, &dependencies, &after])
     }
-    /// Add an edge whose lists of nodes are given apart from it, rather than in it, as its outputs, implicit outputs,
-    /// inputs, implicit inputs and order-only inputs, so that they need not be in vectors of their own, as when a graph
+    /// Add an edge whose lists of nodes are given apart from it, rather than in it, as its outputs, inputs,
+    /// dependencies and the files it is built after, so that they need not be in vectors of their own, as when a graph
     /// is loaded.
-    pub(crate) fn add_edge_with(&mut self, edge: Edge, nodes: [&[NodeId]; 5]) -> Result<EdgeId, Error> {
+    pub(crate) fn add_edge_with(&mut self, edge: Edge, nodes: [&[NodeId]; LISTS]) -> Result<EdgeId, Error> {
         let id = EdgeId(u32::try_from(self.edges.len()).expect("too many edges"));
-        let outputs = nodes[0].iter().chain(nodes[1]);
+        let outputs = nodes[OUTPUTS].iter();
         for (i, &output) in outputs.clone().enumerate() {
             let twice = outputs.clone().take(i).any(|&other| other == output);
             if twice || self.producers[output.0 as usize].is_some() {
@@ -260,7 +263,7 @@ impl Graph {
         for &output in outputs {
             self.producers[output.0 as usize] = Some(id);
         }
-        let mut lists = [(0, 0); 5];
+        let mut lists = [(0, 0); LISTS];
         for (list, nodes) in lists.iter_mut().zip(nodes) {
             let start = u32::try_from(self.ids.len()).expect("too many nodes in edges");
             for node in nodes {
@@ -349,10 +352,11 @@ impl Graph {
         }
         Ok(())
     }
-    /// All of the inputs of an edge, explicit, implicit and order-only, which are stored together.
+    /// What an edge needs built first: its inputs, its dependencies and what it is built after, which are stored
+    /// together.
     fn inputs(&self, edge: usize) -> &[NodeId] {
         let lists = &self.edges[edge].lists;
-        &self.ids[lists[INPUTS].0 as usize..lists[ORDER_ONLY].1 as usize]
+        &self.ids[lists[INPUTS].0 as usize..lists[AFTER].1 as usize]
     }
 }
 
@@ -376,20 +380,16 @@ impl<'a> EdgeRef<'a> {
         self.list(OUTPUTS)
     }
     #[must_use]
-    pub fn implicit_outputs(&self) -> &'a [NodeId] {
-        self.list(IMPLICIT_OUTPUTS)
-    }
-    #[must_use]
     pub fn inputs(&self) -> &'a [NodeId] {
         self.list(INPUTS)
     }
     #[must_use]
-    pub fn implicit(&self) -> &'a [NodeId] {
-        self.list(IMPLICIT)
+    pub fn dependencies(&self) -> &'a [NodeId] {
+        self.list(DEPENDENCIES)
     }
     #[must_use]
-    pub fn order_only(&self) -> &'a [NodeId] {
-        self.list(ORDER_ONLY)
+    pub fn after(&self) -> &'a [NodeId] {
+        self.list(AFTER)
     }
     #[must_use]
     pub fn depfile(&self) -> Option<&'a str> {
@@ -455,10 +455,9 @@ impl<'a> EdgeRef<'a> {
             kind: self.data.kind.clone(),
             description: self.data.description.clone(),
             outputs: self.outputs().to_vec(),
-            implicit_outputs: self.implicit_outputs().to_vec(),
             inputs: self.inputs().to_vec(),
-            implicit: self.implicit().to_vec(),
-            order_only: self.order_only().to_vec(),
+            dependencies: self.dependencies().to_vec(),
+            after: self.after().to_vec(),
             depfile: self.data.depfile.clone(),
             pool: self.data.pool,
             generator: self.data.generator,
@@ -509,7 +508,7 @@ mod tests {
         let edge = graph.edge(edge);
         assert_eq!(edge.outputs(), &[NodeId(0)]);
         assert_eq!(edge.inputs(), &[NodeId(1)]);
-        assert_eq!(edge.implicit(), &[] as &[NodeId]);
+        assert_eq!(edge.dependencies(), &[] as &[NodeId]);
     }
 
     #[test]
