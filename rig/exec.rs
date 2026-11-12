@@ -2697,11 +2697,13 @@ mod tests {
     }
 
     /// A graph of two cached edges which each discover `extra.h`, and print, of one which reads `hidden`, which it
-    /// does not declare or discover, and of the slow edge, which is not cached.
+    /// does not declare or discover, and of an edge which is not cached, which holds a job for a second, longer than
+    /// `SLOW`, so that the others, which wait for it, are sent to a worker, wherever the test helper is slow to start, as
+    /// on Windows on Arm.
     fn compiled() -> Graph {
         let cc = "cat $in extra.h > $out && echo $out: $in extra.h > $out.d && echo compiled $out";
         graph()
-            .rule("slow", &[("command", SLOW)])
+            .rule("slow", &[("command", "sleep 1 && touch $out")])
             .edge("slow", &["slow"], &[])
             .cached("toolchain")
             .rule("cc", &[("command", cc), ("depfile", "$out.d")])
