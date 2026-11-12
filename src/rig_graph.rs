@@ -66,7 +66,7 @@ impl RigGraph {
         let early = self.nodes(edge.early);
         debug_assert!(early.iter().all(|node| outputs.contains(node) || implicit_outputs.contains(node)));
         let edge = rig::Edge {
-            kind: rig::EdgeKind::Command(rig::Action::Exec(edge.exec)),
+            kind: rig::EdgeKind::Command(edge.exec),
             description: edge.description,
             outputs,
             implicit_outputs,
@@ -81,7 +81,7 @@ impl RigGraph {
             cache: edge.cache.map(String::from),
             pass_env: edge.pass_env.to_vec(),
             placement: edge.placement,
-            discover: edge.discover.map(rig::Action::Exec),
+            discover: edge.discover,
             early,
         };
         self.graph.add_edge(edge).map(|_| ()).map_err(Error::Rig)

@@ -16,7 +16,6 @@
 //! `JIG_DIFFERENTIAL_SEEDS` sets the number of seeds, which is `16` by default.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -133,39 +132,41 @@ fn generate(random: &mut Random) -> Generated {
     Generated { sources, edges, aliases }
 }
 
-/// Write a generated graph as rig's graph, with shell commands, which rig runs with `sh`.
+/// Write a generated graph as rig's graph, whose commands are steps of the [test helper](rig::test_helper).
 fn write(generated: &Generated, dir: &Path) {
     let mut graph = rig::Graph::new();
     let mut nodes = |paths: &[String]| paths.iter().map(|path| graph.file(path)).collect::<Vec<_>>();
     let mut edges = Vec::new();
     for (id, spec) in generated.edges.iter().enumerate() {
-        let (inputs, output) = (spec.inputs.join(" "), &spec.output);
-        let log = format!(" && echo {id} >> {LOG}");
-        let (description, command, depfile) = match spec.rule {
+        let output = &spec.output;
+        let words = |words: &[&str]| words.iter().map(|&word| word.to_string()).collect::<Vec<_>>();
+        let mut steps = Vec::new();
+        let (description, depfile) = match spec.rule {
             "step" => {
-                let copies = spec.implicit_outputs.iter().fold(String::new(), |mut copies, copy| {
-                    let _ = write!(copies, " && cp {output} {copy}");
-                    copies
-                });
-                ("STEP", format!("cat {inputs} /dev/null > {output}{copies}{log}"), None)
+                steps.extend(words(&["cat"]).into_iter().chain(spec.inputs.iter().cloned()));
+                steps.extend(words(&[">", output]));
+                for copy in &spec.implicit_outputs {
+                    steps.extend(words(&["&&", "cp", output, copy]));
+                }
+                ("STEP", None)
             },
             "discover" => {
-                let headers = spec.discovered.join(" ");
-                let command = format!(
-                    "cat {inputs} {headers} /dev/null > {output} && echo \"{output}: {headers}\" > {output}.d{log}"
-                );
-                ("DISCOVER", command, Some(format!("{output}.d")))
+                let read = spec.inputs.iter().chain(&spec.discovered).cloned();
+                steps.extend(words(&["cat"]).into_iter().chain(read));
+                steps.extend(words(&[">", output, "&&", "echo", &format!("{output}:")]));
+                steps.extend(spec.discovered.iter().cloned());
+                steps.extend(words(&[">", &format!("{output}.d")]));
+                ("DISCOVER", Some(format!("{output}.d")))
             },
+            // the output is left alone if it would not change
             _ => {
-                // the output is left alone if it would not change
-                let tmp = format!("{output}.tmp");
-                let kept = format!("cmp -s {tmp} {output} || mv {tmp} {output}");
-                let command = format!("cat {inputs} > {tmp} && ({kept}); rm -f {tmp}{log}");
-                ("GEN", command, None)
+                steps.extend(words(&["restat", output]).into_iter().chain(spec.inputs.iter().cloned()));
+                ("GEN", None)
             },
         };
+        steps.extend(words(&["&&", "echo", &id.to_string(), ">>", LOG]));
         edges.push(rig::Edge {
-            kind: rig::EdgeKind::Command(rig::Action::Shell(command)),
+            kind: rig::EdgeKind::Command(rig::test_helper::exec(steps)),
             description: format!("{description} {output}"),
             outputs: nodes(std::slice::from_ref(output)),
             implicit_outputs: nodes(&spec.implicit_outputs),
@@ -466,7 +467,6 @@ fn compare(seed: u64, verbose: bool) {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "its commands are shell lines, which run only on Unix")]
 fn rig_builds_as_the_model_says() {
     // the builds would slow the micro-benchmarks, which run beside the test
     let _timing = crate::bench::TIMING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

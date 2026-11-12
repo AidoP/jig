@@ -20,7 +20,6 @@
 //! - `command`, the command line, as `-v` shows it, with each word quoted for `sh` where it needs to be: its working
 //!   directory, relative to the build directory, with `cd`, its variables, the program and its arguments, and the
 //!   file stderr is written to, if it has one, with `2>`.
-//! - `shell`, for a shell line, which only runs on Unix, rather than a program.
 //! - `depfile`, `discover`, the command which writes the depfile without running the edge, `early`, the outputs it
 //!   reports as it writes them, `pass-env`, the variables it passes on, a word each.
 //! - `pool = console`, `cache`, the identity it is cached by, `target`, `tags` and `any-host`, which workers run it.
@@ -89,11 +88,10 @@ fn fields(graph: &rig::Graph, edge: rig::EdgeRef<'_>, text: bool) -> Vec<(&'stat
     }
     match edge.kind() {
         rig::EdgeKind::Alias => {},
-        rig::EdgeKind::Command(rig::Action::Shell(line)) => fields.push(("shell", Value::Text(line.clone()))),
-        rig::EdgeKind::Command(action @ rig::Action::Exec(exec)) => {
+        rig::EdgeKind::Command(exec) => {
             // the text has the command line, which they make up, and the JSON each part of it
             if text {
-                fields.push(("command", Value::Text(action.command_line())));
+                fields.push(("command", Value::Text(exec.command_line())));
                 return finish(graph, edge, fields);
             }
             fields.push(("program", Value::Text(exec.program.clone())));

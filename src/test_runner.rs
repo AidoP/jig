@@ -220,7 +220,7 @@ impl Workers {
             args.push(if pretty { "--color=always" } else { "--color=never" }.into());
         }
         let program = test.command[0].to_string();
-        let action = rig::Action::Exec(rig::Exec { program, args, env: Vec::new(), dir: None, stderr: None });
+        let action = rig::Exec { program, args, env: Vec::new(), dir: None, stderr: None };
         // it runs without a toolchain, with the worker's tools
         let request = rig::worker::Request {
             identity: String::new(),

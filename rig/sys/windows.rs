@@ -6,8 +6,6 @@
 //!   once it has started, which ends it and every process it started when it is killed.
 //! - A jobserver is a named semaphore, whose count is its tokens, as GNU make has it on Windows.
 //! - Files have no modes which make them executable, and there are no reflinks.
-//! - A shell command line, as a ninja rule's command, is not run, as an edge runs a program, as each which jig writes
-//!   does, so that rig needs no shell.
 
 use std::ffi::{c_int, c_void};
 use std::path::Path;
@@ -249,20 +247,6 @@ pub fn signal_group(leader: u32, signum: c_int) {
     }
 }
 
-/// A shell command line, as a ninja rule's command, is not run on Windows, where an edge runs a program, as each which
-/// jig writes does.
-///
-/// # Errors
-///
-/// Always.
-pub fn shell(line: &str) -> std::io::Result<std::process::Command> {
-    let _ = line;
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "a shell command line is not run on Windows, where an edge runs a program",
-    ))
-}
-
 /// Whether a file is executable by a mode, which no file on Windows is.
 pub fn is_executable(metadata: &std::fs::Metadata) -> bool {
     let _ = metadata;
@@ -355,18 +339,19 @@ mod tests {
 
     #[test]
     fn ends_a_group_by_its_job() {
-        // `ping`, which takes half a minute, in a group of its own, which is put in a job once it starts
+        // the test helper sleeping for half a minute, in a group of its own, which is put in a job once it starts
+        let mut ended = Vec::new();
         for signal in [SIGKILL, SIGINT] {
-            let mut command = std::process::Command::new("ping");
-            command.args(["-n", "30", "127.0.0.1"]).stdout(std::process::Stdio::null());
+            let mut command = std::process::Command::new(crate::test_helper::program());
+            command.args([crate::test_helper::FLAG, "sleep", "30"]).stdout(std::process::Stdio::null());
             new_group(&mut command);
             let mut child = command.spawn().unwrap();
             group_started(child.id());
             std::thread::sleep(Duration::from_millis(500));
             let signalled = Instant::now();
-            // which a Ctrl-Break event interrupts, or where there is no console, ends its job, as killing it does, but
-            // which `ping` takes as asking for its statistics so far, so that, as the build does, its job is ended if
-            // it goes on a second later
+            // which a Ctrl-Break event interrupts, or where there is no console, ends its job, as killing it does, and
+            // which, as the build does, ends its job if it goes on a second later, as a program which takes the event
+            // as asking for something, as `ping` takes it, does
             signal_group(child.id(), signal);
             std::thread::sleep(Duration::from_secs(1));
             if child.try_wait().unwrap().is_none() {
@@ -374,11 +359,12 @@ mod tests {
             }
             let status = child.wait().unwrap();
             group_ended(child.id());
+            ended.push(child.id());
             assert!(!status.success(), "{signal}");
             assert!(signalled.elapsed() < Duration::from_secs(10), "{signal}: {:?}", signalled.elapsed());
         }
-        // and what has ended is not in the list of jobs
-        assert!(JOBS.lock().unwrap().is_empty());
+        // and what has ended is not in the list of jobs, which has those of the commands other tests run
+        assert!(JOBS.lock().unwrap().iter().all(|(leader, _)| !ended.contains(leader)));
     }
 
     #[test]

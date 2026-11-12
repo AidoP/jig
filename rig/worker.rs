@@ -33,7 +33,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cache::{Cache, Entry, Hash, Output};
-use crate::graph::{Action, Exec};
+use crate::graph::Exec;
 use crate::remote::{Payload, push_str, push_strs};
 
 /// A toolchain a worker has, by the identity a cached edge has in the graph, with the variables an action which has it
@@ -177,7 +177,7 @@ pub struct Request {
     /// The target whose standard library the action needs, or empty if it needs none.
     pub target: String,
     /// The action, with the build's directory replaced by a marker, as [`crate::plan::relocated_action_bytes`] does.
-    pub action: Action,
+    pub action: Exec,
     /// The variables it is given, beside those of its toolchain and its action.
     pub env: Vec<(String, String)>,
     /// The variables it inherits from the worker, which locate the tools and files it uses there.
@@ -213,20 +213,12 @@ impl Request {
         for field in [&self.identity, &self.release, &self.install, &self.target] {
             push_str(&mut bytes, field);
         }
-        match &self.action {
-            Action::Shell(line) => {
-                bytes.push(0);
-                push_str(&mut bytes, line);
-            },
-            Action::Exec(exec) => {
-                bytes.push(1);
-                push_str(&mut bytes, &exec.program);
-                push_strs(&mut bytes, &exec.args);
-                push_pairs(&mut bytes, &exec.env);
-                for optional in [&exec.dir, &exec.stderr] {
-                    push_strs(&mut bytes, optional.as_slice());
-                }
-            },
+        let exec = &self.action;
+        push_str(&mut bytes, &exec.program);
+        push_strs(&mut bytes, &exec.args);
+        push_pairs(&mut bytes, &exec.env);
+        for optional in [&exec.dir, &exec.stderr] {
+            push_strs(&mut bytes, optional.as_slice());
         }
         push_pairs(&mut bytes, &self.env);
         push_strs(&mut bytes, &self.locating);
@@ -243,16 +235,10 @@ impl Request {
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut p = Payload(bytes);
         let (identity, release, install, target) = (p.str()?, p.str()?, p.str()?, p.str()?);
-        let action = match p.take(1)?[0] {
-            0 => Action::Shell(p.str()?),
-            1 => {
-                let (program, args, env) = (p.str()?, p.strs()?, pairs(&mut p)?);
-                let mut optional = || p.strs().filter(|strings| strings.len() <= 1).map(|mut strings| strings.pop());
-                let (dir, stderr) = (optional()?, optional()?);
-                Action::Exec(Exec { program, args, env, dir, stderr })
-            },
-            _ => return None,
-        };
+        let (program, args, env) = (p.str()?, p.strs()?, pairs(&mut p)?);
+        let mut optional = || p.strs().filter(|strings| strings.len() <= 1).map(|mut strings| strings.pop());
+        let (dir, stderr) = (optional()?, optional()?);
+        let action = Exec { program, args, env, dir, stderr };
         let (env, locating) = (pairs(&mut p)?, p.strs()?);
         let inputs = (0..p.u32()?).map(|_| {
             let (path, blob) = (p.str()?, p.hash()?);
@@ -413,7 +399,7 @@ impl Executor {
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
         let mut paths: Vec<&str> = inputs.chain(request.outputs.iter().map(String::as_str)).collect();
-        if let Action::Exec(Exec { dir: Some(dir), .. }) = &request.action {
+        if let Some(dir) = &request.action.dir {
             paths.push(dir);
         }
         let mut depth = 0;
@@ -491,22 +477,19 @@ impl Executor {
 
 /// Returns an action with the marker of the build's directory replaced by a directory, without the variables of its
 /// own which are chosen otherwise.
-fn located(action: &Action, dir: &str, chosen: &[&str]) -> Action {
+fn located(exec: &Exec, dir: &str, chosen: &[&str]) -> Exec {
     let locate = |string: &str| string.replace(crate::plan::BUILD_DIR, dir);
-    match action {
-        Action::Shell(line) => Action::Shell(locate(line)),
-        Action::Exec(exec) => Action::Exec(Exec {
-            program: locate(&exec.program),
-            args: exec.args.iter().map(|arg| locate(arg)).collect(),
-            env: exec
-                .env
-                .iter()
-                .filter(|(name, _)| !chosen.contains(&name.as_str()))
-                .map(|(name, value)| (name.clone(), locate(value)))
-                .collect(),
-            dir: exec.dir.as_deref().map(locate),
-            stderr: exec.stderr.as_deref().map(locate),
-        }),
+    Exec {
+        program: locate(&exec.program),
+        args: exec.args.iter().map(|arg| locate(arg)).collect(),
+        env: exec
+            .env
+            .iter()
+            .filter(|(name, _)| !chosen.contains(&name.as_str()))
+            .map(|(name, value)| (name.clone(), locate(value)))
+            .collect(),
+        dir: exec.dir.as_deref().map(locate),
+        stderr: exec.stderr.as_deref().map(locate),
     }
 }
 
@@ -546,7 +529,7 @@ mod tests {
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: Action::Exec(exec),
+            action: exec,
             env: vec![("B".into(), "2".into())],
             locating: vec!["PATH".into()],
             inputs: vec![Input { path: "../src/lib.rs".into(), blob, executable: true }],
@@ -554,9 +537,7 @@ mod tests {
             early: vec!["out/lib.rmeta".into()],
         };
         assert_eq!(Request::decode(&request.encode()), Some(request.clone()));
-        let shell = Request { action: Action::Shell("true".into()), ..request };
-        assert_eq!(Request::decode(&shell.encode()), Some(shell.clone()));
-        assert_eq!(Request::decode(&shell.encode()[1..]), None);
+        assert_eq!(Request::decode(&request.encode()[1..]), None);
         let entry = Entry { outputs: vec![Output { path: "out".into(), blob, executable: false }], printed: blob };
         let executed = Executed { succeeded: true, entry };
         assert_eq!(Executed::decode(&executed.encode()), Some(executed));
@@ -581,7 +562,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn installs_toolchains_it_does_not_have() {
         use std::sync::{Arc, Mutex};
         type Installed = Vec<(String, Option<String>)>;
@@ -604,7 +584,7 @@ mod tests {
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: Action::Shell("echo ran".into()),
+            action: crate::test_helper::exec(vec!["echo".into(), "ran".into()]),
             env: Vec::new(),
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
@@ -635,7 +615,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn runs_with_the_toolchain_it_matches() {
         let toolchain = |identity: &str, release: &str, targets: &[&str]| Toolchain {
             identity: identity.into(),
@@ -665,19 +644,14 @@ mod tests {
         let toolchains = vec![toolchain("same release", "release", &[]), toolchain("here", "release", &[])];
         let reported = Capabilities { toolchains, ..Capabilities::default() };
         let executor = Executor::new(dir.join("work"), 1, move || reported.clone());
-        let exec = Exec {
-            program: "sh".into(),
-            args: vec!["-c".into(), "echo $RUSTUP_TOOLCHAIN".into()],
-            env: vec![("RUSTUP_TOOLCHAIN".into(), "given".into())],
-            dir: None,
-            stderr: None,
-        };
+        let mut exec = crate::test_helper::exec(vec!["getenv".into(), "RUSTUP_TOOLCHAIN".into()]);
+        exec.env.push(("RUSTUP_TOOLCHAIN".into(), "given".into()));
         let request = Request {
             identity: "here".into(),
             release: "release".into(),
             install: String::new(),
             target: String::new(),
-            action: Action::Exec(exec),
+            action: exec,
             env: vec![("RUSTUP_TOOLCHAIN".into(), "given too".into())],
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
@@ -708,22 +682,21 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn runs_actions_with_their_inputs() {
         let dir = dir("runs");
         let cache = Cache::open(&dir.join("cache")).unwrap();
         let executor = executor(&dir);
         // the build's directory is a directory down, so that `../src` is beside it, and the marker is replaced by it
-        let line = format!(
-            "cat ../src/a.txt sub/b.txt > out/joined && echo $TOOLCHAIN $GIVEN && test -d {}/sub && echo printed >&2",
-            crate::plan::BUILD_DIR,
-        );
+        let steps = "cat ../src/a.txt sub/b.txt > out/joined && getenv TOOLCHAIN && getenv GIVEN && test-dir";
+        let mut steps = crate::test_helper::words(steps);
+        steps.push(format!("{}/sub", crate::plan::BUILD_DIR));
+        steps.extend(["&&", "eecho", "printed"].map(String::from));
         let request = Request {
             identity: "toolchain".into(),
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: Action::Shell(line),
+            action: crate::test_helper::exec(steps),
             env: vec![("GIVEN".into(), "given".into())],
             locating: vec!["PATH".into()],
             inputs: vec![input(&cache, "../src/a.txt", "a\n"), input(&cache, "sub/b.txt", "b\n")],
@@ -734,13 +707,14 @@ mod tests {
         assert!(executed.succeeded);
         let joined = crate::blake3::hash(b"a\nb\n");
         assert_eq!(executed.entry.outputs, vec![Output { path: "out/joined".into(), blob: joined, executable: false }]);
-        assert_eq!(cache.read_blob(&executed.entry.printed).unwrap(), b"chosen given\nprinted\n");
+        assert_eq!(cache.read_blob(&executed.entry.printed).unwrap(), b"chosen\ngiven\nprinted\n");
         assert!(cache.has_blob(&joined));
         // the directory it ran in is removed, and the inputs, which were linked, are still in the cache
         assert_eq!(std::fs::read_dir(dir.join("work")).unwrap().count(), 0);
         assert_eq!(cache.read_blob(&request.inputs[0].blob).unwrap(), b"a\n");
         // an action which fails is sent back with what it printed
-        let failing = Request { action: Action::Shell("echo no; exit 3".into()), ..request.clone() };
+        let action = crate::test_helper::exec(crate::test_helper::words("echo no && exit 3"));
+        let failing = Request { action, ..request.clone() };
         let executed = executor.execute(&cache, &failing).unwrap();
         assert!(!executed.succeeded);
         assert_eq!(cache.read_blob(&executed.entry.printed).unwrap(), b"no\n");
@@ -758,13 +732,13 @@ mod tests {
         let toolchain = Toolchain { identity: "toolchain".into(), ..Toolchain::default() };
         let capabilities = Capabilities { toolchains: vec![toolchain], ..Capabilities::default() };
         let executor = Executor::new(dir.join("link").join("work"), 1, move || capabilities.clone());
-        let line = format!("test \"$(pwd -P)\" = {} && echo same", crate::plan::BUILD_DIR);
+        let steps = vec!["cwd-is".into(), crate::plan::BUILD_DIR.into(), "&&".into(), "echo".into(), "same".into()];
         let request = Request {
             identity: "toolchain".into(),
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: Action::Shell(line),
+            action: crate::test_helper::exec(steps),
             env: Vec::new(),
             locating: vec!["PATH".into()],
             inputs: Vec::new(),
@@ -777,7 +751,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn refuses_what_it_cannot_run() {
         let dir = dir("refuses");
         let cache = Cache::open(&dir.join("cache")).unwrap();
@@ -787,7 +760,7 @@ mod tests {
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: Action::Shell("true".into()),
+            action: crate::test_helper::exec(vec!["true".into()]),
             env: Vec::new(),
             locating: Vec::new(),
             inputs: Vec::new(),

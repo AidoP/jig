@@ -76,7 +76,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -1689,7 +1689,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn runs_actions_only_as_a_worker() {
         use crate::worker::{Capabilities, Executor, Input, Toolchain};
         let dir = std::env::temp_dir().join(format!("rig-remote-{}-worker", std::process::id()));
@@ -1702,7 +1701,7 @@ mod tests {
             release: String::new(),
             install: String::new(),
             target: String::new(),
-            action: crate::Action::Shell("cp in out && echo copied".into()),
+            action: crate::test_helper::exec(crate::test_helper::words("cp in out && echo copied")),
             env: Vec::new(),
             locating: vec!["PATH".into()],
             inputs: vec![Input { path: "in".into(), blob, executable: false }],
@@ -2060,13 +2059,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(windows, ignore = "its commands are shell lines, or run sh, which run only on Unix")]
     fn stops_using_a_remote_which_fails() {
         let remote = Remote::command(vec!["rig-no-such-server".into()], true);
         assert!(remote.manifest(&[0; 32]).is_none());
         assert!(remote.error().unwrap().contains("rig-no-such-server"), "{:?}", remote.error());
         // and a server which ends, with why on its stderr
-        let remote = Remote::command(vec!["sh".into(), "-c".into(), "echo no such cache >&2".into()], true);
+        let helper = crate::test_helper::exec(crate::test_helper::words("eecho no such cache && exit 1"));
+        let remote = Remote::command(std::iter::once(helper.program).chain(helper.args).collect(), true);
         assert!(remote.manifest(&[0; 32]).is_none());
         assert!(remote.error().unwrap().contains("no such cache"), "{:?}", remote.error());
         assert!(!remote.pushes());

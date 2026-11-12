@@ -1,9 +1,9 @@
 //! Depfiles, in the form gcc and rustc write, of the inputs a command discovered.
 //!
 //! A depfile is rules of the form `<target> ...: <input> ...`, where a `\` before a line break continues the line, a
-//! `\` escapes a space, `#` or `\`, and `$$` is `$`. The inputs of every rule are taken, as ninja takes them. Lines
-//! which begin with `#` are comments, except for the `# env-dep:<name>=<value>` or `# env-dep:<name>` lines rustc
-//! writes for the environment variables `env!` and `option_env!` read, whose names are taken.
+//! `\` escapes a space, `#` or `\`, and `$$` is `$`. The inputs of every rule are taken. Lines which begin with `#` are
+//! comments, except for the `# env-dep:<name>=<value>` or `# env-dep:<name>` lines rustc writes for the environment
+//! variables `env!` and `option_env!` read, whose names are taken.
 
 /// What a depfile lists: the inputs a command discovered, and the environment variables it read.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn unescapes_paths() {
-        let text = "build.ninja: Jig sub/data\\ dir/VERSION a\\#b c$$d e\\\\ f\r\n";
+        let text = "graph: Jig sub/data\\ dir/VERSION a\\#b c$$d e\\\\ f\r\n";
         assert_eq!(parse(text).unwrap().inputs, ["Jig", "sub/data dir/VERSION", "a#b", "c$d", "e\\", "f"]);
     }
 
