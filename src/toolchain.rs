@@ -73,6 +73,14 @@ pub fn identity_file(sysroot: &Path) -> PathBuf {
     if manifest.is_file() { manifest } else { sysroot.join("bin/rustc") }
 }
 
+/// Returns the size and time of the file a path leads to, following symbolic links, which change when it is written,
+/// as Unix's `mtime` and `mtime_nsec` have it, for a file changed since 1970.
+pub fn stamp(path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{} {}.{:09}", metadata.len(), modified.as_secs(), modified.subsec_nanos()))
+}
+
 /// Returns what identifies a toolchain's release on any host, as [`identity`] does but for the host in rustc's
 /// version, by which a worker on another host may run what does not depend on the host.
 pub fn release_identity(verbose_version: &str, sysroot: &Path) -> String {
@@ -122,7 +130,7 @@ pub fn capabilities(tags: Vec<String>, known: &Path) -> rig::worker::Capabilitie
     let mut toolchains: Vec<rig::worker::Toolchain> = listed
         .filter_map(|(name, sysroot)| identified.toolchain(Some(name), Path::new(sysroot)))
         .collect();
-    let default = rustc_output(None, "--print=sysroot");
+    let default = crate::rustc::output(&["--print=sysroot"], None).ok();
     let default = default.and_then(|sysroot| identified.toolchain(None, Path::new(&sysroot)));
     let host = default.as_ref().map(|toolchain| toolchain.host.clone()).unwrap_or_default();
     if let Some(default) = default
@@ -132,15 +140,6 @@ pub fn capabilities(tags: Vec<String>, known: &Path) -> rig::worker::Capabilitie
     }
     identified.write(known);
     rig::worker::Capabilities { host, tags, toolchains, installs: false }
-}
-
-/// Returns the trimmed output of rustc with an argument, with a toolchain if one is given, if it succeeds.
-fn rustc_output(toolchain: Option<&str>, argument: &str) -> Option<String> {
-    let mut rustc = Command::new("rustc");
-    rustc.arg(argument);
-    apply(&mut rustc, toolchain);
-    let output = rustc.output().ok().filter(|output| output.status.success())?;
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// What identifies each toolchain a worker has found, by its sysroot: the size and time of the file its identity is
@@ -177,17 +176,13 @@ impl Known {
     /// Returns the toolchain of a sysroot, run with a toolchain if one is given, identifying it with rustc unless it
     /// is known, with the targets whose standard libraries it has now.
     fn toolchain(&mut self, toolchain: Option<&str>, sysroot: &Path) -> Option<rig::worker::Toolchain> {
-        let file = identity_file(sysroot);
-        let metadata = std::fs::metadata(&file).ok()?;
-        // as Unix's `mtime` and `mtime_nsec` have it, for a file changed since 1970
-        let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-        let stamp = format!("{}-{}.{}", metadata.len(), modified.as_secs(), modified.subsec_nanos());
+        let stamp = stamp(&identity_file(sysroot))?;
         let key = sysroot.display().to_string();
         let found = self.toolchains.get(&key).filter(|fields| fields[0] == stamp).cloned();
         let [_, identity, release_identity, release, host] = if let Some(fields) = found {
             fields
         } else {
-            let verbose_version = rustc_output(toolchain, "-vV")?;
+            let verbose_version = crate::rustc::output(&["-vV"], toolchain).ok()?;
             let lines = || verbose_version.lines();
             let field = |name: &str| lines().find_map(|line| line.strip_prefix(name)).map(str::trim);
             let field = |name: &str| field(name).unwrap_or_default().to_string();

@@ -3,19 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::builder::{self, Builder};
 use crate::project::{self, Diagnostic, Message, Severity};
-use crate::{Error, database, rig_builder, rig_graph};
-
-/// Where the output of regenerating the build graph is written while finding a project, as `jig check` keeps it out of
-/// stdout.
-#[derive(Clone, Copy)]
-pub enum Output {
-    Stdout,
-    Stderr,
-    /// Stdout, quietly, so that only the output of what is run is shown.
-    Quiet,
-}
+pub use crate::rig_builder::{Output, Request};
+use crate::rig_builder;
+use crate::{Error, database, rig_graph};
 
 pub struct Configured {
     /// The project root, where the database is, which is where commands and tests run from.
@@ -36,7 +27,7 @@ impl Configured {
     pub fn find(output: Output) -> Result<Self, Error> {
         let mut project = Self::locate()?;
         project.check_jig()?;
-        project.reconfigure(output)?;
+        project.reconfigure(output, false)?;
         Ok(project)
     }
     /// Find the project which contains the working directory, as [`Self::find`] does, without bringing the
@@ -69,14 +60,9 @@ impl Configured {
         let message = Message::OtherJig { running: running.display().to_string(), configured: database.jig.into() };
         report(&self.root, message, severity)
     }
-    /// Regenerate the build graph if it is out of date, then take the build directory from the database again, as
-    /// `build-dir` may have changed.
-    pub fn reconfigure(&mut self, output: Output) -> Result<(), Error> {
-        let (quiet, output) = match output {
-            Output::Stdout => (false, builder::Output::Stdout),
-            Output::Stderr => (false, builder::Output::Stderr),
-            Output::Quiet => (true, builder::Output::Stdout),
-        };
+    /// Regenerate the build graph if it is out of date, showing that it is to `output` unless it is `quiet`, then take
+    /// the build directory from the database again, as `build-dir` may have changed.
+    pub fn reconfigure(&mut self, output: Output, quiet: bool) -> Result<(), Error> {
         self.builder().regenerate(quiet, output)?;
         let bytes = read(&self.root)?;
         let database = parse(&self.root, &bytes)?;
@@ -86,12 +72,11 @@ impl Configured {
         Ok(())
     }
     /// Returns what builds the project's graph, in the build directory.
-    pub fn builder(&self) -> Box<dyn Builder + '_> {
-        let (build_dir, toolchain) = (&self.build_dir, self.toolchain.as_deref());
-        Box::new(Timed(rig_builder::Rig { build_dir, toolchain, cache: &self.cache }))
+    pub fn builder(&self) -> rig_builder::Rig<'_> {
+        rig_builder::Rig { build_dir: &self.build_dir, toolchain: self.toolchain.as_deref(), cache: &self.cache }
     }
     /// Build what is requested, failing if it was not built.
-    pub fn build(&self, request: &builder::Request) -> Result<(), Error> {
+    pub fn build(&self, request: &Request) -> Result<(), Error> {
         if self.builder().build(request)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
     /// Returns the bytes of the database, which is read again once the project is built, as it reconfigures if needed.
@@ -101,23 +86,6 @@ impl Configured {
     /// Parse the database, which borrows from its bytes.
     pub fn parse<'a>(&self, bytes: &'a [u8]) -> Result<database::Database<'a>, Error> {
         parse(&self.root, bytes)
-    }
-}
-
-/// A builder whose builds, and generating the graph again, are timed, for `--timings`.
-struct Timed<B>(B);
-impl<B: Builder> Builder for Timed<B> {
-    fn build(&self, request: &builder::Request) -> Result<bool, Error> {
-        crate::timings::step("build", || self.0.build(request))
-    }
-    fn regenerate(&self, quiet: bool, output: builder::Output) -> Result<(), Error> {
-        crate::timings::step("configure", || self.0.regenerate(quiet, output))
-    }
-    fn up_to_date(&self, target: &str) -> Result<bool, Error> {
-        self.0.up_to_date(target)
-    }
-    fn graph_up_to_date(&self) -> Result<bool, Error> {
-        self.0.graph_up_to_date()
     }
 }
 

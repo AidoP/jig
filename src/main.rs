@@ -2,7 +2,6 @@ use std::{io::IsTerminal, path::{Path, PathBuf}};
 
 #[cfg(test)]
 mod bench;
-mod builder;
 mod cache;
 mod config;
 mod check;
@@ -149,7 +148,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             }
             let project = configured::Configured::find(configured::Output::Stdout)?;
             let args: Vec<_> = args.collect();
-            project.build(&builder::Request { args: &args, ..Default::default() }).map(|()| ExitCode::SUCCESS)
+            project.build(&rig_builder::Request { args: &args, ..Default::default() }).map(|()| ExitCode::SUCCESS)
         },
         "check" => {
             let Some(label) = args.next() else {
@@ -229,7 +228,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     let rustc = rustc::ask(toolchain, known)?;
     let (sysroot, host, targets) = (&rustc.sysroot, &rustc.host, &rustc.targets);
     let verbose_version = &rustc.verbose_version;
-    let version = rustc_version(verbose_version)?;
+    let version = rustc.version()?;
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
@@ -285,11 +284,11 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 /// The builtin properties have rustc's values, if it can be run, or are empty, so that a server without Rust can serve
 /// a cache.
 fn user_settings(toolchain: Option<&str>) -> Result<cache::Settings, Error> {
-    let rustc::Answers { sysroot, host, targets, verbose_version, .. } = rustc::ask(toolchain, None).unwrap_or_default();
-    let version = rustc_version(&verbose_version).unwrap_or_default();
-    let mut project = project::Project::new(std::env::current_dir().unwrap_or_default(), targets.clone());
+    let rustc = rustc::ask(toolchain, None).unwrap_or_default();
+    let version = rustc.version().unwrap_or_default();
+    let mut project = project::Project::new(std::env::current_dir().unwrap_or_default(), rustc.targets.clone());
     project.toolchain = toolchain.map(String::from);
-    declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
+    declare_builtins(&mut project, &rustc.sysroot, &rustc.host, version, &rustc.targets, toolchain);
     config::apply(&mut project)?;
     if !project.fatal {
         project.check();
@@ -707,13 +706,4 @@ fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sys
     identity
 }
 
-/// Returns the version of rustc, from the `release` line of the output of `rustc -vV`.
-fn rustc_version(output: &str) -> Result<String, Error> {
-    let version = output.lines().find_map(|line| line.strip_prefix("release: "));
-    version.map(|version| version.trim().into()).ok_or_else(|| {
-        let mut cmd = std::process::Command::new("rustc");
-        cmd.arg("-vV");
-        Error::InvalidOutput(Box::new(cmd))
-    })
-}
 

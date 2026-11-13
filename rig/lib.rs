@@ -13,6 +13,7 @@
 //! signals and FIFOs, is declared from the C library in one module, behind a safe interface.
 
 pub mod blake3;
+pub mod bytes;
 pub mod cache;
 pub mod depfile;
 pub mod exec;

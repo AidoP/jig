@@ -72,6 +72,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use crate::bytes::{Reader, Writer};
 use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
@@ -152,50 +153,10 @@ fn read_frame(r: &mut dyn Read) -> std::io::Result<Option<Frame>> {
     Ok(Some((kind[0], id, payload)))
 }
 
-pub(crate) fn push_str(bytes: &mut Vec<u8>, string: &str) {
-    bytes.extend_from_slice(&(string.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(string.as_bytes());
-}
-
-pub(crate) fn push_strs(bytes: &mut Vec<u8>, strings: &[String]) {
-    bytes.extend_from_slice(&(strings.len() as u32).to_le_bytes());
-    for string in strings {
-        push_str(bytes, string);
-    }
-}
-
-/// Reads the parts of a payload.
-pub(crate) struct Payload<'a>(pub(crate) &'a [u8]);
-impl<'a> Payload<'a> {
-    pub(crate) fn take(&mut self, len: usize) -> Option<&'a [u8]> {
-        let (taken, rest) = self.0.split_at_checked(len)?;
-        self.0 = rest;
-        Some(taken)
-    }
-    pub(crate) fn hash(&mut self) -> Option<Hash> {
-        self.take(32)?.try_into().ok()
-    }
-    pub(crate) fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
-    pub(crate) fn str(&mut self) -> Option<String> {
-        let len = self.u32()? as usize;
-        Some(std::str::from_utf8(self.take(len)?).ok()?.to_string())
-    }
-    pub(crate) fn strs(&mut self) -> Option<Vec<String>> {
-        (0..self.u32()?).map(|_| self.str()).collect()
-    }
-    pub(crate) fn hashes(&mut self) -> Option<Vec<Hash>> {
-        (0..self.u32()?).map(|_| self.hash()).collect()
-    }
-}
-
 fn hashes(hashes: &[Hash]) -> Vec<u8> {
-    let mut bytes = (hashes.len() as u32).to_le_bytes().to_vec();
-    for hash in hashes {
-        bytes.extend_from_slice(hash);
-    }
-    bytes
+    let mut w = Writer::new();
+    w.hashes(hashes);
+    w.0
 }
 
 /// A connection to a server, which requests are sent on from any thread, and whose replies a thread of its own reads,
@@ -711,7 +672,7 @@ impl Remote {
         }
         let connection = self.connection()?;
         let found = Self::get(&connection, connection.request(GET_RESULTS, &hashes(keys)))?;
-        let mut payload = Payload(&found);
+        let mut payload = Reader(&found);
         let index = payload.u32()? as usize;
         (index < keys.len()).then(|| (index, payload.0.to_vec()))
     }
@@ -763,7 +724,7 @@ impl Remote {
         }
         let connection = self.connection()?;
         if let (MISSING, payload) = connection.request(MISSING, &hashes(blobs))? {
-            return Payload(&payload).hashes();
+            return Reader(&payload).hashes();
         }
         connection.fail("an unexpected reply from the server".into());
         None
@@ -1128,7 +1089,7 @@ fn push_result(connection: &Connection, push: &Push) {
         return;
     };
     let Some(Some(missing)) = connection.request(MISSING, &hashes(&blobs)).map(|(kind, payload)| {
-        (kind == MISSING).then(|| Payload(&payload).hashes()).flatten()
+        (kind == MISSING).then(|| Reader(&payload).hashes()).flatten()
     }) else {
         return;
     };
@@ -1143,9 +1104,10 @@ fn push_result(connection: &Connection, push: &Push) {
     if !sent.into_iter().all(|receiver| Remote::put(connection, connection.wait(receiver).map(|(kind, _)| kind))) {
         return;
     }
-    let mut manifest = push.first.to_vec();
-    push_strs(&mut manifest, &push.discovery.inputs);
-    push_strs(&mut manifest, &push.discovery.env);
+    let mut manifest = Writer(push.first.to_vec());
+    manifest.strs(&push.discovery.inputs);
+    manifest.strs(&push.discovery.env);
+    let manifest = manifest.0;
     let result = connection.send(PUT_RESULT, &[push.second.as_slice(), &result].concat());
     let manifest = connection.send(ADD_TO_MANIFEST, &manifest);
     let kind = |receiver| connection.wait(receiver).map(|(kind, _)| kind);
@@ -1522,7 +1484,7 @@ fn same(lhs: &[u8], rhs: &[u8]) -> bool {
 fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (u8, Vec<u8>) {
     let error = |message: &str| (ERROR, message.as_bytes().to_vec());
     let found = |found: Option<Vec<u8>>| found.map_or((NOT_FOUND, Vec::new()), |found| (FOUND, found));
-    let mut p = Payload(payload);
+    let mut p = Reader(payload);
     if (matches!(kind, PUT_RESULT | ADD_TO_MANIFEST) && !push) || (kind == PUT_BLOB && !blobs) {
         return error("the server does not take pushes");
     }
@@ -1549,7 +1511,7 @@ fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (
         PUT_RESULT if cache.accept_result(&key, p.0) => (OK, Vec::new()),
         PUT_RESULT => error("an invalid result"),
         ADD_TO_MANIFEST => {
-            let discovery = p.strs().zip(p.strs()).map(|(inputs, env)| Discovery { inputs, env });
+            let discovery = p.strings().zip(p.strings()).map(|(inputs, env)| Discovery { inputs, env });
             match discovery.map(|discovery| cache.add_to_manifest(&key, discovery)) {
                 Some(Ok(())) => (OK, Vec::new()),
                 _ => error("an invalid manifest"),

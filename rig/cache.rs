@@ -35,6 +35,7 @@ use std::sync::Arc;
 
 use crate::Error;
 use crate::blake3::{self, Hasher};
+use crate::bytes::{Reader, Writer};
 use crate::remote::Remote;
 
 /// The hash of a blob, or a key.
@@ -552,7 +553,7 @@ fn manifest_with(mut manifest: Vec<Discovery>, discovery: Discovery) -> Vec<u8> 
     manifest.retain(|other| *other != discovery);
     manifest.insert(0, discovery);
     manifest.truncate(MANIFEST_MAX);
-    let mut w = Writer::new(MANIFEST);
+    let mut w = header(MANIFEST);
     w.len(manifest.len());
     for discovery in &manifest {
         w.strs(&discovery.inputs);
@@ -571,15 +572,24 @@ fn sealed(w: Writer) -> Vec<u8> {
 
 /// Returns a result as it is stored.
 pub(crate) fn encode_result(entry: &Entry) -> Vec<u8> {
-    let mut w = Writer::new(RESULT);
-    w.0.extend_from_slice(&entry.printed);
+    let mut w = header(RESULT);
+    w.bytes(&entry.printed);
     w.len(entry.outputs.len());
     for output in &entry.outputs {
         w.str(&output.path);
-        w.0.extend_from_slice(&output.blob);
-        w.0.push(u8::from(output.executable));
+        w.bytes(&output.blob);
+        w.u8(u8::from(output.executable));
     }
     sealed(w)
+}
+
+/// Returns a writer of a manifest or a result, which begins with what it is.
+fn header(kind: u8) -> Writer {
+    let mut w = Writer::new();
+    w.bytes(MAGIC);
+    w.u32(VERSION);
+    w.u8(kind);
+    w
 }
 
 /// Returns a result from how it is stored, if it is valid.
@@ -886,78 +896,19 @@ pub fn second_key(first: &Hash, inputs: &[(&str, Option<&Hash>)], env: &[(&str, 
     key.finish()
 }
 
-struct Writer(Vec<u8>);
-impl Writer {
-    fn new(kind: u8) -> Self {
-        let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(&VERSION.to_le_bytes());
-        bytes.push(kind);
-        Self(bytes)
-    }
-    fn len(&mut self, len: usize) {
-        self.0.extend_from_slice(&(len as u32).to_le_bytes());
-    }
-    fn str(&mut self, string: &str) {
-        self.len(string.len());
-        self.0.extend_from_slice(string.as_bytes());
-    }
-    fn strs(&mut self, strings: &[String]) {
-        self.len(strings.len());
-        for string in strings {
-            self.str(string);
-        }
-    }
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
-        let bytes = self.bytes.get(self.pos..self.pos.checked_add(len)?)?;
-        self.pos += len;
-        Some(bytes)
-    }
-    fn len(&mut self) -> Option<usize> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?) as usize)
-    }
-    fn str(&mut self) -> Option<String> {
-        let len = self.len()?;
-        Some(std::str::from_utf8(self.take(len)?).ok()?.to_string())
-    }
-    fn strs(&mut self) -> Option<Vec<String>> {
-        (0..self.len()?).map(|_| self.str()).collect()
-    }
-    fn hash(&mut self) -> Option<Hash> {
-        self.take(32)?.try_into().ok()
-    }
-    fn end(&self) -> bool {
-        self.pos == self.bytes.len()
-    }
-}
-
 fn read_manifest(bytes: &[u8]) -> Option<Vec<Discovery>> {
-    let mut r = Reader { bytes, pos: 0 };
-    let manifest = (0..r.len()?).map(|_| Some(Discovery { inputs: r.strs()?, env: r.strs()? }));
-    let manifest = manifest.collect::<Option<Vec<_>>>()?;
-    r.end().then_some(manifest)
+    let mut r = Reader(bytes);
+    let manifest = r.list(|r| Some(Discovery { inputs: r.strings()?, env: r.strings()? }))?;
+    r.is_empty().then_some(manifest)
 }
 
 fn read_result(bytes: &[u8]) -> Option<Entry> {
-    let mut r = Reader { bytes, pos: 0 };
+    let mut r = Reader(bytes);
     let printed = r.hash()?;
-    let outputs = (0..r.len()?).map(|_| {
-        let (path, blob) = (r.str()?, r.hash()?);
-        let executable = match r.take(1)?[0] {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
-        Some(Output { path, blob, executable })
-    });
-    let outputs = outputs.collect::<Option<Vec<_>>>()?;
-    r.end().then_some(Entry { outputs, printed })
+    let outputs = r.list(|r| {
+        Some(Output { path: r.string()?, blob: r.hash()?, executable: r.bool()? })
+    })?;
+    r.is_empty().then_some(Entry { outputs, printed })
 }
 
 #[cfg(test)]

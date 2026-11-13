@@ -5,9 +5,8 @@ use std::io::{IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 use crate::Error;
-use crate::builder::Request;
 use crate::database::{self, Database};
-use crate::configured::{Configured, Output};
+use crate::configured::{Configured, Output, Request};
 
 /// Which tests `jig test` runs.
 #[derive(Default)]

@@ -143,7 +143,8 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
 2. **Done: remove the ninja engine from jig.**
    - `JIG_ENGINE` is no longer read, and is ignored if set. `Engine`, `ninja::Ninja`, `NinjaFile`, `ninja::retire`,
      `NinjaOnWindows` and `GraphOfNinja` are gone. `Configured` has no engine, and `builder()` is rig's. The `Builder`
-     trait stays as the seam `Timed` wraps.
+     trait stayed as the seam `Timed` wrapped, until a later refactor removed both: `rig_builder::Rig` times its own
+     builds, and has `Request` and `Output`.
    - `reconfigure.stamp` is gone, with `Configured::locate`'s checks of missing paths and variables, and the
      database's `missing`, `env` and `env_hashes`, as rig's graph depends on them through `graph.d`, which always lists
      them. The database's version is 27.

@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::Error;
-use crate::builder::{self, Request};
-use crate::configured::{Configured, Output};
+use crate::configured::{Configured, Output, Request};
 use crate::database::Program;
 
 /// Build a binary crate and run it with arguments, without evaluating the configuration, as `name`, or the only binary
@@ -19,7 +18,7 @@ pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, 
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     let program = find(&database.programs, name)?;
-    project.build(&Request { targets: &[program.target], output: builder::Output::Stderr, ..Default::default() })?;
+    project.build(&Request { targets: &[program.target], output: Output::Stderr, ..Default::default() })?;
     let binary = project.root.join(program.path);
     let mut command = match program.runner.split_first() {
         // a runner which is a path, such as one which is built, is relative to the project root
