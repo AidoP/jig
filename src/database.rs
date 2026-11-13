@@ -16,6 +16,8 @@
 //! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
 
 use std::io::Write;
+
+use rig::bytes::{Reader, Writer};
 use std::path::{Path, PathBuf};
 
 /// The path of the database, relative to the project root.
@@ -164,78 +166,86 @@ impl Database<'_> {
     }
 }
 
-pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
-    w.write_all(MAGIC)?;
-    write_u32(w, VERSION)?;
-    write_str(w, database.input)?;
-    write_str(w, database.toolchain)?;
-    write_str(w, database.build_dir)?;
-    write_strs(w, &database.test_tags)?;
-    write_str(w, database.install_prefix)?;
-    write_str(w, database.proxy_build)?;
-    write_str(w, database.other_jig)?;
-    write_str(w, database.jig)?;
-    write_str(w, database.cache_dir)?;
-    write_str(w, database.cache_size)?;
-    write_str(w, database.remote_cache)?;
-    write_u32(w, u32::from(database.push))?;
-    write_str(w, database.token_file)?;
-    write_strs(w, &database.workers)?;
-    write_u32(w, u32::from(database.workers_only))?;
-    write_u32(w, u32::from(database.download_targets))?;
-    write_str(w, database.toolchain_identity)?;
-    write_str(w, database.toolchain_release)?;
-    write_str(w, database.toolchain_install)?;
-    write_str(w, database.rustc_key)?;
-    write_str(w, database.rustc_sysroot)?;
-    write_str(w, database.rustc_host)?;
-    write_strs(w, &database.rustc_targets)?;
-    write_str(w, database.rustc_verbose_version)?;
-    write_u32(w, database.flychecks.len())?;
+pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
+    let mut w = Writer::new();
+    w.bytes(MAGIC);
+    w.u32(VERSION);
+    w.str(database.input);
+    w.str(database.toolchain);
+    w.str(database.build_dir);
+    w.strs(&database.test_tags);
+    w.str(database.install_prefix);
+    w.str(database.proxy_build);
+    w.str(database.other_jig);
+    w.str(database.jig);
+    w.str(database.cache_dir);
+    w.str(database.cache_size);
+    w.str(database.remote_cache);
+    w.u32(u32::from(database.push));
+    w.str(database.token_file);
+    w.strs(&database.workers);
+    w.u32(u32::from(database.workers_only));
+    w.u32(u32::from(database.download_targets));
+    w.str(database.toolchain_identity);
+    w.str(database.toolchain_release);
+    w.str(database.toolchain_install);
+    w.str(database.rustc_key);
+    w.str(database.rustc_sysroot);
+    w.str(database.rustc_host);
+    w.strs(&database.rustc_targets);
+    w.str(database.rustc_verbose_version);
+    w.len(database.flychecks.len());
     for flycheck in &database.flychecks {
-        write_str(w, flycheck.label)?;
-        write_str(w, flycheck.diagnostics)?;
-        write_u32(w, u32::from(flycheck.member))?;
-        write_u32s(w, &flycheck.deps)?;
+        w.str(flycheck.label);
+        w.str(flycheck.diagnostics);
+        w.u32(u32::from(flycheck.member));
+        w.len(flycheck.deps.len());
+        for &dep in &flycheck.deps {
+            w.u32(dep);
+        }
     }
-    write_u32(w, database.tests.len())?;
+    w.len(database.tests.len());
     for test in &database.tests {
-        write_str(w, test.name)?;
-        write_strs(w, &test.command)?;
-        write_u32(w, u32::from(test.libtest))?;
-        write_strs(w, &test.tags)?;
-        write_str(w, test.on_workers)?;
-        write_strs(w, &test.inputs)?;
+        w.str(test.name);
+        w.strs(&test.command);
+        w.u32(u32::from(test.libtest));
+        w.strs(&test.tags);
+        w.str(test.on_workers);
+        w.strs(&test.inputs);
     }
-    write_u32(w, database.lints.len())?;
+    w.len(database.lints.len());
     for lint in &database.lints {
-        write_str(w, lint.name)?;
-        write_str(w, lint.diagnostics)?;
+        w.str(lint.name);
+        w.str(lint.diagnostics);
     }
-    write_u32(w, database.programs.len())?;
+    w.len(database.programs.len());
     for program in &database.programs {
-        write_str(w, program.name)?;
-        write_str(w, program.path)?;
-        write_str(w, program.target)?;
-        write_strs(w, &program.runner)?;
-        write_u32(w, u32::from(program.default))?;
+        w.str(program.name);
+        w.str(program.path);
+        w.str(program.target);
+        w.strs(&program.runner);
+        w.u32(u32::from(program.default));
     }
-    write_u32(w, database.installs.len())?;
+    w.len(database.installs.len());
     for install in &database.installs {
-        write_str(w, install.path)?;
-        write_str(w, install.target)?;
-        write_str(w, install.dir)?;
-        write_u32(w, install.mode)?;
-        write_u32(w, u32::from(install.program))?;
+        w.str(install.path);
+        w.str(install.target);
+        w.str(install.dir);
+        w.u32(install.mode);
+        w.u32(u32::from(install.program));
     }
-    Ok(())
+    out.write_all(&w.0)
 }
 
 /// Parse a database, failing with [`std::io::ErrorKind::InvalidData`] if it is not a database of this version.
 pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
+    parse(bytes).ok_or_else(invalid)
+}
+
+fn parse(bytes: &[u8]) -> Option<Database<'_>> {
     let mut r = Reader(bytes);
     if r.take(MAGIC.len())? != MAGIC || r.u32()? != VERSION {
-        return Err(invalid());
+        return None;
     }
     let mut database = Database {
         input: r.str()?,
@@ -249,11 +259,11 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         cache_dir: r.str()?,
         cache_size: r.str()?,
         remote_cache: r.str()?,
-        push: r.bool()?,
+        push: flag(&mut r)?,
         token_file: r.str()?,
         workers: r.strs()?,
-        workers_only: r.bool()?,
-        download_targets: r.bool()?,
+        workers_only: flag(&mut r)?,
+        download_targets: flag(&mut r)?,
         toolchain_identity: r.str()?,
         toolchain_release: r.str()?,
         toolchain_install: r.str()?,
@@ -265,10 +275,10 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         ..Default::default()
     };
     for _ in 0..r.u32()? {
-        database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: r.bool()?, deps: r.u32s()? });
+        database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: flag(&mut r)?, deps: r.list(Reader::u32)? });
     }
     for _ in 0..r.u32()? {
-        let (name, command, libtest, tags) = (r.str()?, r.strs()?, r.bool()?, r.strs()?);
+        let (name, command, libtest, tags) = (r.str()?, r.strs()?, flag(&mut r)?, r.strs()?);
         let (on_workers, inputs) = (r.str()?, r.strs()?);
         database.tests.push(Test { name, command, libtest, tags, on_workers, inputs });
     }
@@ -276,7 +286,7 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
     }
     for _ in 0..r.u32()? {
-        let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, r.bool()?);
+        let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, flag(&mut r)?);
         database.programs.push(Program { name, path, target, runner, default });
     }
     for _ in 0..r.u32()? {
@@ -285,10 +295,10 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
             target: r.str()?,
             dir: r.str()?,
             mode: r.u32()?,
-            program: r.bool()?,
+            program: flag(&mut r)?,
         });
     }
-    Ok(database)
+    Some(database)
 }
 
 /// Returns the root of the project which contains the working directory, which is the closest directory to it, or it
@@ -302,63 +312,12 @@ fn invalid() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, "not a build database of this version")
 }
 
-fn write_u32(w: &mut dyn Write, value: impl TryInto<u32>) -> std::io::Result<()> {
-    let value: u32 = value.try_into().map_err(|_| std::io::Error::other("value too large for the database"))?;
-    w.write_all(&value.to_le_bytes())
-}
-
-fn write_str(w: &mut dyn Write, s: &str) -> std::io::Result<()> {
-    write_u32(w, s.len())?;
-    w.write_all(s.as_bytes())
-}
-
-fn write_strs(w: &mut dyn Write, strs: &[&str]) -> std::io::Result<()> {
-    write_u32(w, strs.len())?;
-    for s in strs {
-        write_str(w, s)?;
-    }
-    Ok(())
-}
-
-fn write_u32s(w: &mut dyn Write, values: &[u32]) -> std::io::Result<()> {
-    write_u32(w, values.len())?;
-    for &value in values {
-        write_u32(w, value)?;
-    }
-    Ok(())
-}
-
-/// The remaining bytes of a database being parsed.
-struct Reader<'a>(&'a [u8]);
-impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> std::io::Result<&'a [u8]> {
-        let Some((taken, rest)) = self.0.split_at_checked(len) else {
-            return Err(std::io::ErrorKind::UnexpectedEof.into());
-        };
-        self.0 = rest;
-        Ok(taken)
-    }
-    fn u32(&mut self) -> std::io::Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
-    fn str(&mut self) -> std::io::Result<&'a str> {
-        let len = self.u32()? as usize;
-        std::str::from_utf8(self.take(len)?).map_err(|_| invalid())
-    }
-    fn bool(&mut self) -> std::io::Result<bool> {
-        match self.u32()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(invalid()),
-        }
-    }
-    fn strs(&mut self) -> std::io::Result<Vec<&'a str>> {
-        let len = self.u32()?;
-        (0..len).map(|_| self.str()).collect()
-    }
-    fn u32s(&mut self) -> std::io::Result<Vec<u32>> {
-        let len = self.u32()?;
-        (0..len).map(|_| self.u32()).collect()
+/// Reads a flag, a number which is `0` or `1`.
+fn flag(r: &mut Reader) -> Option<bool> {
+    match r.u32()? {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
     }
 }
 
@@ -448,7 +407,7 @@ mod tests {
         let test = Test { name: "x", command: vec![], libtest: false, tags: vec![], on_workers: "", inputs: vec![] };
         let tests = vec![test];
         write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
-        assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 }
 

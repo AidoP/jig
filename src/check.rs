@@ -1,7 +1,6 @@
 //! `jig check`, the flycheck of rust-analyzer, which replays saved diagnostics.
 
-use crate::builder::{self, Request};
-use crate::configured::{Configured, Output};
+use crate::configured::{Configured, Output, Request};
 use crate::database::Flycheck;
 
 /// Returns the diagnostics to replay for a flycheck: its own, then those of the flychecks it depends on, directly or
@@ -41,7 +40,7 @@ pub fn check(label: &str) {
     };
     // the build's output is not JSON, so it is kept out of stdout
     let target = format!("check/{label}");
-    let request = Request { targets: &[&target], quiet: true, output: builder::Output::Stderr, ..Default::default() };
+    let request = Request { targets: &[&target], quiet: true, output: Output::Stderr, ..Default::default() };
     if let Err(error) = project.builder().build(&request) {
         eprintln!("{error}");
     }

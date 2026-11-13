@@ -3,8 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::builder::Request;
-use crate::configured::{Configured, Output};
+use crate::configured::{Configured, Output, Request};
 use crate::project::{self, Message, Severity};
 use crate::{Error, database};
 
@@ -171,10 +170,7 @@ fn compiled_wrapper(project: &Configured) -> std::io::Result<PathBuf> {
     let source = project.build_dir.join(format!("{name}.rs"));
     std::fs::write(&source, PROXY_WRAPPER)?;
     let tmp = project.build_dir.join(format!("{name}.{}.exe", std::process::id()));
-    let mut rustc = std::process::Command::new("rustc");
-    if let Some(toolchain) = &project.toolchain {
-        rustc.env("RUSTUP_TOOLCHAIN", toolchain);
-    }
+    let mut rustc = crate::rustc::command(&[], project.toolchain.as_deref());
     // small, and without the C runtime's library, which MSVC links to otherwise
     let flags = ["-Copt-level=s", "-Cstrip=symbols", "-Cpanic=abort", "-Ctarget-feature=+crt-static"];
     rustc.args(["--edition=2024", "--crate-name=jig_proxy"]).args(flags).arg("-o");
@@ -300,7 +296,7 @@ pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {
         stale
     };
     // what is installed at the wrapper may change with the configuration
-    project.reconfigure(Output::Quiet)?;
+    project.reconfigure(Output::Stdout, true)?;
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     let Some(file) = find_program(&database, prefix, wrapper) else {

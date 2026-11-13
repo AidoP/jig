@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::cache::{Cache, Entry, Hash, Output};
 use crate::graph::Exec;
-use crate::remote::{Payload, push_str, push_strs};
+use crate::bytes::{Reader, Writer};
 
 /// A toolchain a worker has, by the identity a cached edge has in the graph, with the variables an action which has it
 /// is given to run it, such as `RUSTUP_TOOLCHAIN`, which are not reported to clients.
@@ -104,35 +104,30 @@ impl Capabilities {
         tagged && (has || (self.installs && !needs.install.is_empty()))
     }
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        push_str(&mut bytes, &self.host);
-        push_strs(&mut bytes, &self.tags);
-        bytes.push(u8::from(self.installs));
-        bytes.extend_from_slice(&(self.toolchains.len() as u32).to_le_bytes());
+        let mut w = Writer::new();
+        w.str(&self.host);
+        w.strs(&self.tags);
+        w.u8(u8::from(self.installs));
+        w.len(self.toolchains.len());
         for toolchain in &self.toolchains {
             let fields = [&toolchain.identity, &toolchain.release_identity, &toolchain.name, &toolchain.release];
             for field in fields.into_iter().chain([&toolchain.host]) {
-                push_str(&mut bytes, field);
+                w.str(field);
             }
-            push_strs(&mut bytes, &toolchain.targets);
+            w.strs(&toolchain.targets);
         }
-        bytes
+        w.0
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
-        let mut p = Payload(bytes);
-        let (host, tags) = (p.str()?, p.strs()?);
-        let installs = match p.take(1)?[0] {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
-        let toolchains = (0..p.u32()?).map(|_| {
-            let (identity, release_identity, name, release) = (p.str()?, p.str()?, p.str()?, p.str()?);
-            let (host, targets) = (p.str()?, p.strs()?);
+        let mut p = Reader(bytes);
+        let (host, tags) = (p.string()?, p.strings()?);
+        let installs = p.bool()?;
+        let toolchains = p.list(|p| {
+            let (identity, release_identity, name, release) = (p.string()?, p.string()?, p.string()?, p.string()?);
+            let (host, targets) = (p.string()?, p.strings()?);
             Some(Toolchain { identity, name, release, host, targets, release_identity, env: Vec::new() })
-        });
-        let toolchains = toolchains.collect::<Option<Vec<_>>>()?;
-        p.0.is_empty().then_some(Self { host, tags, toolchains, installs })
+        })?;
+        p.is_empty().then_some(Self { host, tags, toolchains, installs })
     }
 }
 
@@ -209,50 +204,41 @@ pub enum Refused {
 
 impl Request {
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        let mut w = Writer::new();
         for field in [&self.identity, &self.release, &self.install, &self.target] {
-            push_str(&mut bytes, field);
+            w.str(field);
         }
         let exec = &self.action;
-        push_str(&mut bytes, &exec.program);
-        push_strs(&mut bytes, &exec.args);
-        push_pairs(&mut bytes, &exec.env);
+        w.str(&exec.program);
+        w.strs(&exec.args);
+        write_pairs(&mut w, &exec.env);
         for optional in [&exec.dir, &exec.stderr] {
-            push_strs(&mut bytes, optional.as_slice());
+            w.strs(optional.as_slice());
         }
-        push_pairs(&mut bytes, &self.env);
-        push_strs(&mut bytes, &self.locating);
-        bytes.extend_from_slice(&(self.inputs.len() as u32).to_le_bytes());
+        write_pairs(&mut w, &self.env);
+        w.strs(&self.locating);
+        w.len(self.inputs.len());
         for input in &self.inputs {
-            push_str(&mut bytes, &input.path);
-            bytes.extend_from_slice(&input.blob);
-            bytes.push(u8::from(input.executable));
+            w.str(&input.path);
+            w.bytes(&input.blob);
+            w.u8(u8::from(input.executable));
         }
-        push_strs(&mut bytes, &self.outputs);
-        push_strs(&mut bytes, &self.early);
-        bytes
+        w.strs(&self.outputs);
+        w.strs(&self.early);
+        w.0
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
-        let mut p = Payload(bytes);
-        let (identity, release, install, target) = (p.str()?, p.str()?, p.str()?, p.str()?);
-        let (program, args, env) = (p.str()?, p.strs()?, pairs(&mut p)?);
-        let mut optional = || p.strs().filter(|strings| strings.len() <= 1).map(|mut strings| strings.pop());
+        let mut p = Reader(bytes);
+        let (identity, release, install, target) = (p.string()?, p.string()?, p.string()?, p.string()?);
+        let (program, args, env) = (p.string()?, p.strings()?, pairs(&mut p)?);
+        let mut optional = || p.strings().filter(|strings| strings.len() <= 1).map(|mut strings| strings.pop());
         let (dir, stderr) = (optional()?, optional()?);
         let action = Exec { program, args, env, dir, stderr };
-        let (env, locating) = (pairs(&mut p)?, p.strs()?);
-        let inputs = (0..p.u32()?).map(|_| {
-            let (path, blob) = (p.str()?, p.hash()?);
-            let executable = match p.take(1)?[0] {
-                0 => false,
-                1 => true,
-                _ => return None,
-            };
-            Some(Input { path, blob, executable })
-        });
-        let inputs = inputs.collect::<Option<Vec<_>>>()?;
-        let (outputs, early) = (p.strs()?, p.strs()?);
+        let (env, locating) = (pairs(&mut p)?, p.strings()?);
+        let inputs = p.list(|p| Some(Input { path: p.string()?, blob: p.hash()?, executable: p.bool()? }))?;
+        let (outputs, early) = (p.strings()?, p.strings()?);
         let request = Self { identity, release, install, target, action, env, locating, inputs, outputs, early };
-        p.0.is_empty().then_some(request)
+        p.is_empty().then_some(request)
     }
     /// The blobs of its inputs, each once.
     #[must_use]
@@ -264,13 +250,13 @@ impl Request {
     }
 }
 
-fn push_pairs(bytes: &mut Vec<u8>, pairs: &[(String, String)]) {
-    let flat: Vec<String> = pairs.iter().flat_map(|(name, value)| [name.clone(), value.clone()]).collect();
-    push_strs(bytes, &flat);
+fn write_pairs(w: &mut Writer, pairs: &[(String, String)]) {
+    let flat: Vec<&str> = pairs.iter().flat_map(|(name, value)| [name.as_str(), value]).collect();
+    w.strs(&flat);
 }
 
-fn pairs(p: &mut Payload) -> Option<Vec<(String, String)>> {
-    let mut flat = p.strs()?.into_iter();
+fn pairs(p: &mut Reader) -> Option<Vec<(String, String)>> {
+    let mut flat = p.strings()?.into_iter();
     let mut pairs = Vec::new();
     while let Some(name) = flat.next() {
         pairs.push((name, flat.next()?));
@@ -283,13 +269,9 @@ impl Executed {
         [&[u8::from(self.succeeded)], crate::cache::encode_result(&self.entry).as_slice()].concat()
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
-        let (&succeeded, result) = bytes.split_first()?;
-        let succeeded = match succeeded {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
-        Some(Self { succeeded, entry: crate::cache::decode_result(result)? })
+        let mut r = Reader(bytes);
+        let succeeded = r.bool()?;
+        Some(Self { succeeded, entry: crate::cache::decode_result(r.0)? })
     }
 }
 

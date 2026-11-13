@@ -3,8 +3,7 @@
 use std::io::Write;
 
 use crate::Error;
-use crate::builder::Request;
-use crate::configured::{Configured, Output};
+use crate::configured::{Configured, Output, Request};
 
 /// Lint the crates which are edited, or only those named, without evaluating the configuration.
 ///

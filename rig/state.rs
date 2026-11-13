@@ -24,6 +24,7 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 
 use crate::Error;
+use crate::bytes::{Reader, Writer};
 use crate::stamp::Stamp;
 
 const MAGIC: &[u8; 4] = b"RIGL";
@@ -183,48 +184,47 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 fn write_record(bytes: &mut Vec<u8>, record: &Record) {
-    let mut contents = Vec::new();
-    contents.extend_from_slice(&record.start.to_le_bytes());
-    contents.extend_from_slice(&record.duration.to_le_bytes());
-    contents.extend_from_slice(&record.action.to_le_bytes());
+    let mut w = Writer::new();
+    w.u64(record.start);
+    w.u32(record.duration);
+    w.u64(record.action);
     for list in [&record.outputs, &record.inputs, &record.discovered] {
-        contents.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        w.len(list.len());
         for (path, stamp) in list {
-            contents.extend_from_slice(&(path.len() as u32).to_le_bytes());
-            contents.extend_from_slice(path.as_bytes());
+            w.str(path);
             match stamp {
-                Stamp::Missing => contents.push(0),
+                Stamp::Missing => w.u8(0),
                 Stamp::File { mtime, size } => {
-                    contents.push(1);
-                    contents.extend_from_slice(&mtime.to_le_bytes());
-                    contents.extend_from_slice(&size.to_le_bytes());
+                    w.u8(1);
+                    w.i64(*mtime);
+                    w.u64(*size);
                 },
                 Stamp::Content { mtime, size, hash } => {
-                    contents.push(2);
-                    contents.extend_from_slice(&mtime.to_le_bytes());
-                    contents.extend_from_slice(&size.to_le_bytes());
-                    contents.extend_from_slice(hash);
+                    w.u8(2);
+                    w.i64(*mtime);
+                    w.u64(*size);
+                    w.bytes(hash);
                 },
                 Stamp::Remote { hash, executable } => {
-                    contents.push(3);
-                    contents.extend_from_slice(hash);
-                    contents.push(u8::from(*executable));
+                    w.u8(3);
+                    w.bytes(hash);
+                    w.u8(u8::from(*executable));
                 },
             }
         }
     }
-    contents.extend_from_slice(&(record.env.len() as u32).to_le_bytes());
+    w.len(record.env.len());
     for (name, hash) in &record.env {
-        contents.extend_from_slice(&(name.len() as u32).to_le_bytes());
-        contents.extend_from_slice(name.as_bytes());
+        w.str(name);
         match hash {
-            None => contents.push(0),
+            None => w.u8(0),
             Some(hash) => {
-                contents.push(1);
-                contents.extend_from_slice(&hash.to_le_bytes());
+                w.u8(1);
+                w.u64(*hash);
             },
         }
     }
+    let contents = w.0;
     bytes.extend_from_slice(&(contents.len() as u32).to_le_bytes());
     bytes.extend_from_slice(&fnv1a(&contents).to_le_bytes());
     bytes.extend_from_slice(&contents);
@@ -257,64 +257,31 @@ fn read_log(bytes: &[u8]) -> (HashMap<String, Record>, usize, usize) {
 }
 
 fn read_record(contents: &[u8]) -> Option<Record> {
-    let mut r = Reader { bytes: contents, pos: 0 };
-    let start = u64::from_le_bytes(r.take(8)?.try_into().ok()?);
-    let duration = u32::from_le_bytes(r.take(4)?.try_into().ok()?);
-    let action = u64::from_le_bytes(r.take(8)?.try_into().ok()?);
-    let mut lists = [Vec::new(), Vec::new(), Vec::new()];
-    for list in &mut lists {
-        for _ in 0..r.u32()? {
-            let len = r.u32()? as usize;
-            let path = std::str::from_utf8(r.take(len)?).ok()?.to_string();
-            let stamp = match r.take(1)?[0] {
-                0 => Stamp::Missing,
-                1 => Stamp::File {
-                    mtime: i64::from_le_bytes(r.take(8)?.try_into().ok()?),
-                    size: u64::from_le_bytes(r.take(8)?.try_into().ok()?),
-                },
-                2 => Stamp::Content {
-                    mtime: i64::from_le_bytes(r.take(8)?.try_into().ok()?),
-                    size: u64::from_le_bytes(r.take(8)?.try_into().ok()?),
-                    hash: r.take(32)?.try_into().ok()?,
-                },
-                3 => Stamp::Remote {
-                    hash: r.take(32)?.try_into().ok()?,
-                    executable: r.take(1)?[0] == 1,
-                },
-                _ => return None,
-            };
-            list.push((path, stamp));
-        }
-    }
-    let [outputs, inputs, discovered] = lists;
-    let mut env = Vec::new();
-    for _ in 0..r.u32()? {
-        let len = r.u32()? as usize;
-        let name = std::str::from_utf8(r.take(len)?).ok()?.to_string();
-        let hash = match r.take(1)?[0] {
-            0 => None,
-            1 => Some(u64::from_le_bytes(r.take(8)?.try_into().ok()?)),
+    let mut r = Reader(contents);
+    let (start, duration, action) = (r.u64()?, r.u32()?, r.u64()?);
+    let mut entry = |r: &mut Reader| {
+        let path = r.string()?;
+        let stamp = match r.u8()? {
+            0 => Stamp::Missing,
+            1 => Stamp::File { mtime: r.i64()?, size: r.u64()? },
+            2 => Stamp::Content { mtime: r.i64()?, size: r.u64()?, hash: r.hash()? },
+            3 => Stamp::Remote { hash: r.hash()?, executable: r.u8()? == 1 },
             _ => return None,
         };
-        env.push((name, hash));
-    }
-    let valid = r.pos == contents.len() && !outputs.is_empty();
+        Some((path, stamp))
+    };
+    let (outputs, inputs, discovered) = (r.list(&mut entry)?, r.list(&mut entry)?, r.list(&mut entry)?);
+    let env = r.list(|r| {
+        let name = r.string()?;
+        let hash = match r.u8()? {
+            0 => None,
+            1 => Some(r.u64()?),
+            _ => return None,
+        };
+        Some((name, hash))
+    })?;
+    let valid = r.is_empty() && !outputs.is_empty();
     valid.then_some(Record { start, duration, action, outputs, inputs, discovered, env })
-}
-
-struct Reader<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-impl<'a> Reader<'a> {
-    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
-        let bytes = self.bytes.get(self.pos..self.pos.checked_add(len)?)?;
-        self.pos += len;
-        Some(bytes)
-    }
-    fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
-    }
 }
 
 #[cfg(test)]

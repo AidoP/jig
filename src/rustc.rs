@@ -25,6 +25,14 @@ pub struct Answers {
     pub verbose_version: String,
 }
 
+impl Answers {
+    /// Returns the version of rustc, from the `release` line of the output of `rustc -vV`.
+    pub fn version(&self) -> Result<String, Error> {
+        let version = self.verbose_version.lines().find_map(|line| line.strip_prefix("release: "));
+        version.map(|version| version.trim().into()).ok_or_else(|| Error::InvalidOutput(Box::new(command(&["-vV"], None))))
+    }
+}
+
 /// Returns rustc's answers, with a toolchain if one is given, as `known` has them if nothing which chose or identifies
 /// the toolchain has changed since, or otherwise from rustc.
 pub fn ask(toolchain: Option<&str>, known: Option<Answers>) -> Result<Answers, Error> {
@@ -57,7 +65,8 @@ fn chosen(toolchain: Option<&str>) -> String {
     let selected = toolchain.map(String::from).or_else(|| var("RUSTUP_TOOLCHAIN"));
     let mut lines = vec![format!("RUSTUP_TOOLCHAIN={selected:?}")];
     lines.extend(["PATH", "RUSTUP_HOME", "CARGO_HOME"].map(|name| format!("{name}={:?}", var(name))));
-    let rustc = find(Path::new(if cfg!(windows) { "rustc.exe" } else { "rustc" }));
+    let path = var("PATH").unwrap_or_default();
+    let rustc = std::env::split_paths(&path).find_map(|dir| crate::platform::program_in(&dir, "rustc"));
     lines.push(format!("rustc {}", rustc.as_deref().map_or_else(|| "missing".into(), described)));
     lines.extend(rustup_home().map(|home| described(&home.join("settings.toml"))));
     // the toolchain file closest to the working directory is the one rustup reads
@@ -79,17 +88,8 @@ fn key(chosen: &str, sysroot: &str) -> String {
 
 /// Returns a path with the size and time of the file it is of, following symbolic links, or that it is missing.
 fn described(path: &Path) -> String {
-    let stamp = std::fs::metadata(path).ok().and_then(|metadata| {
-        let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-        Some(format!("{} {}.{:09}", metadata.len(), modified.as_secs(), modified.subsec_nanos()))
-    });
+    let stamp = crate::toolchain::stamp(path);
     format!("{} {}", path.display(), stamp.as_deref().unwrap_or("missing"))
-}
-
-/// Returns where a program is found in `PATH`, as a command which is given its name runs it.
-fn find(program: &Path) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(program)).find(|path| path.is_file())
 }
 
 /// Returns rustup's home, `RUSTUP_HOME`, or `.rustup` in the user's home directory.
@@ -99,7 +99,7 @@ fn rustup_home() -> Option<PathBuf> {
 }
 
 /// Returns rustc with arguments, with a toolchain if one is given.
-fn command(arguments: &[&str], toolchain: Option<&str>) -> Command {
+pub fn command(arguments: &[&str], toolchain: Option<&str>) -> Command {
     let mut command = Command::new("rustc");
     command.args(arguments);
     crate::toolchain::apply(&mut command, toolchain);
@@ -107,7 +107,7 @@ fn command(arguments: &[&str], toolchain: Option<&str>) -> Command {
 }
 
 /// Returns the trimmed output of rustc with arguments, with a toolchain if one is given.
-fn output(arguments: &[&str], toolchain: Option<&str>) -> Result<String, Error> {
+pub fn output(arguments: &[&str], toolchain: Option<&str>) -> Result<String, Error> {
     let mut command = command(arguments, toolchain);
     let output = match command.output() {
         Err(error) => return Err(Error::Exec(Box::new(command), error)),

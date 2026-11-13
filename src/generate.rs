@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::project::rust::{Crate, Kind};
 use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
 use crate::rig_graph::{self, Edge, RigGraph};
-use crate::{Error, database, rust_analyzer, target_spec, toolchain};
+use crate::{Error, database, rust_analyzer, target_spec};
 
 /// Write the files generated from a project, which has been read and checked.
 ///
@@ -1267,9 +1267,8 @@ fn externs(crates: &[Crate]) -> Vec<Vec<usize>> {
 ///
 /// It fails if rustc does, or prints no specification, as it may not exit unsuccessfully, with what rustc reported.
 fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result<String, Error> {
-    let mut cmd = std::process::Command::new("rustc");
-    cmd.args(["-Zunstable-options", "--print=target-spec-json", &format!("--target={base}")]);
-    toolchain::apply(&mut cmd, toolchain);
+    let target_flag = format!("--target={base}");
+    let mut cmd = crate::rustc::command(&["-Zunstable-options", "--print=target-spec-json", &target_flag], toolchain);
     let output = match cmd.output() {
         Ok(output) => output,
         Err(error) => return Err(Error::Exec(Box::new(cmd), error)),
