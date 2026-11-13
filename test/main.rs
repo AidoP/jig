@@ -3499,7 +3499,8 @@ log note clippy/
     // clippy is given the minimum supported Rust version, as cargo gives it, so that it suggests only what that version
     // has, where it is set
     assert!(!app.contains("CARGO_PKG_RUST_VERSION"), "{app}");
-    let msrv = Project::new("lints-msrv", &[("Jig", "set rust-version '1.80.0'\ncrate app 'app.rs'\n"), ("app.rs", "")]);
+    let jig = "set rust-version '1.80.0'\ncrate app 'app.rs'\n";
+    let msrv = Project::new("lints-msrv", &[("Jig", jig), ("app.rs", "")]);
     let output = msrv.configure().ok();
     assert_contains(output.build(&format!("{host}/lint/libapp.rmeta")), " CARGO_PKG_RUST_VERSION=1.80.0 ");
 
