@@ -1012,8 +1012,8 @@ target bluemetal-riscv64
   TCP does, and to workers reached over TCP, empty by default
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for `use`, which are read-only
-- `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, with no
-  value until it is set
+- `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, and which
+  `jig lint` gives clippy, as cargo does, so that it suggests only what that version has, with no value until it is set
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
 - `workers`: the workers which cached commands run on once a build's own jobs are full, as described for them, empty
   by default, which `JIG_WORKERS` overrides

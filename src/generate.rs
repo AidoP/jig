@@ -698,7 +698,11 @@ fn write_graph(
                 lint_flags.plain(&["--test"]);
             }
             let emit = metadata_emit(&outdir, &output, true);
-            let exec = rust.exec("clippy-driver", &emit, &lint_flags, Some(&diagnostics));
+            let mut exec = rust.exec("clippy-driver", &emit, &lint_flags, Some(&diagnostics));
+            // clippy suggests only what the minimum supported Rust version has, which it is given as cargo gives it
+            if let Some(version) = project.rust_version() {
+                exec.env.push(("CARGO_PKG_RUST_VERSION".into(), version));
+            }
             // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to
             // date
             graph.edge(Edge {
