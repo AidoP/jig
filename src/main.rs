@@ -18,6 +18,7 @@ mod rig_builder;
 mod rig_graph;
 mod platform;
 mod run;
+mod rustc;
 mod rust_analyzer;
 mod show_graph;
 mod target_spec;
@@ -222,11 +223,13 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
 const CONFIGURE_STACK: usize = 64 << 20;
 
 fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
-    let sysroot = rustc_print("sysroot", toolchain)?;
-    let host = rustc_print("host-tuple", toolchain)?;
-    let targets: Vec<String> = rustc_print("target-list", toolchain)?.lines().map(String::from).collect();
-    let verbose_version = rustc_output("-vV", toolchain)?;
-    let version = rustc_version(&verbose_version)?;
+    // rustc's answers, as they were when the project was last configured, if the toolchain has not changed since
+    let known = std::fs::read(database::PATH).ok();
+    let known = known.as_deref().and_then(|bytes| database::read(bytes).ok()).map(|database| database.rustc());
+    let rustc = rustc::ask(toolchain, known)?;
+    let (sysroot, host, targets) = (&rustc.sysroot, &rustc.host, &rustc.targets);
+    let verbose_version = &rustc.verbose_version;
+    let version = rustc_version(verbose_version)?;
 
     let mut project = project::Project::new(input.parent().map(Path::to_path_buf).unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
@@ -237,7 +240,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
         Ok(file) => file,
         Err(error) => return Err(Error::Read(input, error)),
     };
-    declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
+    declare_builtins(&mut project, sysroot, host, version, targets, toolchain);
     // on a thread with a stack of its own, as deep on every platform, as a file which uses itself goes deep, while the
     // main thread's stack is 8 MiB on Linux, and 1 MiB on Windows
     let evaluate = || -> Result<(), Error> {
@@ -261,19 +264,19 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
     // which override the configuration are read by it
     let mut settings = cache::Settings::resolve(&project.cache_properties(), |name| project.read_env(name))?;
     if settings.dir.is_some() {
-        let identity = toolchain_identity(&mut project, &verbose_version, &sysroot);
+        let identity = toolchain_identity(&mut project, verbose_version, sysroot);
         // a worker may run what does not depend on the host with the same release on another, and install it by its
         // name, if it does not have it
         let release = rig::worker::Release {
-            identity: toolchain::release_identity(&verbose_version, Path::new(&sysroot)),
-            install: toolchain::install_name(Path::new(&sysroot)).unwrap_or_default(),
+            identity: toolchain::release_identity(verbose_version, Path::new(sysroot)),
+            install: toolchain::install_name(Path::new(sysroot)).unwrap_or_default(),
         };
         settings.release = Some((identity.clone(), release));
         project.cache = Some(identity);
         project.identify_cached_customs();
     }
     project.cache_settings = settings;
-    generate::write(project, &input, &sysroot)
+    generate::write(project, &input, &rustc)
 }
 
 /// Returns how rig caches outside a project, as for `jig cache` and `jig serve`, from the user's configuration alone,
@@ -282,16 +285,8 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
 /// The builtin properties have rustc's values, if it can be run, or are empty, so that a server without Rust can serve
 /// a cache.
 fn user_settings(toolchain: Option<&str>) -> Result<cache::Settings, Error> {
-    let print = |request| rustc_print(request, toolchain).unwrap_or_default();
-    // rustc is asked each at once, as a worker, which runs this, answers once it has
-    let (sysroot, host, targets, version) = std::thread::scope(|scope| {
-        let (sysroot, host) = (scope.spawn(|| print("sysroot")), scope.spawn(|| print("host-tuple")));
-        let targets = scope.spawn(|| print("target-list"));
-        let version = rustc_output("-vV", toolchain).and_then(|output| rustc_version(&output)).unwrap_or_default();
-        let joined = |printed: std::thread::ScopedJoinHandle<String>| printed.join().unwrap_or_default();
-        (joined(sysroot), joined(host), joined(targets), version)
-    });
-    let targets: Vec<String> = targets.lines().map(String::from).collect();
+    let rustc::Answers { sysroot, host, targets, verbose_version, .. } = rustc::ask(toolchain, None).unwrap_or_default();
+    let version = rustc_version(&verbose_version).unwrap_or_default();
     let mut project = project::Project::new(std::env::current_dir().unwrap_or_default(), targets.clone());
     project.toolchain = toolchain.map(String::from);
     declare_builtins(&mut project, &sysroot, &host, version, &targets, toolchain);
@@ -701,11 +696,6 @@ impl core::fmt::Display for Error {
     }
 }
 
-/// Returns the trimmed output of `rustc --print=<request>`, with a toolchain if one is given.
-fn rustc_print(request: &str, toolchain: Option<&str>) -> Result<String, Error> {
-    rustc_output(&format!("--print={request}"), toolchain)
-}
-
 /// Returns what identifies a toolchain, as [`toolchain::identity`] finds it, which the configuration depends on the
 /// files of, so that the toolchain is identified again when it is updated in place.
 fn toolchain_identity(project: &mut project::Project, verbose_version: &str, sysroot: &str) -> String {
@@ -727,23 +717,3 @@ fn rustc_version(output: &str) -> Result<String, Error> {
     })
 }
 
-/// Returns the trimmed output of rustc with an argument, with a toolchain if one is given.
-fn rustc_output(argument: &str, toolchain: Option<&str>) -> Result<String, Error> {
-    use std::process::Command;
-    let mut cmd = Command::new("rustc");
-    cmd.arg(argument);
-    toolchain::apply(&mut cmd, toolchain);
-    let output = match cmd.output() {
-        Err(error) => {
-            return Err(Error::Exec(Box::new(cmd), error));
-        },
-        Ok(output) => output,
-    };
-    if !output.status.success() {
-        return Err(Error::InvalidOutput(Box::new(cmd)));
-    }
-    match String::from_utf8(output.stdout) {
-        Ok(value) if !value.trim().is_empty() => Ok(value.trim().into()),
-        _ => Err(Error::InvalidOutput(Box::new(cmd))),
-    }
-}

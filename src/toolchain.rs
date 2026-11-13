@@ -59,11 +59,18 @@ const MANIFEST: &str = "lib/rustlib/multirust-channel-manifest.toml";
 pub fn identity(verbose_version: &str, sysroot: &Path) -> (String, Option<PathBuf>) {
     let mut key = rig::cache::Key::new("jig toolchain");
     key.part(verbose_version.as_bytes());
-    let file = if sysroot.join(MANIFEST).is_file() { MANIFEST } else { "bin/rustc" };
-    key.part(file.as_bytes());
-    let hash = rig::blake3::hash_file(&sysroot.join(file)).ok();
+    let file = identity_file(sysroot);
+    key.part(file.strip_prefix(sysroot).unwrap_or(&file).to_string_lossy().as_bytes());
+    let hash = rig::blake3::hash_file(&file).ok();
     key.hash(hash.as_ref());
-    (rig::cache::hex(&key.finish()), hash.map(|_| sysroot.join(file)))
+    (rig::cache::hex(&key.finish()), hash.map(|_| file))
+}
+
+/// Returns the file in a toolchain's sysroot which its identity is of: the channel's manifest, which rustup writes when
+/// it installs or updates the toolchain, or without it, rustc.
+pub fn identity_file(sysroot: &Path) -> PathBuf {
+    let manifest = sysroot.join(MANIFEST);
+    if manifest.is_file() { manifest } else { sysroot.join("bin/rustc") }
 }
 
 /// Returns what identifies a toolchain's release on any host, as [`identity`] does but for the host in rustc's
@@ -170,7 +177,7 @@ impl Known {
     /// Returns the toolchain of a sysroot, run with a toolchain if one is given, identifying it with rustc unless it
     /// is known, with the targets whose standard libraries it has now.
     fn toolchain(&mut self, toolchain: Option<&str>, sysroot: &Path) -> Option<rig::worker::Toolchain> {
-        let file = if sysroot.join(MANIFEST).is_file() { sysroot.join(MANIFEST) } else { sysroot.join("bin/rustc") };
+        let file = identity_file(sysroot);
         let metadata = std::fs::metadata(&file).ok()?;
         // as Unix's `mtime` and `mtime_nsec` have it, for a file changed since 1970
         let modified = metadata.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;

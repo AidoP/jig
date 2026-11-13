@@ -16,7 +16,8 @@ use crate::{Error, database, rust_analyzer, target_spec, toolchain};
 /// Write the files generated from a project, which has been read and checked.
 ///
 /// `input` is the root build file.
-pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Error> {
+pub fn write(mut project: Project, input: &Path, rustc: &crate::rustc::Answers) -> Result<(), Error> {
+    let sysroot = &rustc.sysroot;
     let build_dir = project.build_dir();
     if let Err(error) = std::fs::create_dir_all(&build_dir) {
         return Err(Error::Create(build_dir, error));
@@ -35,7 +36,7 @@ pub fn write(mut project: Project, input: &Path, sysroot: &str) -> Result<(), Er
     let graph = RigGraph::new(build_dir.join(rig_graph::FILE));
     write_graph(graph, &project, &crates, &units, &installed, input, &at)?;
     write_rust_project(sysroot, &units)?;
-    write_database(&project, &units, &installed, input, &at, &build_dir)
+    write_database(&project, &units, &installed, input, &at, &build_dir, rustc)
 }
 
 /// Rebases the paths of a project, relative to its root, for rig, which runs in the build directory.
@@ -805,6 +806,7 @@ fn write_database(
     input: &Path,
     at: &Rebase,
     build_dir: &Path,
+    rustc: &crate::rustc::Answers,
 ) -> Result<(), Error> {
     let input = input.display().to_string();
     let build_dir = build_dir.display().to_string();
@@ -876,6 +878,11 @@ fn write_database(
         toolchain_identity: settings.release.as_ref().map_or("", |(identity, _)| identity),
         toolchain_release: settings.release.as_ref().map_or("", |(_, release)| &release.identity),
         toolchain_install: settings.release.as_ref().map_or("", |(_, release)| &release.install),
+        rustc_key: &rustc.key,
+        rustc_sysroot: &rustc.sysroot,
+        rustc_host: &rustc.host,
+        rustc_targets: rustc.targets.iter().map(String::as_str).collect(),
+        rustc_verbose_version: &rustc.verbose_version,
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {

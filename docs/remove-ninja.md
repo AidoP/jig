@@ -255,5 +255,5 @@ Each step leaves every test passing, on every platform CI runs, and is a commit 
 
 - Reading ninja files, as a way to build other projects with rig. rig was never a ninja replacement for other
   projects' `build.ninja`, and isn't made one.
-- Configuring natively beyond what is done, as `jig generate` without a process for rustc's queries, which ninja's
-  removal doesn't change.
+- Configuring natively beyond what is done, which ninja's removal doesn't change. `jig generate` no longer runs
+  rustc for its queries while the toolchain is unchanged, as build-engine.md's phase 2 step 3 says.
