@@ -311,6 +311,11 @@ impl Project {
         };
         self.values[value].data.coerce_string()
     }
+    /// Returns the minimum supported Rust version, `rust-version`, if it is set.
+    pub fn rust_version(&self) -> Option<String> {
+        let &value = self.values_idx.get("rust-version")?;
+        Some(self.values[value].data.coerce_string()).filter(|version| !version.is_empty())
+    }
     /// Returns the tags of the tests which `jig test` runs without being asked for them, beside the tests without tags,
     /// from `test-tags`.
     pub fn test_tags(&self) -> Vec<String> {

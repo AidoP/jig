@@ -3496,6 +3496,12 @@ log note clippy/
     assert_contains(app, &format!("\n    depfile = {host}/lint/libapp.rmeta.d\n"));
     // the lints are not built without targets, as the checks are not
     assert!(!output.graph.lines().any(|line| line.starts_with("default ") && line.contains("lint/")), "{}", output.graph);
+    // clippy is given the minimum supported Rust version, as cargo gives it, so that it suggests only what that version
+    // has, where it is set
+    assert!(!app.contains("CARGO_PKG_RUST_VERSION"), "{app}");
+    let msrv = Project::new("lints-msrv", &[("Jig", "set rust-version '1.80.0'\ncrate app 'app.rs'\n"), ("app.rs", "")]);
+    let output = msrv.configure().ok();
+    assert_contains(output.build(&format!("{host}/lint/libapp.rmeta")), " CARGO_PKG_RUST_VERSION=1.80.0 ");
 
     let lint = |names: &[&str]| {
         let output = jig_command().arg("lint").args(names).current_dir(&project.dir).output().unwrap();
