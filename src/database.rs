@@ -23,7 +23,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 29;
+const VERSION: u32 = 30;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -65,6 +65,13 @@ pub struct Database<'a> {
     pub toolchain_identity: &'a str,
     pub toolchain_release: &'a str,
     pub toolchain_install: &'a str,
+    /// What rustc answered when the project was configured, with the key of what chose and identified its toolchain,
+    /// as [`crate::rustc::Answers`] has them, by which it is configured again without asking rustc.
+    pub rustc_key: &'a str,
+    pub rustc_sysroot: &'a str,
+    pub rustc_host: &'a str,
+    pub rustc_targets: Vec<&'a str>,
+    pub rustc_verbose_version: &'a str,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -144,6 +151,19 @@ pub struct Install<'a> {
     pub program: bool,
 }
 
+impl Database<'_> {
+    /// Returns what rustc answered when the project was configured.
+    pub fn rustc(&self) -> crate::rustc::Answers {
+        crate::rustc::Answers {
+            key: self.rustc_key.into(),
+            sysroot: self.rustc_sysroot.into(),
+            host: self.rustc_host.into(),
+            targets: self.rustc_targets.iter().map(|&target| target.into()).collect(),
+            verbose_version: self.rustc_verbose_version.into(),
+        }
+    }
+}
+
 pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.write_all(MAGIC)?;
     write_u32(w, VERSION)?;
@@ -166,6 +186,11 @@ pub fn write(w: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     write_str(w, database.toolchain_identity)?;
     write_str(w, database.toolchain_release)?;
     write_str(w, database.toolchain_install)?;
+    write_str(w, database.rustc_key)?;
+    write_str(w, database.rustc_sysroot)?;
+    write_str(w, database.rustc_host)?;
+    write_strs(w, &database.rustc_targets)?;
+    write_str(w, database.rustc_verbose_version)?;
     write_u32(w, database.flychecks.len())?;
     for flycheck in &database.flychecks {
         write_str(w, flycheck.label)?;
@@ -232,6 +257,11 @@ pub fn read(bytes: &[u8]) -> std::io::Result<Database<'_>> {
         toolchain_identity: r.str()?,
         toolchain_release: r.str()?,
         toolchain_install: r.str()?,
+        rustc_key: r.str()?,
+        rustc_sysroot: r.str()?,
+        rustc_host: r.str()?,
+        rustc_targets: r.strs()?,
+        rustc_verbose_version: r.str()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -358,6 +388,11 @@ mod tests {
             toolchain_identity: "0123abcd",
             toolchain_release: "4567ef01",
             toolchain_install: "nightly-2026-11-03",
+            rustc_key: "89abcdef",
+            rustc_sysroot: "/home/user/.rustup/toolchains/nightly",
+            rustc_host: "x86_64-unknown-linux-gnu",
+            rustc_targets: vec!["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
+            rustc_verbose_version: "rustc 1.101.0-nightly\nrelease: 1.101.0-nightly",
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },

@@ -700,6 +700,23 @@ implementation of that trait, so `generate.rs` doesn't change.
        configuration runs rustc.
      - jig, rig_builder: the toolchain and root build file read from the edge's arguments, and what isn't how jig
        generates the graph left to rig.
+   - **Since: without running rustc.** Configuring asks rustc for its sysroot, host, targets and `-vV`. `.jig`
+     (version 30) records the answers, with a key of what chose the toolchain and what identifies it, and
+     `rustc::ask` reuses them while the key is the same, so that reconfiguring runs no process at all.
+     - The key covers how rustup's proxy chooses the toolchain: `RUSTUP_TOOLCHAIN`, or the toolchain given as
+       `+<toolchain>` in its place, `PATH`, `RUSTUP_HOME` and `CARGO_HOME`. It also covers the size and time of the
+       `rustc` found in `PATH`, of rustup's `settings.toml`, which has its default and overrides by directory, and of
+       each `rust-toolchain` and `rust-toolchain.toml` in the working directory or a directory that contains it. It
+       ends with the sysroot and the file the toolchain's identity is of: the channel's manifest, which rustup
+       rewrites when it updates a toolchain in place, or `bin/rustc`.
+     - When rustc is asked, it's run twice at once rather than four times in turn: once for the three `--print`s,
+       and once for `-vV`, which prints nothing after it.
+     - What triggers reconfiguring is unchanged. The key only decides whether a reconfigure that runs anyway asks
+       rustc again.
+     - Measured: a project of one crate reconfigures in 17 ms rather than 85 ms on this machine, where each run of
+       rustc took about 16 ms.
+     - Unit: answers with the current key are reused without running rustc, and the key changes with the toolchain
+       given and with the identity file as it's installed and updated.
 
 ### Phase 3: hashing and early cutoff
 
