@@ -2397,6 +2397,18 @@ mod tests {
         fn read(&self, path: &str) -> String {
             std::fs::read_to_string(self.dir.join(path)).unwrap()
         }
+        /// Record the edges of `quick` as having taken a quarter of the time `slow` took at most, as they would have
+        /// but for starting the test helper, so that `slow` comes first on the critical path, as the tests of workers
+        /// expect, however long the helper took to start when they were measured, which under Wine on CI's runners
+        /// has been longer than `slow`'s second.
+        fn quicker_than(&mut self, slow: &str, quick: &[&str]) {
+            let most = self.state.get(slow).expect("the slow edge has run").duration / 4;
+            for output in quick {
+                let mut record = self.state.get(output).expect("the quick edge has run").clone();
+                record.duration = record.duration.min(most);
+                self.state.record(record).unwrap();
+            }
+        }
         fn write(&self, path: &str, contents: &str) {
             std::fs::write(self.dir.join(path), contents).unwrap();
         }
@@ -2737,6 +2749,7 @@ mod tests {
         build.options.workers = vec![worker(&store, &["toolchain"])];
         let (report, finished) = build.build(&[]);
         assert_eq!((report.ran, report.remote), (4, 0), "{finished:?}");
+        build.quicker_than("slow", &["a.o", "b.o", "c.o"]);
         // once they are, with an empty cache, the slow edge holds the one job, which the others would wait for
         // longer than they take to send, so the worker runs them, but for the one which reads what it was not sent,
         // which fails there and runs here again
@@ -2820,6 +2833,7 @@ mod tests {
         // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
         build.ran(&[]);
+        build.quicker_than("slow", &["portable.o", "riscv.o", "gpu.o"]);
         // a worker of another toolchain of the same release, as on another host, with no tags, and no standard
         // library for the target, so that only the edge which may run on another host, and needs no tag, runs there
         let (identity, release_identity) = ("elsewhere".into(), "release".into());
@@ -2918,6 +2932,7 @@ mod tests {
         // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
         build.ran(&[]);
+        build.quicker_than("slow", &["a.o", "b.o"]);
         // with one job, which the slow edge holds, the edge which has not run, which would wait for it, as it is
         // estimated to take as long as those which have, and to send as little, goes to the worker
         build.graph = graph(true);
@@ -3332,6 +3347,7 @@ mod tests {
         // starting at once, which on macOS takes the test helper long enough to reorder them
         build.options.jobs = 1;
         build.ran(&[]);
+        build.quicker_than("slow", &["a.o", "c.o"]);
         // the edge which reads what it was not sent fails there, and runs here, so it is marked to run here
         let store = TempCache::new("marks-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
