@@ -3310,6 +3310,7 @@ mod tests {
         build.options.cache = Some(first.0.clone());
         build.options.jobs = 1;
         build.ran(&[]);
+        build.quicker_than("slow", &["c.o"]);
         // it fails on the worker at once, while the slow edge holds the job, which it then waits for
         let store = TempCache::new("own-jobs-store");
         build.options.workers = vec![worker(&store, &["toolchain"])];
