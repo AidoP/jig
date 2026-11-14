@@ -2553,9 +2553,16 @@ mod tests {
             .edge("sleep", &["a"], &[]).edge("sleep", &["b"], &[]).edge("sleep", &["c"], &[]);
         let mut build = Build::new("parallel", graph.finish(), &[]);
         build.options.jobs = 3;
+        // within 1 s and the start of each, rather than 1.2 s and theirs, as one after the other, where starting the
+        // test helper, as on Windows on Arm, is not quick
+        let started = Instant::now();
+        let status = Command::new(crate::test_helper::program()).args([crate::test_helper::FLAG, "true"]).status();
+        assert!(status.unwrap().success());
+        let starting = started.elapsed();
         let start = Instant::now();
         assert_eq!(build.ran(&[]).len(), 3);
-        assert!(start.elapsed() < Duration::from_millis(1150), "{:?}", start.elapsed());
+        let budget = Duration::from_secs(1) + 3 * starting;
+        assert!(start.elapsed() < budget, "{:?}, where starting a program takes {starting:?}", start.elapsed());
     }
 
     /// A graph of one edge, `out`, which runs a program directly.
