@@ -1925,6 +1925,28 @@ fn colour_flag() {
     assert_contains(&String::from_utf8(output.stderr).unwrap(), "`--color` is \"sometimes\"");
 }
 
+#[test]
+fn dry_run() {
+    // `-n` shows what would run, and why, without running it, as the build which brought the graph up to date left the
+    // state locked for it
+    let project = Project::new("dry-run", &[("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() {}\n")]);
+    project.configure().ok();
+    let dry_run = || {
+        let output = jig_command().args(["build", "-n"]).current_dir(&project.dir).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+        assert!(output.status.success(), "{stdout}{stderr}");
+        stdout
+    };
+    let library = format!("RUSTC {}/liba.rlib", project.host());
+    assert_contains(&dry_run(), &format!("{library}: it has no record of running"));
+    assert!(!project.dir.join("build").join(project.host()).join("liba.rlib").exists());
+    let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(dry_run(), "");
+    std::fs::write(project.dir.join("a.rs"), "pub fn g() {}\n").unwrap();
+    assert_contains(&dry_run(), &format!("{library}: input \"../a.rs\" has changed"));
+}
+
 #[cfg_attr(windows, ignore = "it hides rustc by `PATH`, which hides `env` too, which runs the server")]
 #[test]
 fn remote_cache() {
