@@ -42,7 +42,9 @@ A `crate` statement may be followed by indented attributes:
   them, named after the crate, or as `<name>@<target>` if the target is not the host target. Only crates for a target
   whose `test` is `true` can be tested, which it is by default for the host target and a builtin target which the host
   can run, as found by `can-run`. It is `false` by default, and `true` without a value, so `test {target}.test` tests a
-  crate where its tests can run
+  crate where its tests can run. For a crate declared for several targets, it can instead name the targets its tests
+  are built for, as a target or a list of them, such as `test host-target` or `test [target, host-target]`, while its
+  tests aren't built for its other targets, nor for any with `test []`
 - `tag <tag>`: a tag of the crate's test, or a list of them, by which `jig test` chooses it, such as `tag 'slow'`. A
   tag is not empty and has no whitespace. It can be repeated, adding to them
 - `doc`: document the crate with rustdoc in `<build-dir>/<target>/doc/<name>`, which `jig build doc/<name>` builds, or
@@ -74,4 +76,12 @@ crate compiler_builtins
 
 crate build_tool
     target host-target
+```
+
+A crate built for the host and for a target the host can't run, whose tests are built only for the host:
+
+```jig
+crate util 'util.rs'
+    target [host-target, 'riscv64gc-unknown-none-elf']
+    test host-target
 ```

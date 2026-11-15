@@ -9,8 +9,22 @@ use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
-use super::value::{Data, Operand, Ref, Referent};
+use super::value::{Coercion, Data, Operand, Ref, Referent};
 use super::{Project, rust};
+
+/// Which of a crate's targets its tests are built for, from its `test` attribute: all or none of them, or those named.
+enum Tested {
+    All(bool),
+    Only(Vec<String>),
+}
+impl Tested {
+    fn on(&self, target: &str) -> bool {
+        match self {
+            Self::All(tested) => *tested,
+            Self::Only(targets) => targets.iter().any(|tested| tested == target),
+        }
+    }
+}
 
 /// The targets a crate is declared for, from its `target` attribute or the property in effect.
 struct CrateTargets {
@@ -56,7 +70,7 @@ impl Project {
         }
         let mut builtin = false;
         let mut default = false;
-        let mut test = false;
+        let mut tested = Tested::All(false);
         let mut doc = false;
         let mut tags = Vec::new();
         let mut worker_tags = Vec::new();
@@ -83,9 +97,22 @@ impl Project {
                         default = value;
                     }
                 },
+                // whether its tests are built, or for which of its targets, by their names
                 "test" => {
-                    if let Some(value) = self.flag(&attribute.operand()) {
-                        test = value;
+                    let operand = attribute.operand();
+                    // a `str` in `{}` which is `true` or `false` is coerced to a `bool`, as for a flag
+                    let flag = operand.coerce == Coercion::Any && operand.data.coerce_bool().is_some();
+                    match &operand.data {
+                        Data::Str(target) if !flag => tested = Tested::Only(vec![target.clone()]),
+                        Data::List(items) if items.iter().all(|item| matches!(item, Data::Str(_))) => {
+                            tested = Tested::Only(items.iter().map(Data::coerce_string).collect());
+                        },
+                        Data::List(_) => self.invalid_operand(&operand, "bool, str or list of str", false),
+                        _ => {
+                            if let Some(value) = self.flag(&operand) {
+                                tested = Tested::All(value);
+                            }
+                        },
                     }
                 },
                 "doc" => {
@@ -221,6 +248,7 @@ impl Project {
                 continue;
             }
             let target = target.clone();
+            let test = tested.on(&target);
             // whether the tests can run depends on the target, which may be declared later, so they are registered by
             // `check`
             match self.crates.entry((name.clone(), target.clone())) {
