@@ -15,7 +15,8 @@
 //!   which makes a file executable, on Unix.
 //! - `true`, `test-dir <dir>`, which fails unless the directory is there, and `cwd-is <dir>`, unless it is the
 //!   working directory, as the system gives it.
-//! - `sleep <seconds>` and `sleep-for <file>`, for as many seconds as the file gives.
+//! - `sleep <seconds>` and `sleep-for <file>`, for as many seconds as the file gives, and `wait-for <path> <seconds>`,
+//!   until the path exists, failing if it doesn't within the seconds.
 //! - `exit <code> [<word> ...]` and `false`, which fail.
 //! - `restat <output> <input> ...`, which writes the inputs to the output only if they are not what it has already.
 //! - `getenv <name>`, the variable's value, or `unset`, with a newline, `env`, every variable, as `<name>=<value>`
@@ -174,6 +175,15 @@ fn step(words: &[String]) -> Result<(), Failure> {
         },
         ["sleep", seconds] => sleep(seconds)?,
         ["sleep-for", file] => sleep(String::from_utf8_lossy(&read(file)?).trim())?,
+        ["wait-for", path, seconds] => {
+            let deadline = std::time::Instant::now() + Duration::from_secs_f64(seconds.parse().map_err(failed)?);
+            while !Path::new(path).exists() {
+                if std::time::Instant::now() > deadline {
+                    return Err((1, format!("{path} did not appear within {seconds} s")));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        },
         // what follows the code is only shown, as when the program fails
         ["exit", code, ..] => return Err((code.parse().map_err(failed)?, String::new())),
         ["false"] => return Err((1, String::new())),

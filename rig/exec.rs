@@ -2549,20 +2549,15 @@ mod tests {
 
     #[test]
     fn runs_in_parallel() {
-        let graph = graph().rule("sleep", &[("command", "sleep 0.4 && touch $out")])
-            .edge("sleep", &["a"], &[]).edge("sleep", &["b"], &[]).edge("sleep", &["c"], &[]);
+        // each edge marks that it has started, then waits for the others to have, which they have only if they run at
+        // once, whatever starting the test helper takes, as it is slow where it runs alongside the other tests on
+        // Windows on Arm, while one after the other, the first would wait for the second, which hasn't started
+        let wait = "mkdir $out.started && wait-for a.started 10 && wait-for b.started 10 && wait-for c.started 10 && touch $out";
+        let graph = graph().rule("wait", &[("command", wait)])
+            .edge("wait", &["a"], &[]).edge("wait", &["b"], &[]).edge("wait", &["c"], &[]);
         let mut build = Build::new("parallel", graph.finish(), &[]);
         build.options.jobs = 3;
-        // within 1 s and the start of each, rather than 1.2 s and theirs, as one after the other, where starting the
-        // test helper, as on Windows on Arm, is not quick
-        let started = Instant::now();
-        let status = Command::new(crate::test_helper::program()).args([crate::test_helper::FLAG, "true"]).status();
-        assert!(status.unwrap().success());
-        let starting = started.elapsed();
-        let start = Instant::now();
         assert_eq!(build.ran(&[]).len(), 3);
-        let budget = Duration::from_secs(1) + 3 * starting;
-        assert!(start.elapsed() < budget, "{:?}, where starting a program takes {starting:?}", start.elapsed());
     }
 
     /// A graph of one edge, `out`, which runs a program directly.
