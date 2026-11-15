@@ -30,6 +30,8 @@ pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, 
         None => std::process::Command::new(&binary),
     };
     command.args(args);
+    // finding the shared libraries it links, as a test does
+    crate::platform::add_library_path(&mut command, &project.root, &database.library_path);
     // with the toolchain the project is configured with, as its tests are
     crate::toolchain::apply(&mut command, project.toolchain.as_deref());
     // a build which the program starts may need the state, which is closed first

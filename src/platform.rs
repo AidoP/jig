@@ -182,6 +182,28 @@ pub fn create_program(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+/// The variable of the paths the platform's loader finds shared libraries in, beside those it is built with.
+pub const LIBRARY_PATH: &str = if cfg!(windows) {
+    "PATH"
+} else if cfg!(target_vendor = "apple") {
+    "DYLD_LIBRARY_PATH"
+} else {
+    "LD_LIBRARY_PATH"
+};
+
+/// Give a command the directories of shared libraries, relative to `root`, before those of [`LIBRARY_PATH`] it
+/// inherits, so that a program which links them finds them as it runs.
+pub fn add_library_path(command: &mut std::process::Command, root: &std::path::Path, dirs: &[&str]) {
+    if dirs.is_empty() {
+        return;
+    }
+    let inherited = std::env::var_os(LIBRARY_PATH).unwrap_or_default();
+    let paths = dirs.iter().map(|dir| root.join(dir)).chain(std::env::split_paths(&inherited));
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env(LIBRARY_PATH, joined);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

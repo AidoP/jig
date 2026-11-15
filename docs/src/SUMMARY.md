@@ -33,6 +33,7 @@
   - [Codegen options and profiles](language/codegen.md)
   - [Custom commands](language/custom-commands.md)
   - [Static libraries](language/static-libraries.md)
+  - [Shared libraries](language/shared-libraries.md)
   - [Executables](language/executables.md)
   - [Generated files](language/files.md)
   - [Targets](language/targets.md)

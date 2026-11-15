@@ -28,6 +28,7 @@
   was logged: the one which gave a property its value, or declared it, or which declared a crate, custom command,
   target or test, whose name may be computed, such as `location {target}` in a `@for`
 - `static-library <name>`: a [static library](static-libraries.md) of C and assembly, which crates link by `use`
+- `shared-library <name>`: a [shared library](shared-libraries.md) of C and assembly, which crates link by `use`
 - `executable <name>`: an [executable](executables.md) of C and assembly, linked by the C compiler
 - `custom <name>`: a [custom command](custom-commands.md), which rig runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`

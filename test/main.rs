@@ -2545,6 +2545,10 @@ fn main() {
     assert_contains(&stderr, "RUSTC");
 }
 
+/// What the objects of a static library for the host are compiled with, as they may be linked into a shared library,
+/// but on Windows.
+const PIC: &str = if cfg!(windows) { "" } else { "-fPIC " };
+
 /// The flags jig gives the archiver, which on Apple's hosts are without `D`, which their `ar` does not take.
 const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
 
@@ -2597,14 +2601,14 @@ crate app 'app.rs'
 {uart}/src-uart.c.o
     description = CC {uart}/src-uart.c.o
     inputs = ../src/uart.c
-    command = {helper} cc -Os -Wall -std=c11 -fno-builtin -I../src -I../include -DFAST=true -DUART_BASE=4096 -DDEBUG \
+    command = {helper} cc {PIC}-Os -Wall -std=c11 -fno-builtin -I../src -I../include -DFAST=true -DUART_BASE=4096 -DDEBUG \
 {remap} -MD -MF {uart}/src-uart.c.o.d -c ../src/uart.c -o {uart}/src-uart.c.o
     depfile = {uart}/src-uart.c.o.d\n"));
     assert_contains(output.build(&format!("{uart}/src-uart.c.o")), "\n    hashed = true");
     assert_contains(output.build(&format!("{uart}/src-boot.S.o")), &format!("\
     description = AS {uart}/src-boot.S.o
     inputs = ../src/boot.S
-    command = {helper} cc -Os -x86 -fno-builtin "));
+    command = {helper} cc {PIC}-Os -x86 -fno-builtin "));
     // the objects are archived, by the archive's own edge
     assert_contains(output.build(&format!("{uart}/libuart.a")), &format!("\
 {uart}/libuart.a
@@ -2691,14 +2695,14 @@ fn static_library_tools_from_the_environment() {
     let env = [("CC", "ccache gcc"), ("AR", "llvm-ar"), ("CFLAGS", "-O1  -Wextra"), ("ASFLAGS", "-g")];
     let output = project.configure_with(&env).ok();
     let object = |output: &Output, source: &str| output.build(&format!("{host}/c/uart/{source}.o")).to_string();
-    assert_contains(&object(&output, "uart.c"), "command = ccache gcc -O1 -Wextra -ffile-prefix-map");
-    assert_contains(&object(&output, "boot.s"), "command = ccache gcc -g -ffile-prefix-map");
+    assert_contains(&object(&output, "uart.c"), &format!("command = ccache gcc {PIC}-O1 -Wextra -ffile-prefix-map"));
+    assert_contains(&object(&output, "boot.s"), &format!("command = ccache gcc {PIC}-g -ffile-prefix-map"));
     assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = llvm-ar {ARCHIVE_FLAGS} "));
     let output = project.configure_with(&[("CC", "gcc"), (variable.as_str(), "clang")]).ok();
-    assert_contains(&object(&output, "uart.c"), "command = clang -ffile-prefix-map");
+    assert_contains(&object(&output, "uart.c"), &format!("command = clang {PIC}-ffile-prefix-map"));
     // without them, `cc` and `ar`
     let output = project.configure_with(&[]).ok();
-    assert_contains(&object(&output, "uart.c"), "command = cc -ffile-prefix-map");
+    assert_contains(&object(&output, "uart.c"), &format!("command = cc {PIC}-ffile-prefix-map"));
     assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = ar {ARCHIVE_FLAGS} "));
     // the properties replace the variables, and those for a target replace the others
     std::fs::write(project.dir.join("Jig"), format!("\
@@ -2706,7 +2710,7 @@ set c/compiler 'gcc-14'
 set c/{host}/compiler ['clang', '--target=x']
 static-library uart\n    source 'uart.c'\n")).unwrap();
     let output = project.configure_with(&[("CC", "gcc")]).ok();
-    assert_contains(&object(&output, "uart.c"), "command = clang --target=x -ffile-prefix-map");
+    assert_contains(&object(&output, "uart.c"), &format!("command = clang --target=x {PIC}-ffile-prefix-map"));
 }
 
 #[test]
@@ -2747,7 +2751,7 @@ static-library m
         .stderr("missing required attribute \"source\"")
         .stderr("static library \"loop\" uses itself, through the libraries it uses")
         .stderr("static library \"other\" uses itself")
-        .stderr("no static library \"absent\" for target")
+        .stderr("no static or shared library \"absent\" for target")
         .stderr("unknown static-library attribute \"colour\"")
         .stderr("no C compiler or archiver for target \"riscv64gc-unknown-none-elf\"")
         .stderr("`c/riscv64gc-unknown-none-elf/compiler`")
@@ -2997,6 +3001,158 @@ int main(int argc, char **argv) {
     assert!(installed.status.success(), "{}", String::from_utf8_lossy(&installed.stderr));
     let ran = Command::new(project.dir.join("stage/bin/hello")).output().unwrap();
     assert_eq!(String::from_utf8(ran.stdout).unwrap(), "hello 42 ");
+}
+
+#[test]
+fn shared_library_graph() {
+    // a shared library is compiled to be independent of where it is loaded, and linked by the compiler, with the static
+    // libraries it uses in it, so that what uses it links it alone, as itself
+    let project = Project::new("shared-library-graph", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+static-library base
+    source 'base.c'
+shared-library codec
+    source 'codec.c'
+    use base
+    rpath '$ORIGIN'
+executable tool
+    source 'tool.c'
+    use codec
+crate wrap 'wrap.rs'
+    use codec
+crate app 'app.rs'
+    crate-type 'bin'
+    use wrap
+log note '{{codec.rpath}} {{codec.install-dir}} {{codec.install-mode}}'
+")),
+        ("base.c", ""),
+        ("codec.c", ""),
+        ("tool.c", ""),
+        ("wrap.rs", ""),
+        ("app.rs", "fn main() {}\n"),
+    ]);
+    let output = project.configure().ok();
+    output.stderr("note: $ORIGIN lib 493");
+    let host = project.host();
+    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    let codec = format!("{host}/c/codec");
+    let (file, linked, names) = if host.contains("-windows") {
+        ("codec.dll".to_string(), "libcodec.dll.a".to_string(), format!("-Wl,--out-implib,{codec}/libcodec.dll.a"))
+    } else if host.contains("-apple-") {
+        ("libcodec.dylib".into(), "libcodec.dylib".into(), "-install_name @rpath/libcodec.dylib".into())
+    } else {
+        ("libcodec.so".into(), "libcodec.so".into(), "-Wl,-soname,libcodec.so".into())
+    };
+    let shared = if host.contains("-apple-") { "-dynamiclib" } else { "-shared" };
+    let fpic = if host.contains("-windows") { "" } else { "-fPIC " };
+    assert_contains(output.build(&format!("{codec}/codec.c.o")), &format!("command = {helper} cc {fpic}-ffile-prefix-map"));
+    assert_contains(output.build(&format!("{codec}/{file}")), &format!("\
+    description = LINK {codec}/{file}
+    inputs = {codec}/codec.c.o {host}/c/base/libbase.a
+    command = {helper} cc {shared} {codec}/codec.c.o {host}/c/base/libbase.a '-Wl,-rpath,$ORIGIN' {names} -o {codec}/{file}
+"));
+    // an executable links it by its path, without the static library in it
+    let tool = output.build(&format!("{host}/tool{EXE}"));
+    assert_contains(tool, &format!("command = {helper} cc {host}/c/tool/tool.c.o {codec}/{linked} -o {host}/tool{EXE}"));
+    // a crate records it, as rustc links it by its name, from its directory
+    assert_contains(output.build(&format!("{host}/libwrap.rlib")), " -l dylib=codec ");
+    let app = output.build(&format!("{host}/app{EXE}"));
+    assert_contains(app, &format!(" -L native={codec} "));
+    assert_contains(app, &format!("{codec}/{linked}"));
+    assert!(!app.contains("libbase"), "{app}");
+}
+
+#[test]
+fn shared_library_errors() {
+    let project = Project::new("shared-library-errors", &[("Jig", "\
+set c/compiler 'cc'
+shared-library codec
+    source 'codec.c'
+    whole-archive
+    use missing
+shared-library bare
+    source 'bare.c'
+    target 'riscv64gc-unknown-none-elf'
+")]);
+    project
+        .configure()
+        .failed()
+        .stderr("unknown shared-library attribute \"whole-archive\"")
+        .stderr("no static or shared library \"missing\" for target")
+        .stderr("[unknown-library]")
+        .stderr("target \"riscv64gc-unknown-none-elf\" has no operating system, which loads shared libraries")
+        .stderr("[shared-library-target]");
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_library_runs() {
+    // a shared library, with a static library in it, which an executable and a crate link, and which `jig run` and
+    // `jig test` find as they run them, and an installed program finds by its rpath, with the host's C compiler
+    if Command::new("cc").arg("--version").output().is_err() || Command::new("ar").arg("--version").output().is_err() {
+        return;
+    }
+    let origin = if cfg!(target_vendor = "apple") { "@loader_path" } else { "$ORIGIN" };
+    let project = Project::new("shared-library-runs", &[
+        ("Jig", &format!("\
+static-library base
+    source 'base.c'
+shared-library codec
+    source 'codec.c'
+    public-include 'include'
+    use base
+    install
+executable tool
+    source 'tool.c'
+    use codec
+    rpath '{origin}/../lib'
+    install
+crate wrap 'wrap.rs'
+    use codec
+    test
+crate app 'app.rs'
+    crate-type 'bin'
+    use wrap
+")),
+        ("include/codec.h", "int encode(int);\n"),
+        ("base.c", "int base(void) { return 40; }\n"),
+        ("codec.c", "#include \"codec.h\"\nint base(void);\nint encode(int x) { return base() + x; }\n"),
+        ("tool.c", "#include <stdio.h>\n#include \"codec.h\"\nint main(void) { printf(\"%d\", encode(2)); return 0; }\n"),
+        ("wrap.rs", "\
+unsafe extern \"C\" {
+    fn encode(x: i32) -> i32;
+}
+pub fn two() -> i32 {
+    unsafe { encode(2) }
+}
+#[test]
+fn encodes() {
+    assert_eq!(two(), 42);
+}
+"),
+        ("app.rs", "fn main() {\n    print!(\"{}\", wrap::two());\n}\n"),
+    ]);
+    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")];
+    project.configure_with(&env).ok();
+    let run = |name: &str| {
+        let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(run("tool"), "42");
+    assert_eq!(run("app"), "42");
+    let test = jig_command().arg("test").envs(env).current_dir(&project.dir).output().unwrap();
+    assert!(test.status.success(), "{}", String::from_utf8_lossy(&test.stdout));
+    // installed, the program finds the library beside its directory, by its rpath, without the search path
+    let installed = jig_command().args(["install", "stage"]).envs(env).current_dir(&project.dir).output().unwrap();
+    assert!(installed.status.success(), "{}", String::from_utf8_lossy(&installed.stderr));
+    let mut command = Command::new(project.dir.join("stage/bin/tool"));
+    for variable in ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"] {
+        command.env_remove(variable);
+    }
+    let ran = command.output().unwrap();
+    assert!(ran.status.success(), "{}", String::from_utf8_lossy(&ran.stderr));
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "42");
 }
 
 #[test]

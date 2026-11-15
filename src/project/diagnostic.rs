@@ -48,6 +48,7 @@ impl core::fmt::Display for Severity {
 pub enum Item {
     Crate,
     StaticLibrary,
+    SharedLibrary,
     Executable,
     CustomCommand,
     File,
@@ -61,6 +62,7 @@ impl Item {
         match self {
             Self::Crate => "crate",
             Self::StaticLibrary => "static-library",
+            Self::SharedLibrary => "shared-library",
             Self::Executable => "executable",
             Self::CustomCommand => "custom",
             Self::File => "file",
@@ -75,6 +77,7 @@ impl core::fmt::Display for Item {
         f.write_str(match self {
             Self::Crate => "crate",
             Self::StaticLibrary => "static library",
+            Self::SharedLibrary => "shared library",
             Self::Executable => "executable",
             Self::CustomCommand => "custom command",
             Self::File => "file",
@@ -183,10 +186,11 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "unknown-source-language",
     "no-c-compiler",
     "redeclare-library",
-    "unknown-static-library",
+    "unknown-library",
     "library-cycle",
     "name-shadows-system",
     "use-executable",
+    "shared-library-target",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -313,8 +317,12 @@ pub enum Message {
         previous: Span,
     },
     /// A static library which another uses, and which is not declared for its target.
-    UnknownStaticLibrary {
+    UnknownLibrary {
         name: String,
+        target: String,
+    },
+    /// A shared library for a target without an operating system.
+    SharedLibraryTarget {
         target: String,
     },
     /// An executable which a crate, static library or executable uses.
@@ -552,7 +560,11 @@ impl core::fmt::Display for Message {
             Self::RedeclareLibrary { item, name, target, .. } => {
                 write!(f, "redeclaration of {name:?} for target {target:?}, as {} {item}", if matches!(item, Item::Executable) { "an" } else { "a" })
             },
-            Self::UnknownStaticLibrary { name, target } => write!(f, "no static library {name:?} for target {target:?}"),
+            Self::UnknownLibrary { name, target } => write!(f, "no static or shared library {name:?} for target {target:?}"),
+            Self::SharedLibraryTarget { target } => write!(
+                f,
+                "target {target:?} has no operating system, which loads shared libraries, so it can have only static ones",
+            ),
             Self::UseExecutable { name, .. } => {
                 write!(f, "{name:?} is an executable, which cannot be used, as only a static library can")
             },
@@ -738,7 +750,8 @@ impl Message {
             Self::UnknownSourceLanguage(_) => "unknown-source-language",
             Self::NoCCompiler { .. } => "no-c-compiler",
             Self::RedeclareLibrary { .. } => "redeclare-library",
-            Self::UnknownStaticLibrary { .. } => "unknown-static-library",
+            Self::UnknownLibrary { .. } => "unknown-library",
+            Self::SharedLibraryTarget { .. } => "shared-library-target",
             Self::UseExecutable { .. } => "use-executable",
             Self::LibraryCycle(_) => "library-cycle",
             Self::NameShadowsSystem(_) => "name-shadows-system",

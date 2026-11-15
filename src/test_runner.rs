@@ -96,7 +96,7 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
                     let failed = || (false, "the test could not be sent\n".into(), Duration::ZERO);
                     sent.join().unwrap_or_else(|_| failed())
                 },
-                None => run_here(test, &project, style.pretty),
+                None => run_here(test, &project, &database.library_path, style.pretty),
             };
             let result = if passed { style.ok("ok") } else { style.failed("FAILED") };
             println!("{result} {}", style.dim(&format!("({})", duration(elapsed))));
@@ -125,10 +125,13 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     if failures.is_empty() { Ok(()) } else { Err(Error::TestsFailed(failures.len())) }
 }
 
-/// Run a test here, from the project root, with its output captured, returning whether it passed, what it printed,
+/// Run a test here, from the project root, with the directories of the project's shared libraries in the platform's
+/// search path of them, with its output captured, returning whether it passed, what it printed,
 /// with how it ended first if it failed, and how long it took.
-fn run_here(test: &database::Test, project: &Configured, pretty: bool) -> (bool, String, Duration) {
+fn run_here(test: &database::Test, project: &Configured, library_path: &[&str], pretty: bool) -> (bool, String, Duration) {
     let mut command = std::process::Command::new(test.command[0]);
+    // finding the shared libraries of C which what it runs links
+    crate::platform::add_library_path(&mut command, &project.root, library_path);
     // with the toolchain the project is configured with, as its commands are
     crate::toolchain::apply(&mut command, project.toolchain.as_deref());
     let test_started = Instant::now();
