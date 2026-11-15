@@ -50,3 +50,12 @@
   it can be given another level. As clippy has many lints, each is declared when it is first used, while `clippy/` is
   a dict of those which are set
 - `diagnostic/<id>`: the severity of a diagnostic, as [diagnostics](diagnostics.md) describes
+
+```
+set build-dir 'out'
+set test-tags ['slow']
+
+log note 'rustc {rustc/version} for {host-target}, building in {build-dir}'
+@if !contains(rustc/targets, 'riscv64gc-unknown-none-elf')
+log warning 'this rustc cannot build for RISC-V'
+```

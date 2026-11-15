@@ -10,12 +10,16 @@
   - [jig run](commands/run.md)
   - [jig test](commands/test.md)
   - [jig lint](commands/lint.md)
+  - [jig check and rust-analyzer](commands/check.md)
   - [jig install](commands/install.md)
   - [jig graph](commands/graph.md)
 - [Toolchains](toolchains.md)
+- [Files jig keeps](files.md)
+- [When a project is configured again](reconfiguring.md)
 - [Caching](caching.md)
 - [Workers](workers.md)
 - [The user's configuration](user-configuration.md)
+- [Windows](windows.md)
 
 # The configuration language
 

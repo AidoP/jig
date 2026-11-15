@@ -63,7 +63,7 @@ GitHub Pages from main, and then makes what it says current, complete and checke
      phase, and how ninja was replaced, are in git's history.
    - Check: `mdbook build docs` succeeds without warnings, each relative link and heading the site's pages link to
      exists, and nothing links to the removed pages.
-3. **What is missing.**
+3. **Done: what is missing.**
    - A page of the files jig keeps: `.jig` at the project root, with what configuring asked rustc, and in the build
      directory, `graph`, `graph.d`, `.rig` and the cache, with when each is written and read again.
    - When a project is configured again: what `graph.d` lists, the variables it read, the toolchain's identity, and
@@ -72,6 +72,12 @@ GitHub Pages from main, and then makes what it says current, complete and checke
      one, and what that means for `jig +<toolchain> lint` and the commands after it.
    - Windows: what differs, from programs and paths to the proxy wrappers.
    - A pass over the reference, for the same name for the same thing throughout, and examples where a page has none.
+   - **Since:** new pages of the files jig keeps, when a project is configured again, `jig check` and rust-analyzer,
+     which weren't described, and Windows, and toolchains rewritten for how a toolchain stays with the project. The
+     commands page lists every command, with the global options in the order jig takes them. `jig build`, `jig run`,
+     `jig test`, `jig lint`, `declare` and the builtin properties have examples, each configured and run before it
+     was added. Writing them found that `jig build -n` failed on every project, as the state it opened was locked by
+     the same process, which is fixed, with an integration test.
 4. **Checked docs.**
    - A test configures each example of a `Jig` file in the book, marked as a `jig` code block, so that an example
      which no longer configures fails.

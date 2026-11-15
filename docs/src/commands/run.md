@@ -7,3 +7,9 @@ does. What is built is reported on stderr, so that stdout is the program's. A cr
 crate with it, or only one of those is `default`, and without a name, the project's only binary crate is run, or the
 only one which is `default`. Arguments which start with `-` follow `--`,
 as in `jig run -- --help`.
+
+```
+./build/bootstrap/jig run
+./build/bootstrap/jig run app -- --help
+./build/bootstrap/jig run kernel@riscv64gc-unknown-none-elf
+```
