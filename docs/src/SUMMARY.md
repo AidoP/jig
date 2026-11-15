@@ -52,3 +52,5 @@
 # Developing jig
 
 - [Developing jig](developing.md)
+- [Plans](plans.md)
+  - [C and assembly](plans/c-and-assembly.md)
