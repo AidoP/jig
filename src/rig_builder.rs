@@ -403,11 +403,13 @@ impl Rig<'_> {
         Ok(true)
     }
     /// Show what would run, and why, without running it.
+    ///
+    /// The graph and state are those bringing the graph up to date left loaded, which hold the state's lock, as a
+    /// build takes them, and the variables are stamped as the build would give them.
     fn dry_run(&self, targets: &[&str], output: Output) -> Result<bool, Error> {
         use std::io::Write;
-        let graph = self.graph()?;
-        let state = self.state()?;
-        let mut stamps = rig::Stamps::new(&graph, self.build_dir);
+        let (graph, state, _) = self.loaded()?;
+        let mut stamps = rig::Stamps::new(&graph, self.build_dir).with_env(&self.env());
         let plan = match rig::plan::plan(&graph, &state, &mut stamps, targets) {
             Ok(plan) => plan,
             Err(error) => {
