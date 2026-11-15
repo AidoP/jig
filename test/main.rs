@@ -3156,6 +3156,110 @@ fn encodes() {
 }
 
 #[test]
+fn compile_commands() {
+    // each source of C and assembly is in `compile_commands.json`, in the build directory, as it is compiled there, so
+    // that clangd finds its include directories and macros, and it is removed once there are none
+    let project = Project::new("compile-commands", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}static-library uart\n    source 'uart.c' 'boot.S'\n    define 'FAST'\n    include 'include'\n")),
+        ("uart.c", ""),
+        ("boot.S", ""),
+    ]);
+    project.configure().ok();
+    let host = project.host();
+    let path = project.dir.join("build/compile_commands.json");
+    let commands = rig::json::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let rig::json::Value::Array(commands) = commands else { panic!("{commands:?}") };
+    assert_eq!(commands.len(), 2);
+    let field = |index: usize, name: &str| commands[index].get(name).and_then(rig::json::Value::as_str).unwrap().to_string();
+    let build_dir = std::fs::canonicalize(project.dir.join("build")).unwrap();
+    assert_eq!(std::fs::canonicalize(field(0, "directory")).unwrap(), build_dir);
+    assert_eq!(slashed(&field(0, "file")), slashed(&project.dir.join("uart.c").display().to_string()));
+    assert_eq!(slashed(&field(1, "file")), slashed(&project.dir.join("boot.S").display().to_string()));
+    assert_eq!(slashed(&field(0, "output")), format!("{host}/c/uart/uart.c.o"));
+    let Some(rig::json::Value::Array(arguments)) = commands[0].get("arguments") else { panic!("{:?}", commands[0]) };
+    let arguments: Vec<&str> = arguments.iter().filter_map(rig::json::Value::as_str).collect();
+    assert_eq!(arguments[1..3], ["--rig-test-helper", "cc"]);
+    for argument in ["-I../include", "-DFAST", "-c", "../uart.c"] {
+        assert!(arguments.iter().any(|found| slashed(found) == argument), "{argument} not in {arguments:?}");
+    }
+    std::fs::write(project.dir.join("Jig"), "crate util 'util.rs'\n").unwrap();
+    project.configure().ok();
+    assert!(!path.exists());
+}
+
+/// Returns the files of the book's kernel, from the code blocks of its page: the `Jig`, `boot.S`, and the C and Rust
+/// sources, each after a comment of its path.
+fn book_kernel() -> Vec<(String, String)> {
+    // from the project root, where the tests run, as the book's examples are read
+    let page = std::fs::read_to_string("docs/src/kernel.md").unwrap();
+    let mut files = Vec::new();
+    let mut blocks = page.split("\n```").skip(1).step_by(2);
+    for block in &mut blocks {
+        let (language, body) = block.split_once('\n').unwrap_or((block, ""));
+        match language {
+            "jig" => files.push(("Jig".to_string(), format!("{body}\n"))),
+            "" if body.contains("_start:") => files.push(("boot.S".to_string(), format!("{body}\n"))),
+            "c" | "rust" => {
+                let mut current: Option<(String, String)> = None;
+                for line in body.lines() {
+                    if let Some(path) = line.strip_prefix("// ").filter(|path| path.contains('/') && !path.contains(' ')) {
+                        files.extend(current.take());
+                        current = Some((path.to_string(), String::new()));
+                    } else if let Some((_, contents)) = &mut current {
+                        contents.push_str(line);
+                        contents.push('\n');
+                    }
+                }
+                files.extend(current);
+            },
+            _ => (),
+        }
+    }
+    files
+}
+
+#[test]
+fn book_kernel_boots() {
+    // the kernel in the book is built, by clang and llvm-ar, and booted by QEMU, where they and the target's standard
+    // library are installed
+    let has = |program: &str| Command::new(program).arg("--version").output().is_ok_and(|output| output.status.success());
+    let libdir = Command::new("rustc").args(["--print", "target-libdir", "--target", "riscv64gc-unknown-none-elf"]).output();
+    let has_std = libdir.is_ok_and(|output| {
+        let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
+    });
+    if !(has("clang") && has("llvm-ar") && has("qemu-system-riscv64") && has_std) {
+        return;
+    }
+    let files = book_kernel();
+    assert_eq!(files.len(), 6, "{:?}", files.iter().map(|(path, _)| path).collect::<Vec<_>>());
+    let files: Vec<(&str, &str)> = files.iter().map(|(path, contents)| (path.as_str(), contents.as_str())).collect();
+    let project = Project::new("book-kernel", &files);
+    project.configure_with(&[("JIG_CACHE", "off")]).ok().stderr("[name-shadows-system]");
+    let mut child = jig_command()
+        .args(["run", "kernel"])
+        .env("JIG_CACHE", "off")
+        .current_dir(&project.dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // a kernel which does not stop QEMU is stopped
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > std::time::Duration::from_mins(2) {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello from Rust, through C\n", "{stderr}");
+}
+
+#[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
     // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs

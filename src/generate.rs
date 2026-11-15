@@ -456,8 +456,10 @@ fn write_graph(
         }
     }
 
+    // what clangd reads to compile each source of C as it is built, as rust-analyzer reads `.rust-project.json`
+    let mut compile_commands = Vec::new();
     for library in project.natives() {
-        let archive = native_edges(&mut graph, project, library, at)?;
+        let archive = native_edges(&mut graph, project, library, at, &mut compile_commands)?;
         everything.push(archive.clone());
         if library.default {
             defaults.push(archive);
@@ -780,7 +782,40 @@ fn write_graph(
     let defaults = if defaults.is_empty() { everything } else { defaults };
     graph.default(&as_paths(&defaults));
 
+    write_compile_commands(&at.build_dir, &compile_commands)?;
     graph.finish()
+}
+
+/// Returns the entry of `compile_commands.json` of a source, as clangd reads it: the build directory, which the compiler
+/// runs in, absolute, the source, absolute, and the program and its arguments, with the object.
+fn compile_command(at: &Rebase, program: &str, args: &[String], source: &Path, object: &Path) -> String {
+    use crate::rust_analyzer::string;
+    let directory = at.build_dir.display().to_string();
+    let file = normalize(&at.build_dir.join(source)).display().to_string();
+    let arguments: Vec<String> = std::iter::once(program).chain(args.iter().map(String::as_str)).map(string).collect();
+    format!(
+        "  {{\"directory\": {}, \"file\": {}, \"output\": {}, \"arguments\": [{}]}}",
+        string(&directory),
+        string(&file),
+        string(&object.display().to_string()),
+        arguments.join(", "),
+    )
+}
+
+/// Write `compile_commands.json` to the build directory, where clangd finds it for a build directory named `build`, of
+/// the sources of C and assembly, or remove one which is there if there are none, as they have been removed.
+fn write_compile_commands(build_dir: &Path, commands: &[String]) -> Result<(), Error> {
+    let path = build_dir.join("compile_commands.json");
+    if commands.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    let contents = format!("[\n{}\n]\n", commands.join(",\n"));
+    // only when it changes, as clangd reloads it when it is written
+    if std::fs::read_to_string(&path).is_ok_and(|written| written == contents) {
+        return Ok(());
+    }
+    std::fs::write(&path, contents).map_err(|error| Error::Write(path, error))
 }
 
 /// The arguments of rustc which give a crate the static libraries it uses, and the archives it depends on.
@@ -844,6 +879,7 @@ fn native_edges(
     project: &Project,
     library: &crate::project::Native,
     at: &Rebase,
+    compile_commands: &mut Vec<String>,
 ) -> Result<PathBuf, Error> {
     // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
     let mut include: Vec<PathBuf> = library.include.iter().chain(&library.public_include).cloned().collect();
@@ -887,6 +923,7 @@ fn native_edges(
         args.extend(remap.iter().cloned());
         args.extend(["-MD".to_string(), "-MF".to_string(), depfile.display().to_string()]);
         args.extend(["-c".to_string(), input.display().to_string(), "-o".to_string(), object.display().to_string()]);
+        compile_commands.push(compile_command(at, &program(&library.compiler), &args, &input, &object));
         graph.edge(Edge {
             description: describe(action, &object),
             outputs: &[&object],

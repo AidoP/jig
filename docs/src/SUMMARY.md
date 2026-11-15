@@ -20,6 +20,7 @@
 - [Workers](workers.md)
 - [The user's configuration](user-configuration.md)
 - [Windows](windows.md)
+- [A kernel in Rust, C and assembly](kernel.md)
 
 # The configuration language
 

@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phases 0 to 4 are done**; the others are not started.
+linking them into Rust crates. **Phases 0 to 5 are done**; phase 6 is what may come later.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -344,13 +344,21 @@ static library in it, and attributes. `shared_library_errors` checks the diagnos
 where `cc` and `ar` are installed, runs a C program and a Rust program which link one with `jig run`, a crate's tests
 which call it with `jig test`, and the installed program by its rpath, without the search path.
 
-### Phase 5: editors and kernels
+### Phase 5: editors and kernels (done)
 
-- Write `compile_commands.json` to the build directory beside `.rust-project.json`, with each source's command and
-  `"directory"` the build directory, so clangd finds the includes and defines of each file.
-- `jig check` compiles C with `-fsyntax-only`, so that C's errors are shown where Rust's are.
-- An example in the book, beside the kernel's linker script, of a RISC-V kernel with a boot stub in `.S`, a linker
-  script from a `file` statement, its own `static-library c`, and a runner of QEMU, built with clang.
+- **`compile_commands.json`** is written to the build directory, with each source's command, its absolute source, its
+  object, and the build directory, absolute, as its `directory`, where clangd looks for it, in `build`, without being
+  told. It is written only when it changes, and removed when the project has no C. `compile_commands` tests its
+  entries and its removal. It was not checked with clangd itself, which could not be installed where it was built.
+- **`jig check` does not compile C: dropped.** `jig check` is rust-analyzer's flycheck, whose diagnostics are rustc's
+  JSON, which rust-analyzer shows for Rust files, so C's would need converting into rustc's form to be shown at all,
+  and clangd already shows them, from `compile_commands.json`, as the file is edited, while a build shows the
+  compiler's.
+- **The kernel** is [a page of its own](../kernel.md), rather than a part of the page of `file`, as it is long: a
+  RISC-V kernel with its entry point in `boot.S`, as a `whole-archive` static library, its own `static-library c`,
+  a linker script from a `file` statement, clang and llvm-ar as the target's compiler and archiver, and QEMU as its
+  runner, which `jig run kernel` boots. `book_kernel_boots` builds it from the code blocks of its page and boots it,
+  where clang, llvm-ar, QEMU and the target's standard library are installed, so that the page stays true.
 
 ### Phase 6: later
 
