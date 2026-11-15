@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::project::rust::{Crate, Kind};
-use crate::project::{CustomKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
+use crate::project::{CustomKind, NativeKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
 use crate::rig_graph::{self, Edge, RigGraph};
 use crate::{Error, database, rust_analyzer, target_spec};
 
@@ -456,8 +456,8 @@ fn write_graph(
         }
     }
 
-    for library in project.static_libraries() {
-        let archive = static_library_edges(&mut graph, project, library, at)?;
+    for library in project.natives() {
+        let archive = native_edges(&mut graph, project, library, at)?;
         everything.push(archive.clone());
         if library.default {
             defaults.push(archive);
@@ -814,7 +814,7 @@ impl NativeLinks {
             args
         };
         // the libraries of each library crate which is linked, in the order of the crates, each once
-        let mut libraries: Vec<&crate::project::StaticLibrary> = own.clone();
+        let mut libraries: Vec<&crate::project::Native> = own.clone();
         for dep in transitive_libraries(crates, units, index) {
             let d = &crates[dep];
             for library in project.transitive_static_libraries(&d.uses, &d.target) {
@@ -832,12 +832,12 @@ impl NativeLinks {
     }
 }
 
-/// Add the edges which compile each source of a static library to an object, and archive them, returning the archive,
-/// rebased.
-fn static_library_edges(
+/// Add the edges which compile each source of a static library or an executable to an object, and archive or link
+/// them, returning the archive or the executable, rebased.
+fn native_edges(
     graph: &mut RigGraph,
     project: &Project,
-    library: &crate::project::StaticLibrary,
+    library: &crate::project::Native,
     at: &Rebase,
 ) -> Result<PathBuf, Error> {
     // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
@@ -896,6 +896,9 @@ fn static_library_edges(
         })?;
         objects.push(object);
     }
+    if library.kind == NativeKind::Executable {
+        return link_executable(graph, project, library, &objects, at);
+    }
     let archive = at.path(&library.output());
     let mut args: Vec<String> = library.archiver[1..].to_vec();
     args.extend([ARCHIVE_FLAGS.to_string(), archive.display().to_string()]);
@@ -910,6 +913,63 @@ fn static_library_edges(
         ..Default::default()
     })?;
     Ok(archive)
+}
+
+/// Add the edge which links an executable from its objects and the static libraries it uses, with the compiler,
+/// returning the executable, rebased.
+///
+/// Each library is given by the path of its archive, after the objects and before those it uses, as a linker which
+/// reads each archive once needs, and one which is `whole-archive` is wrapped in the flags which link every object of
+/// it, which are `-force_load` on Apple's targets and `--whole-archive` on others. The link flags follow them, then the
+/// linker script, of the executable or else of its target.
+fn link_executable(
+    graph: &mut RigGraph,
+    project: &Project,
+    executable: &crate::project::Native,
+    objects: &[PathBuf],
+    at: &Rebase,
+) -> Result<PathBuf, Error> {
+    let output = at.path(&executable.output());
+    let libraries = project.transitive_static_libraries(&executable.uses, &executable.target);
+    let archives: Vec<PathBuf> = libraries.iter().map(|library| at.path(&library.output())).collect();
+    let link_script = executable.link_script.as_ref().or_else(|| project.target(&executable.target)?.link_script.as_ref());
+    let link_script = link_script.map(|path| at.path(path));
+    let mut args: Vec<String> = executable.compiler[1..].to_vec();
+    args.extend(objects.iter().map(|object| object.display().to_string()));
+    let apple = executable.target.contains("-apple-");
+    for (library, archive) in libraries.iter().zip(&archives) {
+        let archive = archive.display().to_string();
+        match () {
+            () if !library.whole_archive => args.push(archive),
+            () if apple => args.push(format!("-Wl,-force_load,{archive}")),
+            () => args.extend(["-Wl,--whole-archive".to_string(), archive, "-Wl,--no-whole-archive".to_string()]),
+        }
+    }
+    // after what they may name, as `-l` finds only what is needed by what comes before it
+    args.extend(executable.link_flags.iter().cloned());
+    if let Some(path) = &link_script {
+        args.push(format!("-T{}", path.display()));
+    }
+    args.extend(["-o".to_string(), output.display().to_string()]);
+    let inputs: Vec<&Path> = as_paths(objects).into_iter().chain(as_paths(&archives)).chain(link_script.as_deref()).collect();
+    let program = if is_path(&executable.compiler[0]) {
+        at.path(Path::new(&executable.compiler[0])).display().to_string()
+    } else {
+        executable.compiler[0].clone()
+    };
+    graph.edge(Edge {
+        description: describe("LINK", &output),
+        outputs: &[&output],
+        inputs: &inputs,
+        after: &as_paths(&at.paths(&executable.depends)),
+        exec: program_in_build_dir(&program, args, Vec::new()),
+        hashed: true,
+        // fetched from rig's cache by the identity of the compiler, which links, as it compiled
+        cache: executable.cache.as_deref(),
+        pass_env: &executable.pass_env,
+        ..Default::default()
+    })?;
+    Ok(output)
 }
 
 /// The flags of the archiver, which creates the archive, adds the objects to it, replacing those of the same name, and
@@ -927,7 +987,7 @@ fn archive_env() -> Vec<(String, String)> {
 /// `lib<name>.a.members`, as `ar` adds to an archive which is there, so that one whose source was removed keeps no
 /// object of it.
 fn forget_stale_archives(project: &Project) -> Result<(), Error> {
-    for library in project.static_libraries() {
+    for library in project.natives().into_iter().filter(|native| native.kind == NativeKind::StaticLibrary) {
         let archive = library.output();
         let mut record = archive.clone().into_os_string();
         record.push(".members");
@@ -1039,6 +1099,14 @@ fn write_database(
         // a target as the graph has it, which is built by it
         let (path, target) = (unit.output.display().to_string(), rig_graph::path_string(&at.path(&unit.output)));
         programs.push((name, path, target, runner, unit.default));
+    }
+    // and the executables of C, as they are
+    for native in project.natives().into_iter().filter(|native| native.kind == NativeKind::Executable) {
+        let runner = project.target(&native.target).and_then(|target| target.runner);
+        let runner = runner.map(|runner| project.runners[runner].command.clone()).unwrap_or_default();
+        let output = native.output();
+        let (path, target) = (output.display().to_string(), rig_graph::path_string(&at.path(&output)));
+        programs.push((native.short_name(&host), path, target, runner, native.default));
     }
 
     let test_tags = project.test_tags();

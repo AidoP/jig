@@ -204,6 +204,19 @@ impl Project {
                 });
             }
         }
+        for native in self.natives() {
+            if native.kind == super::NativeKind::Executable && native.install.enabled {
+                installed.push(Installed {
+                    path: native.output(),
+                    dir: native.install.dir.clone(),
+                    mode: native.install.mode,
+                    program: true,
+                    item: Item::Executable,
+                    name: format!("{}/{}", native.target, native.name),
+                    span: native.name_span,
+                });
+            }
+        }
         for custom in &self.customs {
             let CustomKind::Command { outputs, install, .. } = &custom.kind else {
                 continue;

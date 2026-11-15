@@ -27,7 +27,7 @@ pub use diagnostic::{Diagnostic, Message, Severity, severity_override};
 pub(crate) use diagnostic::DIAGNOSTIC_IDS;
 pub use generated::GeneratedFile;
 pub use install::Installed;
-pub use native::{Language, StaticLibrary};
+pub use native::{Language, Native, NativeKind};
 pub use syntax::Span;
 pub use targets::{Field, Target, TargetKind};
 pub use value::{Data, Property, Type, Value};
@@ -102,7 +102,7 @@ pub struct Project {
     /// Crates keyed by name and target, as a crate may be compiled for several targets.
     pub crates: HashMap<(String, String), rust::Crate>,
     /// Static libraries of C and assembly, keyed by name and target, as crates are.
-    pub static_libraries: HashMap<(String, String), StaticLibrary>,
+    pub natives: HashMap<(String, String), Native>,
     /// Custom build commands, in the order they were declared.
     pub customs: Vec<Custom>,
     /// The indices in `customs` of the custom commands, by name.
@@ -144,7 +144,7 @@ impl Project {
             targets: targets.into_iter().map(Target::builtin).collect(),
             targets_listed: false,
             crates: HashMap::new(),
-            static_libraries: HashMap::new(),
+            natives: HashMap::new(),
             customs: Vec::new(),
             commands_idx: HashMap::new(),
             generated: Vec::new(),
@@ -456,6 +456,11 @@ impl Project {
                     d = Some(host_crate);
                 }
                 if d.is_none() && self.static_library(&used.name, &c.target).is_some() {
+                    continue;
+                }
+                if d.is_none() && self.native(&used.name, &c.target).is_some() {
+                    let diagnostic = self.unknown_static_library(&used.name, &c.target, used.span);
+                    self.diagnostics.push(diagnostic);
                     continue;
                 }
                 let message = match d {
