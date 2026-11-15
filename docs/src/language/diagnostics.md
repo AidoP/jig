@@ -140,7 +140,8 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 
 | Identifier | Reported for |
 |---|---|
-| `unknown-source-language` | a source whose extension is not `.c`, `.s`, `.S` or `.sx` |
+| `unknown-source-language` | a source whose extension is not `.c`, `.cc`, `.cpp`, `.cxx`, `.s`, `.S` or `.sx` |
+| `no-cxx-compiler` | a library or executable with C++ sources for a target which has no C++ compiler |
 | `no-c-compiler` | a static library for a target which has no C compiler or archiver, or an executable without a compiler |
 | `redeclare-library` | a library or executable declared again for a target, or with the name of a crate or of another for it |
 | `unknown-library` | a static or shared library which a crate, library or executable uses, and which isn't declared for its target |

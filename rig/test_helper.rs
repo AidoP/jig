@@ -23,9 +23,9 @@
 //! - `zeros <count>`, as many zero bytes, `size <file>`, its size in bytes, with a newline, `first <file>`, the first
 //!   character of each of its lines, and `strip <text> <prefix>`, the text without the prefix.
 //! - `run <program> <argument> ...`, which runs a program, whose stdout is the step's, and fails as it does.
-//! - `cc <argument> ...`, which stands in for a C compiler: it writes the object of `-o`, which is its arguments on a
-//!   line, then the source of `-c`, with each line `#include "<header>"` replaced by the header, found beside the source
-//!   or in a directory of `-I`, and the depfile of `-MF`, listing the source and the headers.
+//! - `cc <argument> ...`, or `cxx`, which stands in for a C or C++ compiler: it writes the object of `-o`, which is
+//!   its arguments on a line, then the source of `-c`, with each line `#include "<header>"` replaced by the header,
+//!   found beside the source or in a directory of `-I`, and the depfile of `-MF`, listing the source and the headers.
 //! - `ar <flags> <archive> <member> ...`, which stands in for an archiver: it adds each member to the archive, by its
 //!   file name, replacing one of the same name, as `ar r` does, each as `--- <name> <size>` on a line, then its contents.
 //! - `spawn <seconds> <file>`, which runs the helper again to sleep, writing its process ID to the file, and waits for
@@ -219,7 +219,7 @@ fn step(words: &[String]) -> Result<(), Failure> {
             io(std::fs::write(file, child.id().to_string()))?;
             io(child.wait().map(|_| ()))?;
         },
-        ["cc", args @ ..] => compile(args)?,
+        ["cc" | "cxx", args @ ..] => compile(args)?,
         ["ar", _, archive, members @ ..] => archive_members(archive, members)?,
         #[cfg(unix)]
         ["tokens"] => out = tokens()?,

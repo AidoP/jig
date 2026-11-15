@@ -362,8 +362,14 @@ which call it with `jig test`, and the installed program by its rpath, without t
 
 ### Phase 6: later
 
-- **C++**, by `.cc`, `.cpp` and `.cxx`, with `c++/compiler` from `CXX`, `c++/flags` from `CXXFLAGS`, and the C++
-  runtime linked by a `link-cxx-runtime` attribute.
+- **C++ (done)**, by `.cc`, `.cpp` and `.cxx`, compiled by `cxx/compiler`, from `CXX` or `c++`, with `cxx/flags`,
+  from `CXXFLAGS`, as `c++/` is not a name a property can have. Everything is still linked by the C compiler, and
+  what links a static library with C++ sources, or has them, links the C++ runtime, `cxx/runtime`, `stdc++`, or `c++`
+  on Apple's and the BSDs' targets, rather than a `link-cxx-runtime` attribute, so a C program or a crate which uses
+  a library of C++ needs no C++ compiler. A shared library links its own. `CXX` is read only for what has C++
+  sources, and the C++ compiler is identified in the cache as the C compiler is. `cxx_graph`, `cxx_errors` and
+  `cxx_runs` test it, the last with the host's `c++`. A `use` of a list of libraries which are declared, as
+  `use [sum, twice]`, failed, as their names were references to them, and is fixed.
 - **Rust for C**, a `staticlib` and `cdylib` crate type, which an executable or a library uses.
 - **An archiver in jig.** Archives are a simple format, so jig could write them itself, as `jig archive`, and not need
   an archiver at all. The GNU and BSD formats need a symbol table, which needs the symbols of ELF, Mach-O and COFF

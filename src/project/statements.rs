@@ -547,16 +547,18 @@ impl Project {
     fn crate_names(&mut self, operand: &Operand) -> Option<Vec<(String, Span)>> {
         let span = operand.span;
         let Data::List(items) = &operand.data else {
-            self.invalid_operand(operand, "list of crate names", false);
+            self.invalid_operand(operand, "list of names of crates or libraries", false);
             return None;
         };
         let mut names = Vec::new();
         for item in items {
             match item {
                 Data::Str(name) => names.push((name.clone(), span)),
-                Data::Ref(Ref { referent: Referent::Crate { name, .. }, .. }) => names.push((name.clone(), span)),
+                Data::Ref(Ref { referent: Referent::Crate { name, .. } | Referent::Native { name, .. }, .. }) => {
+                    names.push((name.clone(), span));
+                },
                 _ => {
-                    self.invalid_operand(operand, "list of crate names", false);
+                    self.invalid_operand(operand, "list of names of crates or libraries", false);
                     return None;
                 },
             }

@@ -191,6 +191,7 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "name-shadows-system",
     "use-executable",
     "shared-library-target",
+    "no-cxx-compiler",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -307,6 +308,10 @@ pub enum Message {
     UnknownSourceLanguage(PathBuf),
     /// A static library for a target with no C compiler or archiver.
     NoCCompiler {
+        target: String,
+    },
+    /// A library or executable with C++ sources for a target with no C++ compiler.
+    NoCxxCompiler {
         target: String,
     },
     /// A static library declared again for a target, or with the name of a crate for it.
@@ -549,9 +554,12 @@ impl core::fmt::Display for Message {
             Self::UnknownCrateAttribute { name, .. } => write!(f, "unknown crate attribute {name:?}"),
             Self::UnknownSourceLanguage(path) => write!(
                 f,
-                "the language of {path:?} is not known by its extension, which is `.c` for C, or `.s`, `.S` or `.sx` for \
-                 assembly",
+                "the language of {path:?} is not known by its extension, which is `.c` for C, `.cc`, `.cpp` or `.cxx` for \
+                 C++, or `.s`, `.S` or `.sx` for assembly",
             ),
+            Self::NoCxxCompiler { target } => {
+                write!(f, "no C++ compiler for target {target:?}, which `cxx/{target}/compiler` gives")
+            },
             Self::NoCCompiler { target } => write!(
                 f,
                 "no C compiler or archiver for target {target:?}, which `c/{target}/compiler` and \
@@ -749,6 +757,7 @@ impl Message {
             Self::UnknownCrateAttribute { .. } => "unknown-crate-attribute",
             Self::UnknownSourceLanguage(_) => "unknown-source-language",
             Self::NoCCompiler { .. } => "no-c-compiler",
+            Self::NoCxxCompiler { .. } => "no-cxx-compiler",
             Self::RedeclareLibrary { .. } => "redeclare-library",
             Self::UnknownLibrary { .. } => "unknown-library",
             Self::SharedLibraryTarget { .. } => "shared-library-target",

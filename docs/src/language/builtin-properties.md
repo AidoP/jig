@@ -48,7 +48,11 @@
   arguments of the compiler for C, for assembly and for linking, of the [static libraries](static-libraries.md) and
   [executables](executables.md) declared while they are set, which are `CC`, `AR`, `CFLAGS`, `ASFLAGS` and `LDFLAGS`
   by default, and `cc` and `ar` for the host target without them
-- `c/<target>/<name>` and `asm/<target>/<name>`: those of the static libraries for a target, which replace the others
+- `cxx/compiler`, `cxx/flags` and `cxx/runtime`: the C++ compiler, its arguments for C++, which are `CXX` and
+  `CXXFLAGS` by default, and `c++` for the host target without it, and the library of the C++ runtime, as
+  [static libraries](static-libraries.md#compilers-and-flags) describes
+- `c/<target>/<name>`, `cxx/<target>/<name>` and `asm/<target>/<name>`: those of the static libraries for a target,
+  which replace the others
 - `clippy/<lint>`: the level of a clippy lint for the crates declared while it is set, which `jig lint` lints them with:
   `'allow'`, `'warn'`, `'force-warn'`, `'deny'` or `'forbid'`, such as `set clippy/needless_return 'deny'`, where
   `-` can be written for `_`. A group, such as `clippy/pedantic`, is given before the single lints, so that a lint in

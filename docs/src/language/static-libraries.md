@@ -7,7 +7,8 @@ compiler, archived, and linked into the crates which `use` it. It is followed by
 
 - `source <path> ...`: the sources, as expressions separated by spaces, each a path or a list of them, relative to the
   file, or a reference to a custom command which generates one. The language of each is found by its extension: `.c` is
-  C, `.S` and `.sx` are assembly which the C preprocessor reads first, and `.s` is assembly. It can be repeated, adding
+  C, `.cc`, `.cpp` and `.cxx` are C++, `.S` and `.sx` are assembly which the C preprocessor reads first, and `.s` is
+  assembly. It can be repeated, adding
   to them, and is required
 - `target <string>`: the target, or a list of them, to declare the library for each, as for a crate, the `target`
   property by default
@@ -59,9 +60,11 @@ path of the source, as
 ```
 
 where `-fPIC` is given for a target with an operating system, but Windows, so that a shared library can link the
-library, as Rust's libraries are compiled for such a target, and `<derived>` is `-O<level>` from `codegen/opt-level`, and `-g` from a `codegen/debuginfo` which is not 0, as they
-are set where the library is declared, so that a [profile](codegen.md) reaches C too, and `<flags>` is `c/flags` for C,
-and `asm/flags` for assembly, which come after them, so they can replace them. The compiler writes a depfile, so a
+library, as Rust's libraries are compiled for such a target, and `<derived>` is `-O<level>` from `codegen/opt-level`,
+and `-g` from a `codegen/debuginfo` which is not 0, as they are set where the library is declared, so that a
+[profile](codegen.md) reaches C too, and `<flags>` is `c/flags` for C, `cxx/flags` for C++ and `asm/flags` for
+assembly, which come after them, so they can replace them. C++ is compiled by the C++ compiler, `cxx/compiler`, and
+the rest by the C compiler. The compiler writes a depfile, so a
 source is compiled again when a header it includes changes, and the paths it writes, in debug information and
 `__FILE__`, are made relative to the project root by `-ffile-prefix-map`, as rustc's are. The objects are stamped by
 their contents, so a header which is touched but not changed, or changed only in a comment, archives nothing again.
@@ -99,13 +102,17 @@ libraries for that target, and is declared when it is first used, as a codegen o
 | `c/archiver` | the archiver, as the compiler | `AR`, or `ar` |
 | `c/flags` | the arguments of the compiler for C sources | `CFLAGS` |
 | `asm/flags` | the arguments of the compiler for assembly sources | `ASFLAGS` |
+| `cxx/compiler` | the C++ compiler, as the C compiler | `CXX`, or `c++` |
+| `cxx/flags` | the arguments of the C++ compiler for C++ sources | `CXXFLAGS` |
+| `cxx/runtime` | the library of the C++ runtime, which what links a static library of C++ links | `c++` on Apple's and the BSDs' targets, `stdc++` on others |
 
 Where neither is set, the property is given by the environment variable for the target, as the cc crate reads it,
 `<variable>_<target>` with each character of the target which is not a letter or digit as `_`, such as
 `CC_aarch64_unknown_linux_musl`, and for the host target alone, then by the variable itself, split at whitespace, and
 then by `cc` or `ar`. So another target has no compiler unless one is set, which is the error `no-c-compiler`, as there
 is no single right compiler for a target such as `riscv64gc-unknown-none-elf`. The variables are read only for the
-libraries which need them, and the project is configured again when one which was read changes, as with `env`. A
+libraries which need them, and those of C++ only for those with C++ sources, which are the error `no-cxx-compiler`
+without a C++ compiler, and the project is configured again when one which was read changes, as with `env`. A
 compiler which is a path, containing a `/`, is relative to the project root.
 
 <!-- jig-test
@@ -133,6 +140,8 @@ A crate which uses a library is given it as rustc takes a native library, so tha
   itself, and `-L native=<dir>` for the directory of each library which it, or a library crate it links, uses, through
   each other too, and depends on their archives.
 - A library which `whole-archive` is given with `+whole-archive`.
+- What links a static library with C++ sources is given the C++ runtime, `-l dylib=<cxx/runtime>`, after the
+  libraries, as rustc's linker, the C compiler, does not link it, as the C++ compiler would.
 
 rustc places a crate's native libraries after the crate in the link, so Rust calls C, and C calls a Rust function,
 such as one with `#[unsafe(no_mangle)]`, of the crate which uses it. Checks, lints and documentation do not link, so
