@@ -1,3 +1,4 @@
 # Plans
 
-The plans by which large changes to jig were made, kept as they were written, and the plans of those which are under way.
+The plans of large changes to jig which are under way. A plan is removed once it is done, as what it made is
+described in the rest of the book.
