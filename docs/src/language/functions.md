@@ -68,6 +68,7 @@ set prefix try(env('CROSS_COMPILE'), '')
   its output would change otherwise, so it is impure, as described below
 
 <!-- jig-test
+files: arch/riscv/Jig
 declare default-board
     default 'virt'
 declare board
