@@ -36,7 +36,12 @@
   it, as [`jig test`](../commands/test.md) describes. Its inputs and dependencies are built with `jig build test/<name>`, or those of every test with
   `jig build test`
 
-```
+<!-- jig-test
+files: local.jig
+declare uart-base
+    default 0x1000_0000
+-->
+```jig
 set rust-version '1.95.0'
 use msrv
 
@@ -65,7 +70,12 @@ Where a string or path is needed, a reference is the path of the crate's output,
 outputs, separated by spaces. These are relative to the project root, and are not resolved again relative to the file
 which refers to them.
 
-```
+<!-- jig-test
+crate kernel 'kernel.rs'
+    target 'riscv64gc-unknown-none-elf'
+    crate-type 'bin'
+-->
+```jig
 custom image
     input riscv64gc-unknown-none-elf/kernel
     output 'kernel.bin'
@@ -79,7 +89,12 @@ a name can be computed with an expression in `{}`, as long as the whole name is 
 `.`, as some targets do, such as `thumbv8m.main-none-eabihf`, which is referred to as
 `{'thumbv8m.main-none-eabihf'}/core`, as a `.` written in a name takes an attribute, while crate names cannot.
 
-```
+<!-- jig-test
+declare arch
+    default 'x86_64'
+declare heap-x86_64
+-->
+```jig
 crate compiler_builtins
 set {'heap-{arch}'} 0x1000
 set heap-{arch} 0x1000
@@ -92,7 +107,7 @@ set, `diagnostic/` the severities which are overridden, and `<target>/` the crat
 `6 / 2`, division has spaces around it. A namespace must have a property declared in it, or be a target, so that a
 misspelt one is an error rather than empty.
 
-```
+```jig
 log note keys({host-target}/)
 @if get(codegen/, 'opt-level', 0) == 3
 log note 'optimised'
@@ -102,7 +117,7 @@ log note 'optimised'
 A line starting with `#` is a comment. Indented by 4 spaces, a comment can be among the attributes of a statement, to
 comment out one of them.
 
-```
+```jig
 crate app
     # use util
     default

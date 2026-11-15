@@ -2,6 +2,8 @@ use std::{io::IsTerminal, path::{Path, PathBuf}};
 
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod book;
 mod cache;
 mod config;
 mod check;

@@ -36,7 +36,7 @@ Functions are called with their arguments in `()`, separated by `, `:
   `ignore-pre-release: true`, pre-releases are ignored, so that a version is compared by its numbers alone, as a
   nightly version of rustc has the features of its release
 
-```
+```jig
 @if !semver-compatible(rustc/version, '1.95', ignore-pre-release: true)
 log error 'Rust 1.95 or later is needed'
 ```
@@ -50,7 +50,10 @@ log error 'Rust 1.95 or later is needed'
 - `try(expression, default)`: the value of the expression, or the default if evaluating it fails. Its errors are reported
   as warnings instead, except that an impure call is still an error, as evaluating it did not fail
 
-```
+<!-- jig-test
+declare prefix
+-->
+```jig
 set prefix try(env('CROSS_COMPILE'), '')
 ```
 
@@ -64,7 +67,12 @@ set prefix try(env('CROSS_COMPILE'), '')
   if the program exits unsuccessfully. The build is reconfigured when a program given as a path changes, but not when
   its output would change otherwise, so it is impure, as described below
 
-```
+<!-- jig-test
+declare default-board
+    default 'virt'
+declare board
+-->
+```jig
 set board select(board, default-board)
 @if starts-with(target, 'riscv')
 use 'arch/riscv'

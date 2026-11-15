@@ -14,7 +14,7 @@ What differs from Unix:
 - **Line endings.** jig reads `Jig` files with LF line endings only. Git for Windows checks text files out with CRLF by
   default, so a repository should have them checked out with LF, by `.gitattributes`, as jig's own does:
 
-  ```
+  ```text
   * text=auto eol=lf
   ```
 

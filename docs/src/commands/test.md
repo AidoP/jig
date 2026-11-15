@@ -9,7 +9,7 @@ test has is an error.
 
 A crate's tests are a test named after it, with its `tag`, and a `test` statement declares one of a command:
 
-```
+```jig
 crate app 'app.rs'
     crate-type 'bin'
     test

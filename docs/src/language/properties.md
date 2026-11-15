@@ -10,7 +10,7 @@ A `declare` statement may be followed by indented attributes:
 - `read-only`: the property can only be assigned once, by a single `set` before the declaration, which replaces its
   default, or otherwise by its default or a single `set` after the declaration
 
-```
+```jig
 declare uart-base
     type 'unsigned'
     default 0x1000_0000

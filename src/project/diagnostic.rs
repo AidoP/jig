@@ -87,7 +87,7 @@ pub struct Diagnostic {
 
 /// The identifiers of the diagnostics, as given by [`Message::id`], which each have a `diagnostic/<id>` property to
 /// override their severity. Those attached to the diagnostic before them follow its severity instead.
-const DIAGNOSTIC_IDS: &[&str] = &[
+pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "user",
     "unknown-severity",
     "unknown-statement",

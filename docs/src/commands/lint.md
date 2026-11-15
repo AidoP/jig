@@ -7,7 +7,7 @@ even if another fails, and the diagnostics of each are shown, even if nothing ne
 fails if a lint is an error, such as one which is denied, and with `-D` or `--deny-warnings`, if there is a warning,
 which is found in what was saved, so the lints are not run again, as `jig lint -D` is in CI.
 
-```
+```jig
 set clippy/pedantic 'warn'
 set clippy/needless_return 'deny'
 

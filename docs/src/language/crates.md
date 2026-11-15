@@ -60,7 +60,11 @@ A `crate` statement may be followed by indented attributes:
   and operations, `+`, `-` or `=`, with the permissions `r`, `w`, `x`, `X`, `s` and `t`, or those of `u`, `g` or `o`,
   such as `'u+s'` or `'go-w'`. There is no umask, so `'+x'` is `'a+x'`
 
-```
+<!-- jig-test
+declare rust-src
+    default '{rustc/sysroot}/lib/rustlib/src/rust'
+-->
+```jig
 crate core '{rust-src}/library/core/src/lib.rs'
     builtin
 

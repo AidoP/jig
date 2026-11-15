@@ -32,7 +32,7 @@ crate's own attribute replaces both. They are declared when they are first used,
 by a `target` statement, which may come after they are set. `codegen/<target>/` is a dict of those which are set for
 the target, which are also in `codegen/`, by `<target>/<option>`.
 
-```
+```jig
 set codegen/opt-level 's'
 set codegen/debug-assertions true
 set codegen/{host-target}/opt-level 3
@@ -51,7 +51,7 @@ The builtin profiles set the codegen options which are usually wanted together, 
 - `profile/debug`: `opt-level` 0, `debuginfo` 2, `debug-assertions` and `overflow-checks` on, and `lto` `'off'`,
   `codegen-units` 256, `strip` `'none'` and `panic` `'unwind'`, so that it undoes the release profile
 
-```
+```jig
 use profile/release
 set codegen/debuginfo 1
 crate app 'main.rs'

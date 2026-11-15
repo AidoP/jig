@@ -8,10 +8,10 @@ a project can read what it sets, and set it again. Paths in it are relative to i
 it, so it is configured again when it changes, or once it is created. `jig cache` and `jig serve`, which have no
 project, process it alone, where the builtin properties of the toolchain are empty if rustc cannot be run.
 
-```
+```jig
 # ~/.config/jig/config
 set cache/remote 'ssh://cache.example'
 set cache/size '20G'
-@if env('CI') == 'true'
+@if try(env('CI'), '') == 'true'
 set cache/push true
 ```

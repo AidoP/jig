@@ -7,7 +7,12 @@ line or a comment between them, but several meta-statements can apply to the sam
   must be a `bool`, or coerced to one with `{}`. Once a statement is skipped, the conditions of later meta-statements
   are not evaluated
 
-```
+<!-- jig-test
+files: dtb/Jig
+declare device-tree
+    default 'true'
+-->
+```jig
 @if {device-tree}
 @if target == 'riscv64gc-unknown-none-elf'
 use 'dtb'
@@ -19,7 +24,11 @@ use 'dtb'
   it. `@else` must be the first meta-statement of its statement
 - `@else-if <expression>`: the same as `@else` followed by `@if <expression>`
 
-```
+<!-- jig-test
+declare level
+    default 2
+-->
+```jig
 @if level == 1
 log note 'one'
 @else-if level == 2
@@ -32,7 +41,11 @@ log note 'many'
   are expressions separated by spaces, where each item of a list is a value. For each, the property `<name>` has the
   value, within the file and until the end of the statement. Without any values, the statement is skipped
 
-```
+<!-- jig-test
+declare targets
+    default [host-target]
+-->
+```jig
 @for target in targets
 @if target != host-target
 crate kernel 'kernel.rs'
@@ -43,7 +56,11 @@ crate kernel 'kernel.rs'
   statements are processed or skipped together, and repeated together by `@for`. The chained statement can have its
   own meta-statements, which apply to it and the rest of the chain
 
-```
+<!-- jig-test
+declare total
+    default 0
+-->
+```jig
 @for a in 1 2
 set total (total + a)
 @then
@@ -55,7 +72,7 @@ log note 'added {a}, the total is {total}'
   it. Unlike `@for`, the property is set everywhere, including in files used by the statements. As with `set`, it can
   be declared later, which checks the value. Conditions after it continue the chain of those before it, or start one
 
-```
+```jig
 @with target as 'riscv64gc-unknown-none-elf'
 crate kernel 'kernel.rs'
 @then

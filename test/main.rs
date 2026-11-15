@@ -1925,6 +1925,71 @@ fn colour_flag() {
     assert_contains(&String::from_utf8(output.stderr).unwrap(), "`--color` is \"sometimes\"");
 }
 
+/// The examples of `Jig` files in the book's pages, in `docs/src`: each code block marked `jig`, with its page, its
+/// line and its text. A comment directly before it, `<!-- jig-test ... -->`, which the book doesn't show, gives what an
+/// example which is part of a configuration needs: a line `files: <path> ...` of the files it uses, and the statements
+/// which come before it, such as the declarations of the properties it uses.
+fn book_examples() -> Vec<(PathBuf, usize, String, Vec<String>)> {
+    let mut pages = vec![PathBuf::from("docs/src")];
+    let mut examples = Vec::new();
+    while let Some(path) = pages.pop() {
+        if path.is_dir() {
+            pages.extend(std::fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().path()));
+            continue;
+        }
+        if path.extension().is_none_or(|extension| extension != "md") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let indent = line.len() - line.trim_start().len();
+            if line.trim_start() != "```jig" {
+                continue;
+            }
+            let body = lines[index + 1..].iter().take_while(|line| line.trim_start() != "```");
+            let mut example = String::new();
+            for line in body {
+                example.push_str(line.get(indent..).unwrap_or(""));
+                example.push('\n');
+            }
+            // what it needs, from the comment before it
+            let mut files = Vec::new();
+            if index > 0 && lines[index - 1] == "-->" {
+                let start = lines[..index].iter().rposition(|line| *line == "<!-- jig-test").expect("a jig-test comment");
+                let mut preamble = String::new();
+                for line in &lines[start + 1..index - 1] {
+                    if let Some(paths) = line.strip_prefix("files: ") {
+                        files.extend(paths.split(' ').map(String::from));
+                    } else {
+                        preamble.push_str(line);
+                        preamble.push('\n');
+                    }
+                }
+                example = preamble + &example;
+            }
+            examples.push((path.clone(), index + 1, example, files));
+        }
+    }
+    examples.sort();
+    examples
+}
+
+#[test]
+fn book_examples_configure() {
+    // each example of a `Jig` file in the book configures, without errors, so that one which no longer does fails
+    let examples = book_examples();
+    assert!(examples.len() >= 20, "only {} examples in the book", examples.len());
+    for (index, (page, line, example, files)) in examples.iter().enumerate() {
+        let mut project_files = vec![("Jig", example.as_str())];
+        project_files.extend(files.iter().map(|path| (path.as_str(), "")));
+        let project = Project::new(&format!("book-{index}"), &project_files);
+        let output = project.jig_with(&[]).args(["generate", "Jig"]).output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "the example at {}:{line} fails to configure:\n{example}\n{stderr}", page.display());
+    }
+}
+
 #[test]
 fn dry_run() {
     // `-n` shows what would run, and why, without running it, as the build which brought the graph up to date left the

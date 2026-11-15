@@ -46,7 +46,7 @@ worker on another host with the same release of the toolchain builds it, such as
 Mac. What depends on the host stays on workers with the same host: a procedural macro, a crate which uses one, as
 rustc loads it, and what is linked by the host's linker, as binaries and tests are by default.
 
-```
+```jig
 # ~/.config/jig/config
 set workers ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
 ```
