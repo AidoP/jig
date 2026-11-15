@@ -2867,6 +2867,139 @@ crate app 'app.rs'
 }
 
 #[test]
+fn executable_graph() {
+    // an executable's sources are compiled as a static library's are, and linked by the compiler, with the archives of
+    // the libraries it uses, through each other, its link flags, and its target's linker script
+    let project = Project::new("executable-graph", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+set c/link-flags '-static'
+file link
+    content 'SECTIONS {{{{}}}}'
+target {{host-target}}
+    override
+    link-script link
+static-library base
+    source 'base.c'
+    whole-archive
+static-library helpers
+    source 'util.c'
+    use base
+executable tool
+    source 'main.c' 'start.s'
+    use helpers
+    link-flags ['-lm']
+    default
+log note '{{tool.link-flags}} {{tool.use}} {{tool.install-dir}}'
+")),
+        ("base.c", ""),
+        ("util.c", ""),
+        ("main.c", ""),
+        ("start.s", ""),
+    ]);
+    let output = project.configure().ok();
+    output.stderr("note: -static -lm helpers bin");
+    let host = project.host();
+    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    assert_contains(output.build(&format!("{host}/c/tool/main.c.o")), &format!("command = {helper} cc -ffile-prefix-map"));
+    assert_contains(output.build(&format!("{host}/c/tool/start.s.o")), &format!("description = AS {host}/c/tool/start.s.o"));
+    let whole = if host.contains("-apple-") {
+        format!("-Wl,-force_load,{host}/c/base/libbase.a")
+    } else {
+        format!("-Wl,--whole-archive {host}/c/base/libbase.a -Wl,--no-whole-archive")
+    };
+    assert_contains(output.build(&format!("{host}/tool{EXE}")), &format!("\
+{host}/tool{EXE}
+    description = LINK {host}/tool{EXE}
+    inputs = {host}/c/tool/main.c.o {host}/c/tool/start.s.o {host}/c/helpers/libhelpers.a {host}/c/base/libbase.a link
+    command = {helper} cc {host}/c/tool/main.c.o {host}/c/tool/start.s.o {host}/c/helpers/libhelpers.a {whole} -static -lm -Tlink \
+-o {host}/tool{EXE}
+"));
+    // it is built by default
+    assert_contains(&output.graph, &format!("\ndefault {host}/tool{EXE}\n"));
+}
+
+#[test]
+fn executable_errors() {
+    let project = Project::new("executable-errors", &[("Jig", "\
+executable tool
+    source 'tool.c'
+    whole-archive
+executable other
+    source 'other.c'
+    use tool
+static-library lib
+    source 'lib.c'
+    use tool
+crate app 'app.rs'
+    crate-type 'bin'
+    use tool
+executable app
+    source 'app.c'
+executable bare
+    source 'bare.c'
+    target 'riscv64gc-unknown-none-elf'
+")]);
+    let output = project.configure().failed();
+    output
+        .stderr("unknown executable attribute \"whole-archive\"")
+        .stderr("\"tool\" is an executable, which cannot be used, as only a static library can")
+        .stderr("[use-executable]")
+        .stderr("redeclaration of \"app\" for target")
+        .stderr("as an executable")
+        .stderr("no C compiler or archiver for target \"riscv64gc-unknown-none-elf\"");
+    assert_eq!(output.stderr.matches("[use-executable]").count(), 3, "{}", output.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn executable_runs() {
+    // a program of C, from a static library, which `jig run` runs, a test runs by its name, and `jig install` installs,
+    // with the host's C compiler and archiver
+    if Command::new("cc").arg("--version").output().is_err() || Command::new("ar").arg("--version").output().is_err() {
+        return;
+    }
+    let project = Project::new("executable-runs", &[
+        ("Jig", "\
+static-library base
+    source 'base.c'
+    public-include 'include'
+executable hello
+    source 'hello.c'
+    use base
+    define [GREETING: '\"hello\"']
+    install
+test hello
+    command hello 'from-test'
+"),
+        ("include/base.h", "int base(void);\n"),
+        ("base.c", "#include \"base.h\"\nint base(void) { return 40; }\n"),
+        ("hello.c", "\
+#include <stdio.h>
+#include \"base.h\"
+int main(int argc, char **argv) {
+    printf(\"%s %d %s\", GREETING, base() + 2, argc > 1 ? argv[1] : \"\");
+    return argc > 2 ? 3 : 0;
+}
+"),
+    ]);
+    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")];
+    project.configure_with(&env).ok();
+    let run = |args: &[&str]| {
+        let output = jig_command().arg("run").args(args).envs(env).current_dir(&project.dir).output().unwrap();
+        (output.status.code(), String::from_utf8(output.stdout).unwrap())
+    };
+    assert_eq!(run(&["hello", "--", "world"]), (Some(0), "hello 42 world".into()));
+    // exiting as it does
+    assert_eq!(run(&["hello", "a", "b"]), (Some(3), "hello 42 a".into()));
+    let test = jig_command().arg("test").envs(env).current_dir(&project.dir).output().unwrap();
+    assert!(test.status.success(), "{}", String::from_utf8_lossy(&test.stdout));
+    let installed = jig_command().args(["install", "stage"]).envs(env).current_dir(&project.dir).output().unwrap();
+    assert!(installed.status.success(), "{}", String::from_utf8_lossy(&installed.stderr));
+    let ran = Command::new(project.dir.join("stage/bin/hello")).output().unwrap();
+    assert_eq!(String::from_utf8(ran.stdout).unwrap(), "hello 42 ");
+}
+
+#[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
     // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs

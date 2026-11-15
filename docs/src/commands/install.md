@@ -5,7 +5,7 @@ target `install`, then copies each into its `install-dir` within the prefix, rep
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
 directory, and is the `install-prefix` property, relative to the project root, without one.
 
-With `--proxy`, a program, which is a binary crate or the output of a custom command with an executable `install-mode`,
+With `--proxy`, a program, which is a binary crate, an executable of C, or the output of a custom command with an executable `install-mode`,
 is installed as a wrapper which runs `jig build --proxy <prefix> <wrapper>`, then runs the program with the wrapper's
 arguments, so that it is rebuilt when it is out of date. Any other file is installed as a symbolic link to its output.
 The wrapper runs the `jig` which installed it, writing the build's output to stderr. It is a shell script on Unix,

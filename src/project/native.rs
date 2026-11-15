@@ -6,6 +6,7 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
+use super::install::Install;
 use super::rust;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
@@ -38,8 +39,27 @@ pub struct Source {
     pub language: Language,
 }
 
-/// A static library, `lib<name>.a`, of objects compiled from C and assembly, for a target.
-pub struct StaticLibrary {
+/// What is built from C and assembly, the objects of whose sources are archived or linked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NativeKind {
+    /// A static library, `lib<name>.a`, which crates and executables link.
+    StaticLibrary,
+    /// A program, linked by the C compiler.
+    Executable,
+}
+
+impl NativeKind {
+    fn item(self) -> Item {
+        match self {
+            Self::StaticLibrary => Item::StaticLibrary,
+            Self::Executable => Item::Executable,
+        }
+    }
+}
+
+/// A static library or an executable, of objects compiled from C and assembly, for a target.
+pub struct Native {
+    pub kind: NativeKind,
     pub name: String,
     pub name_span: Span,
     pub target: String,
@@ -75,12 +95,29 @@ pub struct StaticLibrary {
     pub c_flags: Vec<String>,
     /// The arguments for assembly sources, from `asm/flags`, after those derived from the codegen options.
     pub asm_flags: Vec<String>,
+    /// The arguments of the compiler as it links an executable, from `c/link-flags`, followed by its own.
+    pub link_flags: Vec<String>,
+    /// The linker script of an executable, which replaces that of its target.
+    pub link_script: Option<PathBuf>,
+    /// Where `jig install` installs an executable, if it does.
+    pub install: Install,
 }
 
-impl StaticLibrary {
-    /// The archive, `lib<name>.a`, in the library's own directory, so that the linker finds it only where it is used.
+impl Native {
+    /// The archive of a static library, `lib<name>.a`, in its own directory, so that the linker finds it only where it
+    /// is used, or the program of an executable, `<build-dir>/<target>/<name>`, as a binary crate's is.
     pub fn output(&self) -> PathBuf {
-        self.dir.join(format!("lib{}.a", self.name))
+        match self.kind {
+            NativeKind::StaticLibrary => self.dir.join(format!("lib{}.a", self.name)),
+            NativeKind::Executable => {
+                let suffix = if self.target.contains("-windows") { ".exe" } else { "" };
+                self.dir.parent().unwrap().parent().unwrap().join(format!("{}{suffix}", self.name))
+            },
+        }
+    }
+    /// The name of an executable for `jig run`, with its target if it is not the host target, as a crate's test is.
+    pub fn short_name(&self, host: &str) -> String {
+        if self.target == host { self.name.clone() } else { format!("{}@{}", self.name, self.target) }
     }
     /// The object compiled from a source, in the library's directory, named by its path, so that sources with the same
     /// name in different directories are different objects, and are different members of the archive, which are named
@@ -135,6 +172,12 @@ pub(super) const TOOLS: &[Tool] = &[
         variable: "ASFLAGS",
         fallback: None,
         info: "the arguments of the C compiler for assembly sources, `ASFLAGS` by default",
+    },
+    Tool {
+        property: "c/link-flags",
+        variable: "LDFLAGS",
+        fallback: None,
+        info: "the arguments of the C compiler as it links an executable, `LDFLAGS` by default",
     },
 ];
 
@@ -225,9 +268,10 @@ impl Project {
             data => Some(vec![data.coerce_string()]),
         }
     }
-    /// Take a `static-library` statement, with `source`, `target`, `include`, `public-include`, `define`, `flags`,
-    /// `use`, `whole-archive`, `depends`, `pass-env` and `default` attributes.
-    pub(super) fn parse_static_library(&mut self, parser: &mut Parser) {
+    /// Take a `static-library` or `executable` statement, with `source`, `target`, `include`, `public-include`,
+    /// `define`, `flags`, `use`, `depends`, `pass-env` and `default` attributes, and `whole-archive` for a static
+    /// library, or `link-flags`, `link-script` and the install attributes for an executable.
+    pub(super) fn parse_native(&mut self, parser: &mut Parser, kind: NativeKind) {
         if !self.parse_space(parser) {
             parser.skip_statement();
             return;
@@ -260,6 +304,9 @@ impl Project {
         let mut whole_archive = false;
         let mut default = false;
         let mut pass_env = Vec::new();
+        let mut link_flags = Vec::new();
+        let mut link_script = None;
+        let mut install = Install::executable();
         let mut targets: Option<(Vec<String>, Span)> = None;
         while parser.indent().is_some() {
             let Some((attribute, attribute_span)) = self.parse_ident(parser) else {
@@ -303,12 +350,37 @@ impl Project {
                     };
                     uses.extend(names.into_iter().map(|name| rust::Use { name, span }));
                 },
+                "link-flags" | "link-script" | "install" | "install-dir" | "install-mode"
+                    if kind == NativeKind::Executable =>
+                {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        continue;
+                    };
+                    match attribute {
+                        "link-flags" => link_flags.extend(self.arguments(&operand).unwrap_or_default()),
+                        "link-script" => {
+                            let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
+                            link_script = self.operand_path(operand, &base).or(link_script);
+                        },
+                        attribute => self.install_attribute(&mut install, attribute, operand),
+                    }
+                },
+                "whole-archive" if kind == NativeKind::Executable => {
+                    parser.skip_line();
+                    self.diagnostics.push(Diagnostic {
+                        span: Some(attribute_span),
+                        message: Message::UnknownAttribute { keyword: kind.item().keyword(), name: attribute.into() },
+                        severity: Severity::Error,
+                    });
+                    continue;
+                },
                 _ => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         continue;
                     };
-                    self.static_library_attribute(attribute, attribute_span, operand, &mut StaticAttributes {
+                    self.native_attribute(kind, attribute, attribute_span, operand, &mut NativeAttributes {
                         defines: &mut defines,
                         flags: &mut flags,
                         whole_archive: &mut whole_archive,
@@ -330,7 +402,7 @@ impl Project {
             });
             return;
         }
-        if SYSTEM_LIBRARIES.contains(&name.as_str()) {
+        if kind == NativeKind::StaticLibrary && SYSTEM_LIBRARIES.contains(&name.as_str()) {
             self.diagnostics.push(Diagnostic {
                 span: Some(span),
                 message: Message::NameShadowsSystem(name.clone()),
@@ -357,8 +429,11 @@ impl Project {
             for tool in TOOLS {
                 tools.push(self.tool_arguments(tool, target, span));
             }
-            let [compiler, archiver, c_flags, asm_flags] = <[_; 4]>::try_from(tools).ok().unwrap();
-            let (Some(compiler), Some(archiver)) = (compiler.filter(|c| !c.is_empty()), archiver.filter(|a| !a.is_empty())) else {
+            let [compiler, archiver, c_flags, asm_flags, c_link_flags] = <[_; 5]>::try_from(tools).ok().unwrap();
+            // an executable is linked by the compiler, so it needs no archiver
+            let archiver = if kind == NativeKind::Executable { Some(archiver.unwrap_or_default()) } else { archiver };
+            let archiver = archiver.filter(|a| !a.is_empty() || kind == NativeKind::Executable);
+            let (Some(compiler), Some(archiver)) = (compiler.filter(|c| !c.is_empty()), archiver) else {
                 self.diagnostics.push(Diagnostic {
                     span: Some(span),
                     message: Message::NoCCompiler { target: target.clone() },
@@ -368,7 +443,8 @@ impl Project {
             };
             let derived = derived_flags(&codegen[i]);
             let with_derived = |flags: Option<Vec<String>>| derived.iter().cloned().chain(flags.unwrap_or_default()).collect();
-            let library = StaticLibrary {
+            let library = Native {
+                kind,
                 name: name.clone(),
                 name_span: span,
                 target: target.clone(),
@@ -388,37 +464,40 @@ impl Project {
                 archiver,
                 c_flags: with_derived(c_flags),
                 asm_flags: with_derived(asm_flags),
+                link_flags: c_link_flags.unwrap_or_default().into_iter().chain(link_flags.iter().cloned()).collect(),
+                link_script: link_script.clone(),
+                install: install.clone(),
             };
             let key = (name.clone(), target.clone());
             if self.crates.contains_key(&key) {
                 let previous = self.crates[&key].name_span;
                 self.diagnostics.push(Diagnostic {
                     span: Some(span),
-                    message: Message::RedeclareLibrary { name: name.clone(), target: target.clone(), previous },
+                    message: Message::RedeclareLibrary { item: kind.item(), name: name.clone(), target: target.clone(), previous },
                     severity: Severity::Error,
                 });
                 continue;
             }
-            match self.static_libraries.entry(key) {
+            match self.natives.entry(key) {
                 Entry::Occupied(entry) => {
                     let previous = entry.get().name_span;
                     self.diagnostics.push(Diagnostic {
                         span: Some(span),
-                        message: Message::RedeclareLibrary { name: name.clone(), target: target.clone(), previous },
+                        message: Message::RedeclareLibrary { item: kind.item(), name: name.clone(), target: target.clone(), previous },
                         severity: Severity::Error,
                     });
                 },
                 Entry::Vacant(entry) => {
                     let output = entry.insert(library).output();
-                    let referent = Referent::StaticLibrary { name: name.clone(), target: target.clone() };
+                    let referent = Referent::Native { name: name.clone(), target: target.clone() };
                     let property = format!("{target}/{name}");
-                    self.declare_reference(property, span, Item::StaticLibrary, Ref { referent, paths: vec![output] });
+                    self.declare_reference(property, span, kind.item(), Ref { referent, paths: vec![output] });
                 },
             }
         }
     }
-    /// Take an attribute of a `static-library` statement whose value is one expression.
-    fn static_library_attribute(&mut self, attribute: &str, span: Span, operand: Operand, into: &mut StaticAttributes) {
+    /// Take an attribute of a `static-library` or `executable` statement whose value is one expression.
+    fn native_attribute(&mut self, kind: NativeKind, attribute: &str, span: Span, operand: Operand, into: &mut NativeAttributes) {
         match attribute {
             "define" => {
                 if let Some(defines) = self.defines(&operand) {
@@ -449,7 +528,7 @@ impl Project {
             },
             name => self.diagnostics.push(Diagnostic {
                 span: Some(span),
-                message: Message::UnknownAttribute { keyword: Item::StaticLibrary.keyword(), name: name.into() },
+                message: Message::UnknownAttribute { keyword: kind.item().keyword(), name: name.into() },
                 severity: Severity::Error,
             }),
         }
@@ -481,10 +560,10 @@ impl Project {
             return;
         }
         let mut identities: std::collections::HashMap<Vec<String>, Option<String>> = std::collections::HashMap::new();
-        let mut keys: Vec<_> = self.static_libraries.keys().cloned().collect();
+        let mut keys: Vec<_> = self.natives.keys().cloned().collect();
         keys.sort_unstable();
         for key in keys {
-            let compiler = self.static_libraries[&key].compiler.clone();
+            let compiler = self.natives[&key].compiler.clone();
             let identity = if let Some(identity) = identities.get(&compiler) {
                 identity.clone()
             } else {
@@ -492,7 +571,7 @@ impl Project {
                 identities.insert(compiler, identity.clone());
                 identity
             };
-            self.static_libraries.get_mut(&key).unwrap().cache = identity;
+            self.natives.get_mut(&key).unwrap().cache = identity;
         }
     }
     /// Returns what identifies a compiler, a program and its first arguments, if its program is found.
@@ -511,37 +590,46 @@ impl Project {
         key.hash(Some(&hash)).part(&version);
         Some(rig::cache::hex(&key.finish()))
     }
-    /// Returns the static libraries, ordered by name and target.
-    pub fn static_libraries(&self) -> Vec<&StaticLibrary> {
-        let mut libraries: Vec<_> = self.static_libraries.values().collect();
-        libraries.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
-        libraries
+    /// Returns the static libraries and executables, ordered by name and target.
+    pub fn natives(&self) -> Vec<&Native> {
+        let mut natives: Vec<_> = self.natives.values().collect();
+        natives.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
+        natives
     }
     /// Returns the static library for a target with a name, if one is declared.
-    pub fn static_library(&self, name: &str, target: &str) -> Option<&StaticLibrary> {
-        self.static_libraries.get(&(name.to_string(), target.to_string()))
+    pub fn static_library(&self, name: &str, target: &str) -> Option<&Native> {
+        self.native(name, target).filter(|native| native.kind == NativeKind::StaticLibrary)
+    }
+    /// Returns the static library or executable for a target with a name, if one is declared.
+    pub fn native(&self, name: &str, target: &str) -> Option<&Native> {
+        self.natives.get(&(name.to_string(), target.to_string()))
+    }
+    /// Returns the message of what a crate, static library or executable uses which is not a static library for its
+    /// target: an executable, which cannot be used, or nothing.
+    pub(super) fn unknown_static_library(&self, name: &str, target: &str, span: Span) -> Diagnostic {
+        let message = match self.native(name, target) {
+            Some(native) => Message::UseExecutable { name: name.into(), declared: native.name_span },
+            None => Message::UnknownStaticLibrary { name: name.into(), target: target.into() },
+        };
+        Diagnostic { span: Some(span), message, severity: Severity::Error }
     }
     /// Report what the static libraries and the crates use which is not a static library for their target, and
     /// libraries which use each other.
     pub(super) fn check_static_libraries(&mut self) {
-        let mut keys: Vec<_> = self.static_libraries.keys().cloned().collect();
+        let mut keys: Vec<_> = self.natives.keys().cloned().collect();
         keys.sort_unstable();
         let mut reported = Vec::new();
         for key in &keys {
-            let library = &self.static_libraries[key];
+            let library = &self.natives[key];
             for used in &library.uses {
                 if self.static_library(&used.name, &library.target).is_none() {
-                    reported.push(Diagnostic {
-                        span: Some(used.span),
-                        message: Message::UnknownStaticLibrary { name: used.name.clone(), target: library.target.clone() },
-                        severity: Severity::Error,
-                    });
+                    reported.push(self.unknown_static_library(&used.name, &library.target, used.span));
                 }
             }
         }
         // a library which reaches itself through those it uses
         for key in &keys {
-            let library = &self.static_libraries[key];
+            let library = &self.natives[key];
             let mut stack: Vec<&str> = library.uses.iter().map(|used| used.name.as_str()).collect();
             let mut seen = std::collections::HashSet::new();
             while let Some(name) = stack.pop() {
@@ -561,17 +649,17 @@ impl Project {
         self.diagnostics.extend(reported);
     }
     /// Returns the static libraries a crate or library uses directly, among its `uses`, by their names.
-    pub fn used_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a StaticLibrary> {
+    pub fn used_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a Native> {
         uses.iter().filter_map(move |used| self.static_library(&used.name, target))
     }
     /// Returns the static libraries used by these, through each other too, each once, in an order where each comes
     /// before those it uses, as a single-pass linker needs.
-    pub fn transitive_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a StaticLibrary> {
+    pub fn transitive_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
         fn visit<'a>(
             project: &'a Project,
-            library: &'a StaticLibrary,
+            library: &'a Native,
             visited: &mut std::collections::HashSet<&'a str>,
-            order: &mut Vec<&'a StaticLibrary>,
+            order: &mut Vec<&'a Native>,
         ) {
             if !visited.insert(&library.name) {
                 return;
@@ -593,7 +681,7 @@ impl Project {
 }
 
 /// The attributes of a `static-library` statement which are taken by [`Project::static_library_attribute`].
-struct StaticAttributes<'a> {
+struct NativeAttributes<'a> {
     defines: &'a mut Vec<String>,
     flags: &'a mut Vec<String>,
     whole_archive: &'a mut bool,
@@ -605,7 +693,7 @@ struct StaticAttributes<'a> {
 /// Returns the name of a library from a `use` attribute, which is its name, or a reference to it.
 fn library_name(data: &Data) -> String {
     match data {
-        Data::Ref(Ref { referent: Referent::StaticLibrary { name, .. } | Referent::Crate { name, .. }, .. }) => name.clone(),
+        Data::Ref(Ref { referent: Referent::Native { name, .. } | Referent::Crate { name, .. }, .. }) => name.clone(),
         data => data.coerce_string(),
     }
 }

@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phases 0 to 2 are done**; the others are not started.
+linking them into Rust crates. **Phases 0 to 3 are done**; the others are not started.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -291,11 +291,30 @@ checkout fetches every object, and a changed compiler configures the project aga
 host's `cc`, wrapped in a script which logs, was checked by hand to be fetched once its outputs were removed, with
 system headers in its depfile.
 
-### Phase 3: executables
+### Phase 3: executables (done)
 
-`executable`, linked by the compiler, with static libraries by `use`, `link-flags`, `link-script`, and `.exe` on
-Windows. `jig run` runs one by name, as it runs a binary crate, through the target's runner, and a `test` can name one
-as its command. Linking is cached as rustc's linking is, with the compiler's identity.
+`executable`, as [executables](../language/executables.md) describes: compiled as a static library is, and linked by
+the compiler, with the archives of the static libraries it uses by their paths, in the order a single-pass linker
+needs, `whole-archive` as `--whole-archive` or `-force_load`, `c/link-flags` from `LDFLAGS` and its own `link-flags`
+after them, its linker script or its target's, and `.exe` on Windows. `jig run` runs one by name, through its target's
+runner, a `test` or custom command runs one by the property with its name, and `jig install` installs one in `bin`.
+
+As built, it differs from the plan above in places:
+
+- **One item, two kinds.** A static library and an executable are one `Native` with a kind, sharing their attributes,
+  their compiling and the names of a target, so a static library and an executable cannot have the same name either,
+  which `redeclare-library` reports, naming which it is.
+- **Using an executable** is `use-executable`, from a crate, a library or an executable.
+- **Link flags come last**, after the objects and archives, rather than among them, as `LDFLAGS` often has `-l`, which
+  finds only what is needed by what comes before it.
+- **The link is cached** by the compiler's identity, as rustc's link is by the toolchain's and the linker's. The
+  system's libraries it links, such as libc, are not its inputs, as they are not rustc's, so an update of them alone
+  does not link again, as it does not for a crate.
+
+Tests: `executable_graph`, with the test helper as the compiler and archiver, checks the compile and link commands,
+the order of archives, `whole-archive`, the link flags, the target's linker script, attributes taken with `.`, and that
+it is built by default. `executable_errors` checks the diagnostics, and `executable_runs`, on Unix where `cc` and `ar`
+are installed, runs one with `jig run`, with its arguments and exit code, by a test, and installed by `jig install`.
 
 ### Phase 4: shared libraries
 

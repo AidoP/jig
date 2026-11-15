@@ -111,7 +111,7 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 | Identifier | Reported for |
 |---|---|
 | `unknown-crate-attribute` | an attribute which `crate` doesn't have |
-| `unknown-attribute` | an attribute which `custom`, `file`, `static-library`, `target` or `test` doesn't have |
+| `unknown-attribute` | an attribute which `custom`, `executable`, `file`, `static-library`, `target` or `test` doesn't have |
 | `repeated-attribute` | an attribute given more than once which can't be |
 | `missing-attribute` | a required attribute which isn't given, such as a custom command's `command` |
 | `unknown-attribute-of` | an attribute, after `.`, which what it is taken of doesn't have |
@@ -141,9 +141,10 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 | Identifier | Reported for |
 |---|---|
 | `unknown-source-language` | a source whose extension is not `.c`, `.s`, `.S` or `.sx` |
-| `no-c-compiler` | a static library for a target which has no C compiler or archiver |
-| `redeclare-library` | a static library declared again for a target, or with the name of a crate for it |
-| `unknown-static-library` | a static library which another uses, and which isn't declared for its target |
+| `no-c-compiler` | a static library for a target which has no C compiler or archiver, or an executable without a compiler |
+| `redeclare-library` | a static library or executable declared again for a target, or with the name of a crate or of the other for it |
+| `unknown-static-library` | a static library which a crate, library or executable uses, and which isn't declared for its target |
+| `use-executable` | an executable which a crate, library or executable uses, as only a static library can be |
 | `library-cycle` | a static library which uses itself, through the libraries it uses |
 | `name-shadows-system` | a note, of a static library named after one the standard library links, such as `c` or `m` |
 

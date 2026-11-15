@@ -10,7 +10,7 @@ use super::install::Install;
 use super::syntax::{Parser, Span};
 use super::targets::{TargetKind, target_option};
 use super::value::{Coercion, Data, Operand, Referent, Value};
-use super::{Project, rust};
+use super::{NativeKind, Project, rust};
 
 impl Project {
     /// Returns the value of a property, or of a crate by its name, or reports what is missing.
@@ -153,8 +153,8 @@ impl Project {
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, operand_span);
         }
-        if let Some(Referent::StaticLibrary { name, target }) = &referent
-            && let Some(library) = self.static_library(name, target)
+        if let Some(Referent::Native { name, target }) = &referent
+            && let Some(library) = self.native(name, target)
         {
             let names = |uses: &[rust::Use]| Data::List(uses.iter().map(|used| Data::Str(used.name.clone())).collect());
             let value = match attribute {
@@ -167,14 +167,20 @@ impl Project {
                 "flags" => AttributeValue::Set(strings(&library.flags)),
                 "use" => AttributeValue::Set(names(&library.uses)),
                 "depends" => AttributeValue::Set(paths(&library.depends)),
-                "whole-archive" => AttributeValue::Set(Data::Bool(library.whole_archive)),
                 "default" => AttributeValue::Set(Data::Bool(library.default)),
                 "compiler" => AttributeValue::Set(strings(&library.compiler)),
-                "archiver" => AttributeValue::Set(strings(&library.archiver)),
-                _ => AttributeValue::Unknown,
+                attribute if library.kind == NativeKind::StaticLibrary => match attribute {
+                    "whole-archive" => AttributeValue::Set(Data::Bool(library.whole_archive)),
+                    "archiver" => AttributeValue::Set(strings(&library.archiver)),
+                    _ => AttributeValue::Unknown,
+                },
+                "link-flags" => AttributeValue::Set(strings(&library.link_flags)),
+                "link-script" => AttributeValue::optional(library.link_script.as_ref().map(|path| Data::Str(path.display().to_string()))),
+                attribute => install_attribute(&library.install, attribute),
             };
             let name = library.name.clone();
-            return self.attribute_value(Item::StaticLibrary, &name, attribute, attribute_span, value, operand_span);
+            let item = if library.kind == NativeKind::StaticLibrary { Item::StaticLibrary } else { Item::Executable };
+            return self.attribute_value(item, &name, attribute, attribute_span, value, operand_span);
         }
         if let Some(Referent::File(name)) = &referent && let Some(file) = self.generated_file(name) {
             let value = match attribute {

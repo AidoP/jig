@@ -44,9 +44,10 @@
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
   `codegen/<option>`
-- `c/compiler`, `c/archiver`, `c/flags` and `asm/flags`: the C compiler, the archiver, and the arguments of the
-  compiler for C and for assembly, of the [static libraries](static-libraries.md) declared while they are set, which
-  are `CC`, `AR`, `CFLAGS` and `ASFLAGS` by default, and `cc` and `ar` for the host target without them
+- `c/compiler`, `c/archiver`, `c/flags`, `asm/flags` and `c/link-flags`: the C compiler, the archiver, and the
+  arguments of the compiler for C, for assembly and for linking, of the [static libraries](static-libraries.md) and
+  [executables](executables.md) declared while they are set, which are `CC`, `AR`, `CFLAGS`, `ASFLAGS` and `LDFLAGS`
+  by default, and `cc` and `ar` for the host target without them
 - `c/<target>/<name>` and `asm/<target>/<name>`: those of the static libraries for a target, which replace the others
 - `clippy/<lint>`: the level of a clippy lint for the crates declared while it is set, which `jig lint` lints them with:
   `'allow'`, `'warn'`, `'force-warn'`, `'deny'` or `'forbid'`, such as `set clippy/needless_return 'deny'`, where

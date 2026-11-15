@@ -48,6 +48,7 @@ impl core::fmt::Display for Severity {
 pub enum Item {
     Crate,
     StaticLibrary,
+    Executable,
     CustomCommand,
     File,
     Test,
@@ -60,6 +61,7 @@ impl Item {
         match self {
             Self::Crate => "crate",
             Self::StaticLibrary => "static-library",
+            Self::Executable => "executable",
             Self::CustomCommand => "custom",
             Self::File => "file",
             Self::Test => "test",
@@ -73,6 +75,7 @@ impl core::fmt::Display for Item {
         f.write_str(match self {
             Self::Crate => "crate",
             Self::StaticLibrary => "static library",
+            Self::Executable => "executable",
             Self::CustomCommand => "custom command",
             Self::File => "file",
             Self::Test => "test",
@@ -183,6 +186,7 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "unknown-static-library",
     "library-cycle",
     "name-shadows-system",
+    "use-executable",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -303,6 +307,7 @@ pub enum Message {
     },
     /// A static library declared again for a target, or with the name of a crate for it.
     RedeclareLibrary {
+        item: Item,
         name: String,
         target: String,
         previous: Span,
@@ -311,6 +316,11 @@ pub enum Message {
     UnknownStaticLibrary {
         name: String,
         target: String,
+    },
+    /// An executable which a crate, static library or executable uses.
+    UseExecutable {
+        name: String,
+        declared: Span,
     },
     /// A static library which uses itself, through others.
     LibraryCycle(String),
@@ -539,10 +549,13 @@ impl core::fmt::Display for Message {
                 "no C compiler or archiver for target {target:?}, which `c/{target}/compiler` and \
                  `c/{target}/archiver` give",
             ),
-            Self::RedeclareLibrary { name, target, .. } => {
-                write!(f, "redeclaration of {name:?} for target {target:?}, as a static library")
+            Self::RedeclareLibrary { item, name, target, .. } => {
+                write!(f, "redeclaration of {name:?} for target {target:?}, as {} {item}", if matches!(item, Item::Executable) { "an" } else { "a" })
             },
             Self::UnknownStaticLibrary { name, target } => write!(f, "no static library {name:?} for target {target:?}"),
+            Self::UseExecutable { name, .. } => {
+                write!(f, "{name:?} is an executable, which cannot be used, as only a static library can")
+            },
             Self::LibraryCycle(name) => write!(f, "static library {name:?} uses itself, through the libraries it uses"),
             Self::NameShadowsSystem(name) => write!(
                 f,
@@ -726,6 +739,7 @@ impl Message {
             Self::NoCCompiler { .. } => "no-c-compiler",
             Self::RedeclareLibrary { .. } => "redeclare-library",
             Self::UnknownStaticLibrary { .. } => "unknown-static-library",
+            Self::UseExecutable { .. } => "use-executable",
             Self::LibraryCycle(_) => "library-cycle",
             Self::NameShadowsSystem(_) => "name-shadows-system",
             Self::UnknownAttribute { .. } => "unknown-attribute",
@@ -906,6 +920,7 @@ impl Project {
                 }
             },
             Message::UseBinary { declared, .. }
+            | Message::UseExecutable { declared, .. }
             | Message::UseWithTarget { declared: Some(declared) }
             | Message::OverlappingOutput { declared, .. }
             | Message::InstallConflict { declared, .. } => {
