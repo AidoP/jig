@@ -568,6 +568,11 @@ impl Project {
         // the path of a program which is a reference, which is already resolved
         let mut program_path = None;
         for argument in arguments {
+            // a name computed in `{}` names a crate or custom command, as in a command
+            let argument = match argument {
+                Argument::Positional(operand) => Argument::Positional(self.computed_reference(operand)),
+                named @ Argument::Named { .. } => named,
+            };
             if command_line.is_empty() && let Argument::Positional(operand) = &argument
                 && let Some(reference) = leading_reference(&operand.data)
             {

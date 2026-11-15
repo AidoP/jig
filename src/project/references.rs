@@ -89,6 +89,28 @@ impl Project {
         let target = self.value("target", file)?.data.coerce_string();
         self.value(&format!("{target}/{name}"), file)
     }
+    /// Returns an operand as what it names, where a path or a program is taken, if it is a name computed in `{}`, as
+    /// `{name}`, or a list of them, which names a crate, custom command, generated file or test, as a statement's name
+    /// computed in `{}` does, rather than as a string. A string which isn't in `{}`, or which names nothing else, is a
+    /// string, as before.
+    pub(super) fn computed_reference(&self, operand: Operand) -> Operand {
+        if operand.coerce != Coercion::Any {
+            return operand;
+        }
+        let file = operand.span.file;
+        let resolve = |item: &Data| match item {
+            Data::Str(name) => match self.referenced_value(name, file) {
+                Some(Value { data: data @ Data::Ref(_), .. }) => data.clone(),
+                _ => item.clone(),
+            },
+            _ => item.clone(),
+        };
+        let data = match &operand.data {
+            Data::List(items) => Data::List(items.iter().map(resolve).collect()),
+            item => resolve(item),
+        };
+        Operand { data, ..operand }
+    }
     /// Take the name of an attribute after a `.`, which is at the parser.
     fn parse_attribute_access<'a>(&mut self, parser: &mut Parser<'a>) -> Option<(&'a str, Span)> {
         parser.expect('.');

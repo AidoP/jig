@@ -4807,6 +4807,47 @@ test app
 }
 
 #[test]
+fn computed_references() {
+    // a name computed in `{}` names a crate where a path or a program is taken, as a statement's name does, while a
+    // string, or a property's value without `{}`, is a program found in `PATH`
+    let project = Project::new("computed-references", &[("Jig", "\
+declare which
+    default 'boot'
+@for name in ['boot']
+crate {name} '{name}.rs'
+    crate-type 'bin'
+@then
+test {name}
+    command {name} 'by name'
+@then
+custom copy-{name}
+    input {name}
+    output 'copied'
+    command 'cp' input output
+custom listed
+    input {[which]}
+    output 'listed'
+    command 'cp' input output
+test plain
+    command which
+@with diagnostic/impure as 'allow'
+log note run({'HELPER'}, '--rig-test-helper', 'echo', 'a string')
+    quiet
+"), ("boot.rs", "fn main() { println!(\"booted {:?}\", std::env::args().nth(1)); }\n")]);
+    // a string in `{}` which names nothing is a program, as before
+    let output = project.configure().ok();
+    output.stderr("note: a string\n");
+    let boot = format!("{}/boot{EXE}", project.host());
+    assert_contains(statement(&output.graph, "copied"), &format!("inputs = {boot}"));
+    assert_contains(statement(&output.graph, "listed"), &format!("inputs = {boot}"));
+    let test = jig_command().args(["test", "-v", "boot", "plain"]).current_dir(&project.dir).output().unwrap();
+    let stdout = String::from_utf8(test.stdout).unwrap();
+    assert_contains(&stdout, "booted Some(\"by name\")");
+    // `which` is `boot`, which isn't a program in `PATH`
+    assert_contains(&stdout, "failed to run \"boot\"");
+}
+
+#[test]
 fn crate_tests_for_some_targets() {
     // a crate declared for the host and a target it can't run, whose tests are built only for those `test` names
     let jig = |test: &str| format!("crate lib 'lib.rs'\n    target [host-target, 'riscv64gc-unknown-none-elf']\n    test {test}\n");
