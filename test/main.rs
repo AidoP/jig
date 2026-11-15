@@ -3758,6 +3758,29 @@ test app
 }
 
 #[test]
+fn crate_tests_for_some_targets() {
+    // a crate declared for the host and a target it can't run, whose tests are built only for those `test` names
+    let jig = |test: &str| format!("crate lib 'lib.rs'\n    target [host-target, 'riscv64gc-unknown-none-elf']\n    test {test}\n");
+    let harness = |target: &str| format!("{target}/test/lib{EXE}");
+    let project = Project::new("crate-tests-for-some", &[("Jig", &jig("host-target")), ("lib.rs", "#[test] fn t() {}\n")]);
+    let host = project.host();
+    let output = project.configure().ok();
+    assert_contains(&output.graph, &format!("test/lib\n    alias = {}", harness(&host)));
+    assert!(!output.graph.contains(&harness("riscv64gc-unknown-none-elf")), "{}", output.graph);
+    let run = jig_command().args(["test", "lib"]).current_dir(&project.dir).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stdout));
+    // as a list, which includes the target it can't run, whose tests can't be built
+    std::fs::write(project.dir.join("Jig"), jig("['riscv64gc-unknown-none-elf', host-target]")).unwrap();
+    project.configure().failed().stderr("error[test-target]: tests for target \"riscv64gc-unknown-none-elf\" cannot be run");
+    // none, as with an empty list
+    std::fs::write(project.dir.join("Jig"), jig("[]")).unwrap();
+    assert!(!project.configure().ok().graph.contains("test/lib"));
+    // and what isn't a target's name
+    std::fs::write(project.dir.join("Jig"), jig("[1]")).unwrap();
+    project.configure().failed().stderr("error[invalid-operand]: list value used where bool, str or list of str is required");
+}
+
+#[test]
 fn commands() {
     let project = Project::new("commands", &[("Jig", "log note 'generated'\n")]);
     let run = |args: &[&str]| {
