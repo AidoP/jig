@@ -1,0 +1,12 @@
+[book]
+title = "jig"
+description = "A build system for Rust"
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/AidoP/jig"
+edit-url-template = "https://github.com/AidoP/jig/edit/main/docs/{path}"
+
+[build]
+build-dir = "../build/book"
