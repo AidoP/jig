@@ -71,3 +71,16 @@ crate perf 'test/perf.rs'
     test
     tag 'perf'
     depends {release-target}/jig
+
+# the book, in `docs/`, which mdBook builds into the build directory with `jig build custom/book`, as CI does, and
+# publishes from main, of the pages its summary lists, which are read from it
+declare book-pages
+    type 'list'
+    default ['docs/book.toml', 'docs/src/SUMMARY.md']
+@for link in split(read('docs/src/SUMMARY.md'), '](')
+@if ends-with(get(split(link, ')'), 0), '.md')
+set book-pages book-pages + ['docs/src/{get(split(link, ')'), 0)}']
+custom book
+    input book-pages
+    output 'book/index.html'
+    command 'mdbook' 'build' 'docs' '--dest-dir' path('{build-dir}/book')

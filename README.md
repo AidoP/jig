@@ -24,8 +24,9 @@ From then on, the project is rebuilt with `jig build`, and tested with `jig test
 
 ## Documentation
 
-The documentation is a book, in [`docs/`](docs/src/SUMMARY.md), built with [mdBook](https://rust-lang.github.io/mdBook/)
-by `mdbook build docs`. What was in this README is now in the book:
+The documentation is a book, [published from main](https://aidop.github.io/jig/), whose pages are in
+[`docs/`](docs/src/SUMMARY.md), built with [mdBook](https://rust-lang.github.io/mdBook/) by `jig build custom/book`. What
+was in this README is now in the book:
 
 - Installing and Building: [Installing](docs/src/installing.md), [Developing jig](docs/src/developing.md) and
   [rig as a library](docs/src/rig.md)

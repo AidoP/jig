@@ -14,6 +14,8 @@ concurrency:
 env:
   # the minimum supported Rust version, which the README gives too
   MSRV: "1.97"
+  # the version of mdBook which builds the book, which is changed on purpose, as the site changes with it
+  MDBOOK: "0.5.4"
   # a toolchain which is not installed fails at once, rather than rustup downloading it, which in a test may stall
   RUSTUP_AUTO_INSTALL: "0"
 
@@ -142,3 +144,59 @@ jobs:
       - name: Test rig with cargo
         # so that cargo projects can use rig as a git or path dependency
         run: cargo test --manifest-path rig/Cargo.toml
+
+  book:
+    # the book, in `docs/`, built by `jig build custom/book` with mdBook, failing on a warning, which a pull request's
+    # artifact holds, to be read before it is merged, and which is published to GitHub Pages from main
+    name: book
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install the toolchain and mdBook
+        run: |
+          rustup toolchain install stable --profile minimal
+          echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/rust-lang/mdBook/releases/download/v$MDBOOK/mdbook-v$MDBOOK-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Bootstrap
+        run: sh bootstrap.sh
+      - name: Build the book
+        run: |
+          status=0
+          build/bootstrap/jig build custom/book > book.log 2>&1 || status=$?
+          cat book.log
+          if grep -qE '^ *(WARN|ERROR)' book.log; then
+            echo "mdBook warned while building the book"
+            exit 1
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: book
+          path: build/book
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/book
+
+  publish-book:
+    # the book built from main, published to GitHub Pages, which the repository's settings have built by GitHub Actions
+    name: publish the book
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: book
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    # one publish at a time, the latest last
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
