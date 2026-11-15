@@ -2,16 +2,19 @@
 
 An expression is a string, `true`, `false`, an integer, a list, a dict, or the name of a property or a crate.
 
-An attribute is taken with `.` after the name of a property, a custom command, a file, a crate, or a target, as in
+An attribute is taken with `.` after the name of a property, a custom command, a file, a crate, a static library, or a
+target, as in
 `data.default`, `image.input`, `{host-target}/macros.crate-type`, `macros.crate-type`, `my-kernel.runner` or
 `{target}.has-std`, where a name computed in `{}` is put in `()` in a string template, as in `'{({target}.has-std)}'`.
-The attributes of a property whose value is a reference are those of the crate, custom command or file it refers to.
+The attributes of a property whose value is a reference are those of the crate, static library, custom command or file
+it refers to.
 Those of a property are `default`, `type`, `read-only` and `info`, those of a custom command are `input`, `output`,
 `depends` and `command`, as lists, and `default`, `install`, `install-dir` and `install-mode`, those of a file are
 `output`, `content`, `mode`, `install`, `install-dir` and `install-mode`, those of a test, which is looked for after the
 others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`, `builtin`,
 `default`, `test`, `doc`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and `install-mode`,
-and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`, `has-std`,
+those of a static library are `source`, `include`, `public-include`, `define`, `flags`, `use`, `depends`, `compiler` and
+`archiver`, as lists, and `target`, `output`, `whole-archive` and `default`, and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`, `has-std`,
 `can-run` and its options, such as `code-model`. An attribute which is not set is an error.
 
 `has-std` is whether the toolchain has the standard library of a builtin target, as installed by `rustup target add`,

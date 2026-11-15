@@ -396,7 +396,7 @@ impl Project {
     ///
     /// An input is relative to the file, and an output to the build directory, while the paths of a reference are
     /// already resolved.
-    fn parse_custom_paths(&mut self, parser: &mut Parser, output: bool) -> Option<Vec<PathBuf>> {
+    pub(super) fn parse_custom_paths(&mut self, parser: &mut Parser, output: bool) -> Option<Vec<PathBuf>> {
         let mut paths = Vec::new();
         let build_dir = self.build_dir();
         loop {

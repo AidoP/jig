@@ -449,6 +449,7 @@ fn declare_builtins(
     project.declare("rust-version".into(), Some(rust_version));
     project.declare_builtin_files();
     project.declare_codegen_options();
+    project.declare_native_properties();
     project.declare_clippy_lints();
     project.declare_diagnostic_overrides();
 }

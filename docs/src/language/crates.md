@@ -8,7 +8,8 @@ A `crate` statement may be followed by indented attributes:
 - `use <name>`: a crate for the same target which the crate depends on, passed to rustc with `--extern`. It can be
   repeated, and the crate can be declared later or in another file. It can be a list of them instead, written in `[]` or
   computed in `{}`, such as a property, `use {drivers}`, whose items are names, or crates which have been declared, so
-  the crates a crate uses can be chosen by the configuration
+  the crates a crate uses can be chosen by the configuration. A name can also be a [static library](static-libraries.md)
+  for the same target, which the crate links
 - `cfg <option>`: a configuration option, given with `--cfg`, as a name, a list of names, or a dict of names to values
   or lists of them, as `<name>="<value>"`, such as `cfg [feature: ['uart', 'plic']]`. It can be repeated, and is also
   given to rust-analyzer

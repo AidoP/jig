@@ -25,6 +25,7 @@ pub fn write(mut project: Project, input: &Path, rustc: &crate::rustc::Answers) 
     let at = Rebase::new(&build_dir);
     write_target_specs(&project.targets, &build_dir, project.toolchain.as_deref())?;
     write_generated_files(&project.generated)?;
+    forget_stale_archives(&project)?;
 
     let installed = project.installed();
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
@@ -455,6 +456,14 @@ fn write_graph(
         }
     }
 
+    for library in project.static_libraries() {
+        let archive = static_library_edges(&mut graph, project, library, at)?;
+        everything.push(archive.clone());
+        if library.default {
+            defaults.push(archive);
+        }
+    }
+
     // a library built with `panic=abort` is built again without it for the test harnesses and procedural macros which
     // link it, which unwind
     let unwind = unwind_copies(crates, units);
@@ -497,7 +506,16 @@ fn write_graph(
         let built_deps = deps_of(&externs_built);
         let deps: Vec<_> = as_paths(&built_deps);
         let harness_externs = externs(true, false);
-        let harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
+        let mut harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
+        // the static libraries the crate uses, which a library records in its metadata, and what links finds and depends
+        // on, with those of the libraries it links
+        let native = NativeLinks::new(project, crates, units, index, at);
+        let mut flags = flags;
+        if c.kind == Kind::Lib {
+            flags.extend(&native.recorded);
+        } else {
+            flags.extend(&native.linked);
+        }
         let harness_deps = deps_of(&harness_externs);
         // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
         // test harness and any crate but a library, which then depends on it
@@ -533,9 +551,12 @@ fn write_graph(
             transitive_libraries(crates, units, index).into_iter().map(path).collect()
         };
         let (libraries, harness_libraries) = (libraries(proc_macro), libraries(true));
-        let link_deps: Vec<_> = deps.iter().copied().chain(as_paths(&libraries)).collect();
-        let harness_link_deps: Vec<_> =
-            as_paths(&harness_deps).into_iter().chain(as_paths(&harness_libraries)).collect();
+        let link_deps: Vec<_> = deps.iter().copied().chain(as_paths(&libraries)).chain(as_paths(&native.archives)).collect();
+        let harness_link_deps: Vec<_> = as_paths(&harness_deps)
+            .into_iter()
+            .chain(as_paths(&harness_libraries))
+            .chain(as_paths(&native.archives))
+            .collect();
         // what rustc reads: the crate's root, which finds its other sources, its target's specification, and its linker
         // script, where it links
         let inputs: Vec<&Path> = [input.as_path()].into_iter().chain(as_paths(&spec)).collect();
@@ -584,6 +605,7 @@ fn write_graph(
             everything.push(at.path(&c.test_harness()));
             let tmpdir = Path::new("tmp").join(&c.target).join("test").join(&c.name);
             let mut test_flags = link(&harness_flags);
+            test_flags.extend(&native.linked);
             test_flags.plain(&["--test"]);
             let harness = at.path(&c.test_harness());
             let mut exec = rust.exec("rustc", &rustc_emit(&tmpdir, &harness), &test_flags, None);
@@ -608,6 +630,7 @@ fn write_graph(
         if unwind[index] {
             let tmpdir = Path::new("tmp").join(&c.target).join("unwind").join(&c.name);
             let copy = at.path(&c.unwind_output());
+            harness_flags.extend(&native.recorded);
             let exec = rust.exec("rustc", &rustc_emit(&tmpdir, &copy), &harness_flags, None);
             graph.edge(Edge {
                 description: describe("RUSTC", &copy),
@@ -758,6 +781,167 @@ fn write_graph(
     graph.default(&as_paths(&defaults));
 
     graph.finish()
+}
+
+/// The arguments of rustc which give a crate the static libraries it uses, and the archives it depends on.
+struct NativeLinks {
+    /// What a library crate records in its metadata, that what links it needs the libraries, without copying them into
+    /// its rlib, so that it depends on neither, as `-l static:-bundle=<name>`.
+    recorded: Vec<String>,
+    /// What links: its own libraries, as `-l static=<name>`, and the directory of each library which it or a library
+    /// crate it links uses, as `-L native=<dir>`, as each library has its own, so that it is only found where it is used.
+    linked: Vec<String>,
+    /// The archives of the libraries which what links uses, through the crates it links too.
+    archives: Vec<PathBuf>,
+}
+impl NativeLinks {
+    fn new(project: &Project, crates: &[Crate], units: &[Unit], index: usize, at: &Rebase) -> Self {
+        let c = &crates[index];
+        let own = project.transitive_static_libraries(&c.uses, &c.target);
+        let link = |bundle: bool| -> Vec<String> {
+            let mut args = Vec::new();
+            for library in &own {
+                let mut modifiers = Vec::new();
+                if !bundle {
+                    modifiers.push("-bundle");
+                }
+                if library.whole_archive {
+                    modifiers.push("+whole-archive");
+                }
+                let kind = if modifiers.is_empty() { "static".to_string() } else { format!("static:{}", modifiers.join(",")) };
+                args.extend(["-l".to_string(), format!("{kind}={}", library.name)]);
+            }
+            args
+        };
+        // the libraries of each library crate which is linked, in the order of the crates, each once
+        let mut libraries: Vec<&crate::project::StaticLibrary> = own.clone();
+        for dep in transitive_libraries(crates, units, index) {
+            let d = &crates[dep];
+            for library in project.transitive_static_libraries(&d.uses, &d.target) {
+                if !libraries.iter().any(|known| std::ptr::eq(*known, library)) {
+                    libraries.push(library);
+                }
+            }
+        }
+        let mut linked = link(true);
+        for library in &libraries {
+            linked.extend(["-L".to_string(), format!("native={}", at.path(&library.dir).display())]);
+        }
+        let archives = libraries.iter().map(|library| at.path(&library.output())).collect();
+        Self { recorded: link(false), linked, archives }
+    }
+}
+
+/// Add the edges which compile each source of a static library to an object, and archive them, returning the archive,
+/// rebased.
+fn static_library_edges(
+    graph: &mut RigGraph,
+    project: &Project,
+    library: &crate::project::StaticLibrary,
+    at: &Rebase,
+) -> Result<PathBuf, Error> {
+    // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
+    let mut include: Vec<PathBuf> = library.include.iter().chain(&library.public_include).cloned().collect();
+    for used in project.transitive_static_libraries(&library.uses, &library.target) {
+        include.extend(used.public_include.iter().cloned());
+    }
+    let mut seen = std::collections::HashSet::new();
+    include.retain(|dir| seen.insert(dir.clone()));
+    // the paths the compiler writes, in debug info and `__FILE__`, relative to the project root, as rustc's are: the
+    // build directory, where it runs, is the root, and the way from it to the root is removed from the sources' paths
+    let mut remap = vec![format!("-ffile-prefix-map={}=.", at.build_dir.display())];
+    let up = at.path(&at.root);
+    if up != Path::new(".") {
+        remap.push(format!("-ffile-prefix-map={}/=", up.display()));
+    }
+    let program = |tool: &[String]| -> String {
+        if is_path(&tool[0]) { at.path(Path::new(&tool[0])).display().to_string() } else { tool[0].clone() }
+    };
+    let depends = at.paths(&library.depends);
+    let mut objects = Vec::new();
+    for source in &library.sources {
+        let object = at.path(&library.object(&source.path));
+        let input = at.path(&source.path);
+        let depfile = depfile_of(&object);
+        let (language_flags, action) = match source.language {
+            crate::project::Language::C => (&library.c_flags, "CC"),
+            crate::project::Language::Assembly => (&library.asm_flags, "AS"),
+        };
+        let mut args: Vec<String> = library.compiler[1..].to_vec();
+        args.extend(language_flags.iter().cloned());
+        args.extend(library.flags.iter().cloned());
+        for dir in &include {
+            args.push(format!("-I{}", at.path(dir).display()));
+        }
+        for define in &library.defines {
+            args.push(format!("-D{define}"));
+        }
+        args.extend(remap.iter().cloned());
+        args.extend(["-MD".to_string(), "-MF".to_string(), depfile.display().to_string()]);
+        args.extend(["-c".to_string(), input.display().to_string(), "-o".to_string(), object.display().to_string()]);
+        graph.edge(Edge {
+            description: describe(action, &object),
+            outputs: &[&object],
+            inputs: &[&input],
+            after: &as_paths(&depends),
+            depfile: Some(&depfile),
+            exec: program_in_build_dir(&program(&library.compiler), args, Vec::new()),
+            // a header which is touched, but not changed, rebuilds nothing
+            hashed: true,
+            pass_env: &library.pass_env,
+            ..Default::default()
+        })?;
+        objects.push(object);
+    }
+    let archive = at.path(&library.output());
+    let mut args: Vec<String> = library.archiver[1..].to_vec();
+    args.extend([ARCHIVE_FLAGS.to_string(), archive.display().to_string()]);
+    args.extend(objects.iter().map(|object| object.display().to_string()));
+    graph.edge(Edge {
+        description: describe("AR", &archive),
+        outputs: &[&archive],
+        inputs: &as_paths(&objects),
+        exec: program_in_build_dir(&program(&library.archiver), args, archive_env()),
+        hashed: true,
+        pass_env: &library.pass_env,
+        ..Default::default()
+    })?;
+    Ok(archive)
+}
+
+/// The flags of the archiver, which creates the archive, adds the objects to it, replacing those of the same name, and
+/// writes its index, and on all but Apple's hosts, `D`, leaves out the time, owner and mode of each object, so that the
+/// archive depends only on them, as llvm-ar does by default. Apple's `ar` does not take `D`, but does the same with
+/// `ZERO_AR_DATE`, as [`archive_env`] gives it.
+const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
+
+/// Returns the environment of the archiver, which on Apple's hosts makes `ar` deterministic.
+fn archive_env() -> Vec<(String, String)> {
+    if cfg!(target_vendor = "apple") { vec![("ZERO_AR_DATE".into(), "1".into())] } else { Vec::new() }
+}
+
+/// Remove the archive of each static library whose objects have changed since it was archived, as recorded beside it in
+/// `lib<name>.a.members`, as `ar` adds to an archive which is there, so that one whose source was removed keeps no
+/// object of it.
+fn forget_stale_archives(project: &Project) -> Result<(), Error> {
+    for library in project.static_libraries() {
+        let archive = library.output();
+        let mut record = archive.clone().into_os_string();
+        record.push(".members");
+        let record = PathBuf::from(record);
+        let mut members = String::new();
+        for source in &library.sources {
+            members.push_str(&library.object(&source.path).display().to_string());
+            members.push('\n');
+        }
+        if std::fs::read_to_string(&record).is_ok_and(|recorded| recorded == members) {
+            continue;
+        }
+        let _ = std::fs::remove_file(&archive);
+        std::fs::create_dir_all(&library.dir).map_err(|error| Error::Create(library.dir.clone(), error))?;
+        std::fs::write(&record, members).map_err(|error| Error::Create(record.clone(), error))?;
+    }
+    Ok(())
 }
 
 /// Returns what is shown while an edge which writes `output` runs, as `RUSTC <output>`.

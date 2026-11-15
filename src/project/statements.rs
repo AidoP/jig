@@ -122,6 +122,7 @@ impl Project {
             "set" => self.parse_set(parser),
             "log" => self.parse_log(parser),
             "crate" => self.parse_crate(parser),
+            "static-library" => self.parse_static_library(parser),
             "custom" => self.parse_custom(parser, false),
             "file" => self.parse_file_statement(parser),
             "test" => self.parse_custom(parser, true),
@@ -490,7 +491,7 @@ impl Project {
     /// configuration.
     ///
     /// The items of a list are names, or references to crates which have been declared.
-    fn parse_crate_names(&mut self, parser: &mut Parser) -> Option<(Data, Span)> {
+    pub(super) fn parse_crate_names(&mut self, parser: &mut Parser) -> Option<(Data, Span)> {
         let start = parser.offset;
         let (names, list) = match parser.peek() {
             Some('[') => {

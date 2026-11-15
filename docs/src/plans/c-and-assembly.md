@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phase 0 is done**; the others are not started.
+linking them into Rust crates. **Phases 0 and 1 are done**; the others are not started.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -226,27 +226,44 @@ default, so that what is built is the same wherever the build directory is, and 
 
 ## Phases
 
-### Phase 1: static libraries
+### Phase 1: static libraries (done)
 
 `static-library`, its attributes, the `c/` and `asm/` properties with their defaults from the environment, compiling
-and archiving, `use` from crates and from each other, and the diagnostics:
+and archiving, `use` from crates and from each other, and attributes taken with `.`, as
+[static libraries](../language/static-libraries.md) describes. What was built differs from the plan above in places:
 
-- `unknown-source-language`: a source whose extension has no language.
-- `no-c-compiler`: a library for a target with no compiler, or no archiver.
-- `c-target`: a crate or library uses a library which is not declared for its target.
-- `c-cycle`: libraries which use each other.
-- `name-shadows-system`: a note, as above.
-- `newline-in-path` and the existing checks of outputs which overlap apply to objects and archives as to crates.
+- **Diagnostics.** `unknown-source-language`, `no-c-compiler`, `redeclare-library` (a library declared again, or with
+  a crate's name), `unknown-static-library` (one library using another which isn't declared for its target),
+  `library-cycle`, and the note `name-shadows-system`. A crate which uses a name which is neither a crate nor a static
+  library for its target is still `unknown-crate`, rather than a `c-target` of its own.
+- **Stale members.** `ar` adds to an archive which is there, and rig has no step before a command, so rather than the
+  archive edge removing it, configuring records the objects of each library beside its archive, in
+  `lib<name>.a.members`, and removes the archive when they change, which only configuring can change.
+- **Determinism on macOS.** Apple's `ar` does not take `D`, so on macOS hosts the archiver is given `crs`, with
+  `ZERO_AR_DATE=1`, which does the same.
+- **Relocation** came early: each compile is given `-ffile-prefix-map`, as phase 2 planned, as it is cheap and the
+  graph shows it.
+- **Hashing.** Compile and archive edges are stamped by contents whatever `change-detection` is, so a header touched
+  but not changed, or changed only in a comment, archives and links nothing again.
+- **Left for later.** `worker-tag`, which is for phase 2's workers; `install`; and an `include` which is a reference
+  to a generated header being a dependency of each compile, which `depends` covers until then.
 
-The integration tests run without a POSIX shell, and a runner may have no C compiler, so most of them use the test
-helper as the compiler and the archiver: it takes `-MF`, `-o` and `crsD`, writes a depfile listing the headers its
-source names, and writes its output. They test the shape of the graph through `jig graph`, that an edited header
-rebuilds only what includes it, that a library crate is not rebuilt when its C changes, that a library named `c` is
-given only to the links which use it, that `CC_<target>` reaches only its target, and the diagnostics.
+The integration tests use the test helper as the compiler and the archiver, as its `cc` and `ar` steps, which write a
+depfile of the headers a source includes, and an archive which replaces members by name, as `ar r` does, so that most
+tests need neither:
 
-A few tests, tagged `cc`, build a real program with C and `.S` sources with the host's `cc` and `ar`, and run it. CI's
-Linux and macOS runners have both, and the Windows job has MinGW's, which its `Jig.local` sets as
-`c/x86_64-pc-windows-gnu/compiler` and `c/x86_64-pc-windows-gnu/archiver`, or `CC_x86_64_pc_windows_gnu`.
+- `static_library_graph`: the commands, flags, include directories, `-l` and `-L` of each edge.
+- `static_library_rebuilds`: an edited header compiles only what includes it and archives again, without building the
+  library crate which uses it again, and a removed source leaves the archive.
+- `static_library_tools_from_the_environment`: `CC`, `AR`, `CFLAGS`, `ASFLAGS` and `CC_<target>`, and the properties
+  which replace them.
+- `static_library_errors`: the diagnostics.
+- `static_library_links`, on Unix where `cc` and `ar` are installed: a program which calls C through a library crate,
+  from two libraries, one using the other, links and runs.
+
+Not yet tested: linking on Windows with MinGW, which the Windows job could do by setting
+`c/x86_64-pc-windows-gnu/compiler` and `c/x86_64-pc-windows-gnu/archiver`, and a library named `c` given only to the
+links which use it, beyond `-L` being per library in `static_library_graph`.
 
 ### Phase 2: identity and the cache
 
