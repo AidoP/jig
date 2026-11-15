@@ -5320,7 +5320,7 @@ log note 'typed'
 @with host-target as 'x'
 log note 'read-only'
 @with nothing as 1
-log note 'undeclared'
+log note 'undeclared {nothing}'
 @with level 2
 log note 'syntax'
 @if false
@@ -5367,9 +5367,8 @@ log note '{try(revived, 'not revived')}'
         // it is set as by `set`
         .stderr("error[mismatched-type]: invalid data type for property \"level\"\n  --> Jig:13:16")
         .stderr("error[read-only-property]: cannot set read-only builtin property \"host-target\"\n  --> Jig:15:7")
-        // a property which is never declared is reported, although its value does not remain
-        .stderr("note: undeclared\n")
-        .stderr("error[undeclared-property]: property \"nothing\" is undeclared\n  --> Jig:17:7")
+        // a property which is never declared needs no declaration, as its value does not remain
+        .stderr("note: undeclared 1\n")
         .stderr("error[expected-exact]: expected \"as\"\n  --> Jig:19:13")
         // the conditions after it continue the chain
         .stderr("note: three\n  --> Jig:26:10")
@@ -5384,7 +5383,8 @@ log note '{try(revived, 'not revived')}'
         .stderr("error[mismatched-type]: invalid data type for property \"checked\"\n  --> Jig:44:18")
         // but not given the value again
         .stderr("note: not revived\n")
-        .stderr("configuration failed with 5 errors");
+        .stderr("configuration failed with 4 errors");
+    assert!(!output.stderr.contains("\"nothing\" is undeclared"), "{}", output.stderr);
     for skipped in ["typed", "read-only", "syntax", "skipped", "not three", "missing"] {
         assert!(!output.stderr.contains(&format!("note: {skipped}")), "{}", output.stderr);
     }
