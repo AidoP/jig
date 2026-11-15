@@ -3782,16 +3782,10 @@ mod tests {
             .edge_with("sleep", &["c"], &[], &[("time", "0.6")]);
         let mut build = Build::new("implicit-job", graph.finish(), &[]);
         build.options.jobs = 2;
-        // within 1.2 s, as `b` takes, and the start of `a` and `c` one after the other, rather than 1.8 s, as `c` takes
-        // after `b`, and theirs, where starting the test helper, as on Windows, is not quick
-        let started = Instant::now();
-        let status = Command::new(crate::test_helper::program()).args([crate::test_helper::FLAG, "true"]).status();
-        assert!(status.unwrap().success());
-        let starting = started.elapsed();
-        let start = Instant::now();
-        assert_eq!(build.ran(&[]).len(), 3);
-        let budget = Duration::from_millis(1500) + 2 * starting;
-        assert!(start.elapsed() < budget, "{:?}, where starting a program takes {starting:?}", start.elapsed());
+        // so `c` finishes before `b`, about 0.65 s after the build starts, as `b` does at 1.2 s, rather than after it, at
+        // 1.8 s, as it would waiting for `b`'s token, whatever starting the test helper takes, as it is slow where it
+        // runs alongside the other tests on Windows on Arm, which a time can't allow for
+        assert_eq!(build.ran(&[]), ["a", "c", "b"]);
     }
 
     #[test]
