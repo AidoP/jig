@@ -1967,6 +1967,14 @@ pub(crate) struct Environment<'a> {
     pub(crate) reports: Option<&'a dyn Fn(&str)>,
 }
 
+/// Returns the program to start for an action's program, which is relative to its working directory, `working`, if it
+/// is a relative path, as Unix finds it from the working directory the program starts in, while Windows, as `windows`
+/// says, finds it from rig's, so there it is joined to the working directory. A name alone is found in `PATH`.
+fn program_from(program: &str, working: &Path, windows: bool) -> std::path::PathBuf {
+    let path = Path::new(program);
+    if windows && path.is_relative() && path.components().count() > 1 { working.join(path) } else { path.to_path_buf() }
+}
+
 /// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
 /// jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
 ///
@@ -1984,14 +1992,7 @@ pub(crate) fn run_command(
     spawned: &dyn Fn(u32),
 ) -> (Outcome, Vec<u8>) {
     let working = exec.dir.as_ref().map_or_else(|| dir.to_path_buf(), |working| dir.join(working));
-    // a program which is a relative path is relative to its working directory, which on Windows is found from rig's
-    // own, as it is not on Unix, so there it is joined to it
-    let relative = Path::new(&exec.program);
-    let mut command = if cfg!(windows) && relative.is_relative() && relative.components().count() > 1 {
-        Command::new(working.join(relative))
-    } else {
-        Command::new(&exec.program)
-    };
+    let mut command = Command::new(program_from(&exec.program, &working, cfg!(windows)));
     command.args(&exec.args).current_dir(working);
     let (program, stderr_file) = (exec.program.as_str(), exec.stderr.as_ref().map(|path| dir.join(path)));
     if let Some(inherit) = environment.inherit {
@@ -2603,25 +2604,17 @@ mod tests {
     }
 
     #[test]
-    fn runs_a_relative_program_from_its_working_directory() {
-        // a program given by a relative path is found from the edge's working directory, on Windows as on Unix, where
-        // the system would otherwise find it from rig's, as a compiler given by its path is, from the build directory
-        let mut exec = crate::test_helper::exec(vec!["echo".into(), "found".into(), ">".into(), "../out".into()]);
-        let name = format!("tool{}", std::env::consts::EXE_SUFFIX);
-        exec.program = Path::new("..").join("tools").join(&name).display().to_string();
-        exec.dir = Some("sub".into());
-        let mut build = Build::new("relative-program", program(exec), &[]);
-        std::fs::create_dir_all(build.dir.join("sub")).unwrap();
-        std::fs::create_dir_all(build.dir.join("tools")).unwrap();
-        // copied by another process, as a file this one had open for writing could be held open by a process another
-        // test forks, until that process executes its program, and could not be run until then
-        let tool = build.dir.join("tools").join(&name);
-        let helper = crate::test_helper::program();
-        let copy = Command::new(&helper).args([crate::test_helper::FLAG, "cp", &helper]).arg(&tool).status();
-        assert!(copy.is_ok_and(|status| status.success()));
-        let (report, finished) = build.build(&[]);
-        assert!(report.succeeded(), "{finished:?}");
-        assert_eq!(build.read("out"), "found\n");
+    fn finds_a_relative_program_from_its_working_directory() {
+        // a program given by a relative path is found from the action's working directory, as Unix finds it, which on
+        // Windows is joined to it, as a compiler given by its path is run from the build directory, while a name is
+        // found in `PATH`
+        let working = Path::new("build").join("sub");
+        let tool = Path::new("..").join("tools").join("cc.exe");
+        assert_eq!(program_from(&tool.display().to_string(), &working, true), working.join(&tool));
+        assert_eq!(program_from(&tool.display().to_string(), &working, false), tool);
+        assert_eq!(program_from("cc", &working, true), Path::new("cc"));
+        let absolute = std::env::temp_dir().join("cc.exe");
+        assert_eq!(program_from(&absolute.display().to_string(), &working, true), absolute);
     }
 
     #[test]
