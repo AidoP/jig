@@ -22,10 +22,18 @@ are replaced by a summary, such as `[15/15] completed in 3m 14s`, or `[12/15] st
 `jig --timings <command>` shows on stderr, once the command has finished, how long configuring, building, running a
 program and running tests took, each in total, and the ten commands of the build which took longest, from
 when each started until it finished, such as `jig --timings test`.
-The graph regenerates itself when the configuration, or `jig`, changes. It does so with the `jig` which configured
+The graph regenerates itself when the configuration, or `jig`, changes, as [when a project is configured
+again](../reconfiguring.md) describes. It does so with the `jig` which configured
 the project, so running another one reports the `other-jig` warning, which names both, until `jig generate` configures
 the project with the one which is running. Its severity is that of `diagnostic/other-jig`
 when it was configured, where `'error'` stops the command before building.
+
+```
+./build/bootstrap/jig build
+./build/bootstrap/jig build -j 8 -k 0 test
+./build/bootstrap/jig build -n
+./build/bootstrap/jig --timings build
+```
 
 ## Paths
 

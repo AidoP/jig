@@ -6,3 +6,16 @@ levels of the lints set by the `clippy/<lint>` properties where it is declared. 
 even if another fails, and the diagnostics of each are shown, even if nothing needed linting, as they are saved. It
 fails if a lint is an error, such as one which is denied, and with `-D` or `--deny-warnings`, if there is a warning,
 which is found in what was saved, so the lints are not run again, as `jig lint -D` is in CI.
+
+```
+set clippy/pedantic 'warn'
+set clippy/needless_return 'deny'
+
+crate app 'app.rs'
+    crate-type 'bin'
+```
+
+```
+./build/bootstrap/jig lint
+./build/bootstrap/jig lint -D app
+```

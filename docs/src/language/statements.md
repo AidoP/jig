@@ -27,7 +27,7 @@
   the first `log` with the identifier. With `location <name>`, it is shown at another statement, rather than where it
   was logged: the one which gave a property its value, or declared it, or which declared a crate, custom command,
   target or test, whose name may be computed, such as `location {target}` in a `@for`
-- `custom <name>`: a custom build command, which rig runs when its inputs change. Its outputs can be built with
+- `custom <name>`: a [custom command](custom-commands.md), which rig runs when its inputs change. Its outputs can be built with
   `jig build custom/<name>`
 - `file <name>`: a file generated from a template string, which is written when the project is configured. See [generated files](files.md)
 - `target <name>`: a custom target, which crates can be compiled for. See [targets](targets.md)
