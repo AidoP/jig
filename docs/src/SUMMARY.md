@@ -52,5 +52,3 @@
 # Developing jig
 
 - [Developing jig](developing.md)
-- [Plans](plans.md)
-  - [Cleaning up the docs](plans/doc-cleanup.md)
