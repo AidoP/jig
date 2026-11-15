@@ -33,7 +33,14 @@ A `crate` statement may be followed by indented attributes:
 - `crate-type <type>`: `'lib'`, which is the default, `'bin'` for an executable, `<build-dir>/<target>/<name>`, which
   cannot be used by other crates, or `'proc-macro'` for a procedural macro. A procedural macro is compiled for the
   host target, as rustc runs it, so it is not compiled for the `target` property, and can be used by crates for any
-  target
+  target. `'staticlib'` and `'cdylib'` are libraries for C, a static library, `<build-dir>/<target>/lib<name>.a`, with
+  the crates it uses and the standard library in it, and a shared one, named as a
+  [shared library](shared-libraries.md) of C is, which the [static libraries](static-libraries.md), shared libraries
+  and [executables](executables.md) of C link by `use`, and which crates cannot use. A static one is built with
+  `--print=native-static-libs=<build-dir>/<target>/lib<name>.a.libs`, the libraries of the system it needs, which
+  what links it reads as `@<file>`, and of which rustc prints a note as it builds it. A shared one is given its soname,
+  `lib<name>.so`, on ELF, so that what links it records it by its name rather than its path in the build directory,
+  and `jig run` and `jig test` find it, as they find a shared library of C
 - `default <bool>`: build the crate when `jig build` is run without targets, which is `false` by default. Without a
   value, it is `true`
 - `codegen/<option> <value>`: a codegen option for the crate, which replaces the property of the option. See [codegen options](codegen.md)

@@ -56,6 +56,10 @@ pub enum Kind {
     Bin,
     /// A procedural macro, which is a library for the host target, which rustc loads.
     ProcMacro,
+    /// A static library for C, `lib<name>.a`, with the crates it uses and the standard library in it.
+    StaticLib,
+    /// A shared library for C, as a shared library of C is named.
+    CDylib,
 }
 
 impl Kind {
@@ -65,7 +69,13 @@ impl Kind {
             Kind::Lib => "lib",
             Kind::Bin => "bin",
             Kind::ProcMacro => "proc-macro",
+            Kind::StaticLib => "staticlib",
+            Kind::CDylib => "cdylib",
         }
+    }
+    /// Whether it is a library for C, which C links, rather than a crate which other crates use.
+    pub fn is_for_c(self) -> bool {
+        matches!(self, Kind::StaticLib | Kind::CDylib)
     }
 }
 
@@ -82,7 +92,17 @@ impl Crate {
                 self.name,
                 std::env::consts::DLL_SUFFIX,
             )),
+            Kind::StaticLib => self.dir.join(format!("lib{}.a", self.name)),
+            // as the platform's linker finds it by its name
+            Kind::CDylib if self.target.contains("-windows") => self.dir.join(format!("{}.dll", self.name)),
+            Kind::CDylib if self.target.contains("-apple-") => self.dir.join(format!("lib{}.dylib", self.name)),
+            Kind::CDylib => self.dir.join(format!("lib{}.so", self.name)),
         }
+    }
+    /// The file a static library for C is written with the libraries of the system it needs, which rustc writes by
+    /// `--print=native-static-libs`, as arguments of the C compiler, which a link reads by `@<file>`.
+    pub fn native_static_libs(&self) -> PathBuf {
+        self.dir.join(format!("lib{}.a.libs", self.name))
     }
     /// The name of the crate's test and documentation, which is the name of the crate, with its target if that is not
     /// the host target.

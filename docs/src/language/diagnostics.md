@@ -125,9 +125,9 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 | `redeclare-crate` | a crate declared again for the same target |
 | `redeclare-custom` | a custom command, generated file, target or test declared again |
 | `invalid-crate-name` | a character which a crate's name can't have |
-| `invalid-crate-type` | a `crate-type` which isn't `'lib'`, `'bin'` or `'proc-macro'` |
+| `invalid-crate-type` | a `crate-type` which isn't `'lib'`, `'bin'`, `'proc-macro'`, `'staticlib'` or `'cdylib'` |
 | `unknown-crate` | a crate which another uses, and which isn't declared for its target |
-| `use-binary` | a binary crate which another uses |
+| `use-binary` | a binary crate, or a `staticlib` or `cdylib`, which another crate uses |
 | `use-with-target` | a crate of another target which a crate uses |
 | `proc-macro-target` | a procedural macro declared for a target other than the host |
 | `unknown-target` | a target which is neither builtin nor declared |
@@ -146,6 +146,7 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 | `redeclare-library` | a library or executable declared again for a target, or with the name of a crate or of another for it |
 | `unknown-library` | a static or shared library which a crate, library or executable uses, and which isn't declared for its target |
 | `shared-library-target` | a shared library for a target without an operating system |
+| `use-rust-crate` | a crate which a library or executable of C uses, which isn't a `staticlib` or `cdylib` |
 | `use-executable` | an executable which a crate, library or executable uses, as only a static library can be |
 | `library-cycle` | a static library which uses itself, through the libraries it uses |
 | `name-shadows-system` | a note, of a static library named after one the standard library links, such as `c` or `m` |

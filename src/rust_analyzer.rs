@@ -41,7 +41,10 @@ fn entry(unit: &Unit, units: &[Unit]) -> String {
     let env: Vec<_> = unit.env.iter().map(|(name, value)| format!("{}: {}", string(name), string(value))).collect();
     let kind = match unit.kind {
         crate::project::rust::Kind::Bin => "bin",
-        crate::project::rust::Kind::Lib | crate::project::rust::Kind::ProcMacro => "lib",
+        crate::project::rust::Kind::Lib
+        | crate::project::rust::Kind::ProcMacro
+        | crate::project::rust::Kind::StaticLib
+        | crate::project::rust::Kind::CDylib => "lib",
     };
     let mut entry = String::from("        {\n");
     let _ = writeln!(entry, "            \"display_name\": {},", string(&unit.name));

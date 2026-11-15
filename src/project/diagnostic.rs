@@ -192,6 +192,7 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "use-executable",
     "shared-library-target",
     "no-cxx-compiler",
+    "use-rust-crate",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -326,6 +327,11 @@ pub enum Message {
         name: String,
         target: String,
     },
+    /// A crate which a library or executable of C uses, which is not a `staticlib` or `cdylib`.
+    UseRustCrate {
+        name: String,
+        declared: Span,
+    },
     /// A shared library for a target without an operating system.
     SharedLibraryTarget {
         target: String,
@@ -390,6 +396,8 @@ pub enum Message {
     },
     UseBinary {
         name: String,
+        /// What the crate is, `binary`, `staticlib` or `cdylib`.
+        what: &'static str,
         /// The declaration of the binary.
         declared: Span,
     },
@@ -573,6 +581,10 @@ impl core::fmt::Display for Message {
                 f,
                 "target {target:?} has no operating system, which loads shared libraries, so it can have only static ones",
             ),
+            Self::UseRustCrate { name, .. } => write!(
+                f,
+                "crate {name:?} is not a library for C, which C can link with `crate-type 'staticlib'` or `'cdylib'`",
+            ),
             Self::UseExecutable { name, .. } => {
                 write!(f, "{name:?} is an executable, which cannot be used, as only a static library can")
             },
@@ -617,7 +629,7 @@ impl core::fmt::Display for Message {
             Self::AttributeNotSet { item, name, attribute } => {
                 write!(f, "attribute {attribute:?} of {item} {name:?} is not set")
             },
-            Self::UseBinary { name, .. } => write!(f, "crate {name:?} is a binary, which cannot be used by another crate"),
+            Self::UseBinary { name, what, .. } => write!(f, "crate {name:?} is a {what}, which cannot be used by another crate"),
             Self::BuiltinTargetName(name) => {
                 write!(f, "{name:?} is the name of a builtin target, which can be changed with `override`")
             },
@@ -762,6 +774,7 @@ impl Message {
             Self::UnknownLibrary { .. } => "unknown-library",
             Self::SharedLibraryTarget { .. } => "shared-library-target",
             Self::UseExecutable { .. } => "use-executable",
+            Self::UseRustCrate { .. } => "use-rust-crate",
             Self::LibraryCycle(_) => "library-cycle",
             Self::NameShadowsSystem(_) => "name-shadows-system",
             Self::UnknownAttribute { .. } => "unknown-attribute",
@@ -943,6 +956,7 @@ impl Project {
             },
             Message::UseBinary { declared, .. }
             | Message::UseExecutable { declared, .. }
+            | Message::UseRustCrate { declared, .. }
             | Message::UseWithTarget { declared: Some(declared) }
             | Message::OverlappingOutput { declared, .. }
             | Message::InstallConflict { declared, .. } => {

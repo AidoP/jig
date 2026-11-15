@@ -714,8 +714,10 @@ impl Project {
     /// Returns the diagnostic of what a crate, library or executable uses which is not a library for its target: an
     /// executable, which cannot be used, or nothing.
     pub(super) fn unknown_library(&self, name: &str, target: &str, span: Span) -> Diagnostic {
+        let rust = self.crates.get(&(name.to_string(), target.to_string()));
         let message = match self.native(name, target) {
             Some(native) => Message::UseExecutable { name: name.into(), declared: native.name_span },
+            None if let Some(c) = rust => Message::UseRustCrate { name: name.into(), declared: c.name_span },
             None => Message::UnknownLibrary { name: name.into(), target: target.into() },
         };
         Diagnostic { span: Some(span), message, severity: Severity::Error }
@@ -729,7 +731,8 @@ impl Project {
         for key in &keys {
             let library = &self.natives[key];
             for used in &library.uses {
-                if self.library(&used.name, &library.target).is_none() {
+                let for_c = self.crate_for_c(&used.name, &library.target).is_some();
+                if self.library(&used.name, &library.target).is_none() && !for_c {
                     reported.push(self.unknown_library(&used.name, &library.target, used.span));
                 }
             }
@@ -761,6 +764,24 @@ impl Project {
             }
         }
         self.diagnostics.extend(reported);
+    }
+    /// Returns the crate for C, a `staticlib` or `cdylib`, for a target with a name, if one is declared.
+    pub fn crate_for_c(&self, name: &str, target: &str) -> Option<&rust::Crate> {
+        self.crates.get(&(name.to_string(), target.to_string())).filter(|c| c.kind.is_for_c())
+    }
+    /// Returns the names of what a library or executable links which is not a library of C, and so is a crate for C, as
+    /// is checked: what it uses, and what the static libraries it links use, each once, after them. The crates are
+    /// looked up by those who have them, as generating the graph takes them from the project.
+    pub fn linked_crates<'a>(&'a self, native: &'a Native) -> Vec<&'a str> {
+        let statics = self.link_libraries(&native.uses, &native.target);
+        let statics = statics.into_iter().filter(|library| library.kind == NativeKind::StaticLibrary);
+        let mut names: Vec<&str> = Vec::new();
+        for used in native.uses.iter().chain(statics.flat_map(|library| &library.uses)) {
+            if self.native(&used.name, &native.target).is_none() && !names.contains(&used.name.as_str()) {
+                names.push(&used.name);
+            }
+        }
+        names
     }
     /// Returns the libraries a crate, library or executable uses directly, among its `uses`, by their names.
     pub fn used_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a Native> {
