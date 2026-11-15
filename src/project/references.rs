@@ -160,7 +160,9 @@ impl Project {
             let value = match attribute {
                 "source" => AttributeValue::Set(paths(&library.sources.iter().map(|source| source.path.clone()).collect::<Vec<_>>())),
                 "target" => AttributeValue::Set(Data::Str(library.target.clone())),
-                "output" => AttributeValue::Set(Data::Str(library.output().display().to_string())),
+                                // the objects of a static library linked as them
+                "output" if library.link_objects => AttributeValue::Set(paths(&library.linked_files())),
+"output" => AttributeValue::Set(Data::Str(library.output().display().to_string())),
                 "include" => AttributeValue::Set(paths(&library.include)),
                 "public-include" => AttributeValue::Set(paths(&library.public_include)),
                 "define" => AttributeValue::Set(strings(&library.defines)),
@@ -171,6 +173,7 @@ impl Project {
                 "compiler" => AttributeValue::Set(strings(&library.compiler)),
                 attribute if library.kind == NativeKind::StaticLibrary => match attribute {
                     "whole-archive" => AttributeValue::Set(Data::Bool(library.whole_archive)),
+                    "link" => AttributeValue::Set(Data::Str(if library.link_objects { "objects" } else { "archive" }.into())),
                     "archiver" => AttributeValue::Set(strings(&library.archiver)),
                     _ => AttributeValue::Unknown,
                 },

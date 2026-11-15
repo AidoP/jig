@@ -14,7 +14,8 @@ Those of a property are `default`, `type`, `read-only` and `info`, those of a cu
 others, are `input`, `depends` and `command`, those of a crate are `target`, `crate-type`, `path`, `output`, `builtin`,
 `default`, `test`, `doc`, `use`, `depends`, `cfg`, `env`, `link-script`, `install`, `install-dir` and `install-mode`,
 those of a static library are `source`, `include`, `public-include`, `define`, `flags`, `use`, `depends`, `compiler` and
-`archiver`, as lists, and `target`, `output`, `whole-archive` and `default`, those of an executable are those of a
+`archiver`, as lists, and `target`, `output`, which is a list of the objects of one which is linked as them,
+`whole-archive`, `link` and `default`, those of an executable are those of a
 static library but `whole-archive` and `archiver`, with `link-flags` and `rpath`, as lists, `link-script`, `install`,
 `install-dir` and `install-mode`, as are those of a shared library, and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `link-script`, `override`, `has-std`,
 `can-run` and its options, such as `code-model`. An attribute which is not set is an error.

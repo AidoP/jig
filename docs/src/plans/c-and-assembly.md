@@ -1,7 +1,8 @@
 # C and assembly
 
-A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phases 0 to 5 are done**; phase 6 is what may come later.
+A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and linking
+them into Rust crates. **Phases 0 to 5 are done**, and of phase 6, C++, Rust for C and plain objects, while the rest of
+it waits for a reason or a way to test it.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -24,7 +25,7 @@ Goals:
 8. Nothing new is needed to build a project with no C in it: no compiler, no archiver, no new configure-time probes.
 
 Not goals, for now: C++, MSVC's `cl.exe` and `lib.exe`, and Rust libraries called from C (`staticlib`). The design
-leaves room for each, in [later](#phase-6-later).
+leaves room for each, in [later](#phase-6-later-partly-done).
 
 ## What exists to build on
 
@@ -360,7 +361,7 @@ which call it with `jig test`, and the installed program by its rpath, without t
   runner, which `jig run kernel` boots. `book_kernel_boots` builds it from the code blocks of its page and boots it,
   where clang, llvm-ar, QEMU and the target's standard library are installed, so that the page stays true.
 
-### Phase 6: later
+### Phase 6: later (partly done)
 
 - **C++ (done)**, by `.cc`, `.cpp` and `.cxx`, compiled by `cxx/compiler`, from `CXX` or `c++`, with `cxx/flags`,
   from `CXXFLAGS`, as `c++/` is not a name a property can have. Everything is still linked by the C compiler, and
@@ -379,14 +380,22 @@ which call it with `jig test`, and the installed program by its rpath, without t
   build directory, and is in the search path `jig run` and `jig test` give. On Windows a `cdylib` is linked as its DLL,
   which MinGW's linker takes, rather than an import library, which rustc writes elsewhere. `rust_for_c_graph`,
   `rust_for_c_errors` and `rust_for_c_runs`, with the host's `cc`, test it.
-- **An archiver in jig.** Archives are a simple format, so jig could write them itself, as `jig archive`, and not need
-  an archiver at all. The GNU and BSD formats need a symbol table, which needs the symbols of ELF, Mach-O and COFF
-  objects read. Worth it only if finding an archiver for each target turns out to be the main source of friction.
-- **Plain objects**, by a `link 'objects'` on a static library, passed with `-C link-arg=<object>` in the order of its
-  sources, where an object must be linked as it is.
-- **MSVC**, whose `cl.exe` takes different options and writes no depfile, but `/sourceDependencies` JSON.
+- **Plain objects (done)**, by `link 'objects'` on a static library, which is then not archived, and needs no
+  archiver. An executable or shared library links its objects in place of its archive, in the order of its sources,
+  and a crate which links it is given `-C link-arg=<object>` for each, which a library crate does not record, as rustc
+  has no native library of objects, so the crates which link it link them. `static_library_of_objects` tests it, and
+  the book's kernel was checked by hand to boot with its `boot` library linked as objects rather than `whole-archive`.
+
+Left for when there is a reason, or a way to test them:
+
+- **An archiver in jig.** Not done: nothing so far has shown finding an archiver to be a problem, as llvm-ar is
+  beside clang wherever it cross-compiles. Archives are a simple format, so jig could write them itself, as
+  `jig archive`, and not need an archiver at all. The GNU and BSD formats need a symbol table, which needs the symbols
+  of ELF, Mach-O and COFF objects read. Worth it only if finding an archiver for each target turns out to be the main source of friction.
+- **MSVC**, which needs Windows to build and test, whose `cl.exe` takes different options and writes no depfile,
+  but `/sourceDependencies` JSON.
 - **Cross-language LTO**, with clang's `-flto=thin` and `codegen/linker-plugin-lto`, where clang's LLVM matches
-  rustc's.
+  rustc's, which needs a clang of rustc's LLVM to test, which the clang where phase 6 was built, of LLVM 18, is not.
 
 ## Risks
 

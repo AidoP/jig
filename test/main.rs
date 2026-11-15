@@ -3494,6 +3494,58 @@ pub extern \"C\" fn greeting() -> *const core::ffi::c_char {
 }
 
 #[test]
+fn static_library_of_objects() {
+    // a static library linked as its objects is not archived, and its objects are linked as they are, in the order of
+    // its sources, by a crate with `link-arg`, which a library crate does not record, and by an executable
+    let project = Project::new("static-library-objects", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+set c/archiver []
+static-library boot
+    source 'start.s' 'early.c'
+    link 'objects'
+crate kernel 'kernel.rs'
+    use boot
+crate app 'app.rs'
+    crate-type 'bin'
+    use kernel
+executable tool
+    source 'tool.c'
+    use boot
+log note '{{boot.link}} {{boot.output}}'
+static-library bad
+    source 'bad.c'
+    link 'both'
+")),
+        ("start.s", ""),
+        ("early.c", ""),
+        ("tool.c", ""),
+        ("kernel.rs", ""),
+        ("app.rs", "fn main() {}\n"),
+    ]);
+    let output = project.configure().failed();
+    output.stderr("`'archive'` or `'objects'`");
+    std::fs::write(project.dir.join("Jig"), output_jig(&project).replace("static-library bad\n    source 'bad.c'\n    link 'both'\n", "")).unwrap();
+    let output = project.configure().ok();
+    let host = project.host();
+    let boot = format!("{host}/c/boot");
+    output.stderr(&format!("note: objects build/{boot}/start.s.o build/{boot}/early.c.o"));
+    assert!(!output.graph.contains("libboot.a"), "{}", output.graph);
+    let kernel = output.build(&format!("{host}/libkernel.rlib"));
+    assert!(!kernel.contains("boot"), "{kernel}");
+    let app = output.build(&format!("{host}/app{EXE}"));
+    assert_contains(app, &format!(" -C link-arg={boot}/start.s.o -C link-arg={boot}/early.c.o "));
+    assert!(!app.contains("native="), "{app}");
+    assert_contains(output.build(&format!("{host}/tool{EXE}")), &format!(
+        "cc {host}/c/tool/tool.c.o {boot}/start.s.o {boot}/early.c.o -o {host}/tool{EXE}"
+    ));
+}
+
+/// Returns the `Jig` of a project, as it is.
+fn output_jig(project: &Project) -> String {
+    std::fs::read_to_string(project.dir.join("Jig")).unwrap()
+}
+
+#[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
     // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs

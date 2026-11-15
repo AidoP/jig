@@ -459,10 +459,10 @@ fn write_graph(
     // what clangd reads to compile each source of C as it is built, as rust-analyzer reads `.rust-project.json`
     let mut compile_commands = Vec::new();
     for library in project.natives() {
-        let archive = native_edges(&mut graph, project, crates, library, at, &mut compile_commands)?;
-        everything.push(archive.clone());
+        let built = native_edges(&mut graph, project, crates, library, at, &mut compile_commands)?;
+        everything.extend(built.iter().cloned());
         if library.default {
-            defaults.push(archive);
+            defaults.extend(built);
         }
     }
 
@@ -847,6 +847,11 @@ impl NativeLinks {
         let link = |bundle: bool| -> Vec<String> {
             let mut args = Vec::new();
             for library in &own {
+                // one linked as its objects is not recorded, as its objects are linked by `link-arg`, as rustc has no
+                // native library of objects
+                if library.link_objects {
+                    continue;
+                }
                 // a shared library is linked as itself, wherever it is used
                 if library.kind == NativeKind::SharedLibrary {
                     args.extend(["-l".to_string(), format!("dylib={}", library.name)]);
@@ -881,15 +886,23 @@ impl NativeLinks {
             linked.extend(["-l".to_string(), format!("dylib={}", cxx.cxx_runtime)]);
         }
         for library in &libraries {
+            // the objects of one linked as them, which rustc gives the linker after what it links, as they are
+            if library.link_objects {
+                for object in library.linked_files() {
+                    linked.extend(["-C".to_string(), format!("link-arg={}", at.path(&object).display())]);
+                }
+                continue;
+            }
             linked.extend(["-L".to_string(), format!("native={}", at.path(&library.dir).display())]);
         }
-        let archives = libraries.iter().map(|library| at.path(&library.link_output())).collect();
+        let archives = libraries.iter().flat_map(|library| library.linked_files()).map(|path| at.path(&path)).collect();
         Self { recorded: link(false), linked, archives }
     }
 }
 
-/// Add the edges which compile each source of a static library or an executable to an object, and archive or link
-/// them, returning the archive or the executable, rebased.
+/// Add the edges which compile each source of a library or an executable to an object, and archive or link them,
+/// returning what is built of it, rebased: its archive, or its objects, for a static library linked as them, or its
+/// output.
 fn native_edges(
     graph: &mut RigGraph,
     project: &Project,
@@ -897,7 +910,7 @@ fn native_edges(
     library: &crate::project::Native,
     at: &Rebase,
     compile_commands: &mut Vec<String>,
-) -> Result<PathBuf, Error> {
+) -> Result<Vec<PathBuf>, Error> {
     // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
     let mut include: Vec<PathBuf> = library.include.iter().chain(&library.public_include).cloned().collect();
     for used in project.reachable_libraries(&library.uses, &library.target) {
@@ -961,7 +974,11 @@ fn native_edges(
         objects.push(object);
     }
     if library.kind.is_linked() {
-        return link_native(graph, project, crates, library, &objects, at);
+        return link_native(graph, project, crates, library, &objects, at).map(|output| vec![output]);
+    }
+    // a static library linked as its objects is not archived
+    if library.link_objects {
+        return Ok(objects);
     }
     let archive = at.path(&library.output());
     let mut args: Vec<String> = library.archiver[1..].to_vec();
@@ -976,7 +993,7 @@ fn native_edges(
         pass_env: &library.pass_env,
         ..Default::default()
     })?;
-    Ok(archive)
+    Ok(vec![archive])
 }
 
 /// Add the edge which links an executable or a shared library from its objects and the libraries it uses, with the
@@ -999,7 +1016,11 @@ fn link_native(
 ) -> Result<PathBuf, Error> {
     let output = at.path(&native.output());
     let libraries = project.link_libraries(&native.uses, &native.target);
-    let linked: Vec<PathBuf> = libraries.iter().map(|library| at.path(&library.link_output())).collect();
+    // each library's files, which are its objects for one linked as them
+    let linked: Vec<Vec<PathBuf>> = libraries
+        .iter()
+        .map(|library| library.linked_files().iter().map(|path| at.path(path)).collect())
+        .collect();
     let link_script = native.link_script.as_ref().or_else(|| project.target(&native.target)?.link_script.as_ref());
     let link_script = link_script.map(|path| at.path(path));
     let apple = native.target.contains("-apple-");
@@ -1010,8 +1031,12 @@ fn link_native(
         args.push(if apple { "-dynamiclib" } else { "-shared" }.into());
     }
     args.extend(objects.iter().map(|object| object.display().to_string()));
-    for (library, path) in libraries.iter().zip(&linked) {
-        let path = path.display().to_string();
+    for (library, paths) in libraries.iter().zip(&linked) {
+        if library.link_objects {
+            args.extend(paths.iter().map(|path| path.display().to_string()));
+            continue;
+        }
+        let path = paths[0].display().to_string();
         match () {
             () if !library.whole_archive || library.kind == NativeKind::SharedLibrary => args.push(path),
             () if apple => args.push(format!("-Wl,-force_load,{path}")),
@@ -1062,7 +1087,7 @@ fn link_native(
     args.extend(["-o".to_string(), output.display().to_string()]);
     let inputs: Vec<&Path> = as_paths(objects)
         .into_iter()
-        .chain(as_paths(&linked))
+        .chain(linked.iter().flatten().map(PathBuf::as_path))
         .chain(as_paths(&rust_inputs))
         .chain(link_script.as_deref())
         .collect();
@@ -1101,7 +1126,8 @@ fn archive_env() -> Vec<(String, String)> {
 /// `lib<name>.a.members`, as `ar` adds to an archive which is there, so that one whose source was removed keeps no
 /// object of it.
 fn forget_stale_archives(project: &Project) -> Result<(), Error> {
-    for library in project.natives().into_iter().filter(|native| native.kind == NativeKind::StaticLibrary) {
+    let archived = |native: &&crate::project::Native| native.kind == NativeKind::StaticLibrary && !native.link_objects;
+    for library in project.natives().into_iter().filter(archived) {
         let archive = library.output();
         let mut record = archive.clone().into_os_string();
         record.push(".members");
