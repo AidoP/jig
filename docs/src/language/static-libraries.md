@@ -63,6 +63,15 @@ source is compiled again when a header it includes changes, and the paths it wri
 `__FILE__`, are made relative to the project root by `-ffile-prefix-map`, as rustc's are. The objects are stamped by
 their contents, so a header which is touched but not changed, or changed only in a comment, archives nothing again.
 
+Each compile is kept in rig's [cache](../caching.md), as rustc's are, and fetched rather than run when the source, the
+headers its depfile lists, the command and the compiler are as they were, in this checkout or another, as the paths it
+is given are relative to the build directory. The compiler is identified by the contents of its program and what the
+command prints with `--version`, so that a compiler wrapped by another, as `ccache gcc`, is identified by gcc's version,
+and the project is configured again when the program changes. A compile which is cached runs in a hermetic
+environment, as a crate does, so a variable the compiler reads, such as `CPATH`, is passed on with `pass-env`. A compile
+is not sent to [workers](../workers.md), which have no C compiler a build knows of. The archiving is cheap, so it is
+not cached.
+
 The objects are archived by `<archiver> crsD <archive> <object> ...`, or `crs` on macOS, whose `ar` does the same with
 `ZERO_AR_DATE`, so that the archive depends only on the objects. When a source is removed from the library, its
 archive is removed as the project is configured, so that it keeps no object of it.

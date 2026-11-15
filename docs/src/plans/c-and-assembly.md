@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phases 0 and 1 are done**; the others are not started.
+linking them into Rust crates. **Phases 0 to 2 are done**; the others are not started.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -265,24 +265,31 @@ Not yet tested: linking on Windows with MinGW, which the Windows job could do by
 `c/x86_64-pc-windows-gnu/compiler` and `c/x86_64-pc-windows-gnu/archiver`, and a library named `c` given only to the
 links which use it, beyond `-L` being per library in `static_library_graph`.
 
-### Phase 2: identity and the cache
+### Phase 2: identity and the cache (done)
 
-- **Identifying tools.** Generalise `identify_linkers` to identify each compiler and archiver as it identifies a
-  linker: by its canonical path and its `--version`, depended on by the configuration, so that it is configured again
-  when the tool is replaced. Without it, a cached object would survive an upgrade of the compiler.
-- **Caching.** Compile edges are cached by default, as rustc's are, as their depfiles make their inputs complete. The
-  cache key is the action, which holds every flag, and the identity of the compiler in place of the toolchain's. The
-  archive edge is cheap and is not cached, but is hashed, so an object restored unchanged does not relink.
-- **Relocation.** `-ffile-prefix-map=<root>=.` makes debug info and `__FILE__` relative to the project root, as
-  `--remap-path-prefix` does for rustc. An absolute `include` keeps the edge from being shared between checkouts, as
-  an absolute path in rustc's arguments does today.
-- **Hermetic environment.** A cached compile inherits only `pass-env` and the variables which locate tools. gcc reads
-  `CPATH`, `C_INCLUDE_PATH`, `GCC_EXEC_PREFIX` and `COMPILER_PATH`, and clang some of them, so a project which relies on
-  one passes it by name.
-- **Workers.** Compiles can run on workers with the same `worker-tag` rules as rustc, as their `discover` exec is the
-  compile with `-M -MF <depfile>` in place of `-c -o`. A worker must have a compiler of the same identity, which it
-  reports as it reports a toolchain. This is the last part of the phase, and can be dropped if workers with C
-  compilers are rare.
+- **Identifying compilers.** Once caching is on, each library's compiler is identified by the BLAKE3 hash of its
+  program and what the whole command prints with `--version`, so `ccache gcc` is identified by gcc's version as well
+  as by ccache. The program is found in `PATH` as a cached custom command's is, so the configuration depends on `PATH`
+  and the program, and is configured again when either changes. A compiler which is not found is not cached. The
+  archiver is not identified, as the archive is not cached.
+- **Caching.** Compile edges are cached by the compiler's identity, in place of the toolchain's, with their depfiles
+  completing their inputs. The archive edge is cheap and is not cached, but is hashed, so an object restored unchanged
+  does not relink.
+- **Relocation** came in phase 1, with `-ffile-prefix-map`. rig replaces the absolute build directory in it with a
+  marker in the key, as it does rustc's `--remap-path-prefix`, so a compile is shared between checkouts. System
+  headers, which `-MD` lists as absolute paths, are part of the second key, by their contents, as the sysroot's files
+  are for rustc. `-MMD` was not needed.
+- **Hermetic environment.** A cached compile inherits only `pass-env` and the variables which locate tools, which the
+  book says, naming `CPATH`.
+- **Workers: dropped for now.** A worker runs an edge whose identity is a toolchain it reports, and no worker reports
+  a C compiler, so compiles stay on the machine which builds, as cached custom commands do. Sending them needs workers
+  to report the compilers they have, by the same identity, which can wait for someone with workers and C.
+
+`static_library_cache` tests it with a copy of the test helper as the compiler, which logs each compile in the build
+directory: an object which is removed is fetched rather than compiled, an edited header compiles again, another
+checkout fetches every object, and a changed compiler configures the project again and compiles. A compile with the
+host's `cc`, wrapped in a script which logs, was checked by hand to be fetched once its outputs were removed, with
+system headers in its depfile.
 
 ### Phase 3: executables
 

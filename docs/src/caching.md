@@ -1,7 +1,7 @@
 # Caching
 
-The results of rustc and clippy, and of custom commands with `cache`, are kept in a cache, and fetched from it
-rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or on Windows,
+The results of rustc and clippy, of the C compiler of [static libraries](language/static-libraries.md), and of custom
+commands with `cache`, are kept in a cache, and fetched from it rather than run again. The cache is the `cache/dir` property, which is `$XDG_CACHE_HOME/jig`, or on Windows,
 `%LOCALAPPDATA%\jig\cache`, or `~/.cache/jig`, by default, and `'off'` turns it off, usually set in the user's
 configuration. The `JIG_CACHE` environment variable overrides it, relative to the working directory, while a `JIG_CACHE`
 which is empty or `off` turns it off. They are read as the project is configured. A crate which is built again with what
@@ -12,7 +12,8 @@ each crate's sources, the crates it uses and the variables it read, and by the i
 toolchain is updated in place. Turning the cache on or off configures the project again too. The cache is shared between
 checkouts of a project in different directories, as what rustc is given and writes does not depend on where the project
 is. A crate or command which is cached runs in a hermetic environment, inheriting only the variables it passes on, with
-`pass-env`, and those which locate tools.
+`pass-env`, and those which locate tools. So a static library which relies on a variable the C compiler reads, such as
+`CPATH`, passes it on by name.
 
 `jig cache stats` shows where the cache is and what it holds, `jig cache gc [--max-size <size>]` removes what was used
 longest ago until it is no larger than a size, such as `512M` or `10G`, and `jig cache clear` removes everything in it.

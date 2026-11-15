@@ -66,6 +66,9 @@ pub struct StaticLibrary {
     pub default: bool,
     /// The compiler, and its first arguments.
     pub compiler: Vec<String>,
+    /// What identifies the compiler in rig's cache, if rig caches and it is found, as
+    /// [`Project::identify_static_libraries`] finds it once the configuration is evaluated.
+    pub cache: Option<String>,
     /// The archiver, and its first arguments.
     pub archiver: Vec<String>,
     /// The arguments for C sources, from `c/flags`, after those derived from the codegen options.
@@ -381,6 +384,7 @@ impl Project {
                 pass_env: pass_env.clone(),
                 default,
                 compiler,
+                cache: None,
                 archiver,
                 c_flags: with_derived(c_flags),
                 asm_flags: with_derived(asm_flags),
@@ -467,6 +471,45 @@ impl Project {
                 None
             },
         }
+    }
+    /// Find what identifies the compiler of each static library in rig's cache, if rig caches, so that what it compiled
+    /// is fetched only for the same compiler: the contents of its program, and what the command prints of its version,
+    /// as with `ccache gcc` it is gcc's. The configuration depends on the program, so that it is configured again when
+    /// the compiler is replaced. A compiler which is not found is not cached, and its compiles fail as they run.
+    pub fn identify_static_libraries(&mut self) {
+        if self.cache.is_none() {
+            return;
+        }
+        let mut identities: std::collections::HashMap<Vec<String>, Option<String>> = std::collections::HashMap::new();
+        let mut keys: Vec<_> = self.static_libraries.keys().cloned().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let compiler = self.static_libraries[&key].compiler.clone();
+            let identity = if let Some(identity) = identities.get(&compiler) {
+                identity.clone()
+            } else {
+                let identity = self.compiler_identity(&compiler);
+                identities.insert(compiler, identity.clone());
+                identity
+            };
+            self.static_libraries.get_mut(&key).unwrap().cache = identity;
+        }
+    }
+    /// Returns what identifies a compiler, a program and its first arguments, if its program is found.
+    fn compiler_identity(&mut self, compiler: &[String]) -> Option<String> {
+        let program = if compiler[0].contains('/') || (cfg!(windows) && compiler[0].contains('\\')) {
+            // relative to the project root, as rig runs it from the build directory rebased
+            Some(self.root.join(&compiler[0]))
+        } else {
+            self.which(&compiler[0]).ok()
+        }?;
+        let hash = rig::blake3::hash_file(&program).ok()?;
+        self.depend(program.clone());
+        let version = std::process::Command::new(&program).args(&compiler[1..]).arg("--version").output();
+        let version = version.map(|output| [output.stdout, output.stderr].concat()).unwrap_or_default();
+        let mut key = rig::cache::Key::new("jig c compiler");
+        key.hash(Some(&hash)).part(&version);
+        Some(rig::cache::hex(&key.finish()))
     }
     /// Returns the static libraries, ordered by name and target.
     pub fn static_libraries(&self) -> Vec<&StaticLibrary> {

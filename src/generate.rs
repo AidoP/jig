@@ -888,6 +888,9 @@ fn static_library_edges(
             exec: program_in_build_dir(&program(&library.compiler), args, Vec::new()),
             // a header which is touched, but not changed, rebuilds nothing
             hashed: true,
+            // fetched from rig's cache by the identity of the compiler, as rustc is by the toolchain's, as its depfile
+            // gives every header it read
+            cache: library.cache.as_deref(),
             pass_env: &library.pass_env,
             ..Default::default()
         })?;
