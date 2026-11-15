@@ -275,6 +275,7 @@ fn generate(input: PathBuf, toolchain: Option<&str>) -> Result<(), Error> {
         settings.release = Some((identity.clone(), release));
         project.cache = Some(identity);
         project.identify_cached_customs();
+        project.identify_static_libraries();
     }
     project.cache_settings = settings;
     generate::write(project, &input, &rustc)

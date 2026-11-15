@@ -2599,8 +2599,8 @@ crate app 'app.rs'
     inputs = ../src/uart.c
     command = {helper} cc -Os -Wall -std=c11 -fno-builtin -I../src -I../include -DFAST=true -DUART_BASE=4096 -DDEBUG \
 {remap} -MD -MF {uart}/src-uart.c.o.d -c ../src/uart.c -o {uart}/src-uart.c.o
-    depfile = {uart}/src-uart.c.o.d
-    hashed = true"));
+    depfile = {uart}/src-uart.c.o.d\n"));
+    assert_contains(output.build(&format!("{uart}/src-uart.c.o")), "\n    hashed = true");
     assert_contains(output.build(&format!("{uart}/src-boot.S.o")), &format!("\
     description = AS {uart}/src-boot.S.o
     inputs = ../src/boot.S
@@ -2754,6 +2754,75 @@ static-library m
         .stderr("redeclaration of \"twice\" for target")
         .stderr("redeclaration of \"util\" for target")
         .stderr("static library \"m\" replaces the system's `libm` in the links which use it");
+}
+
+#[test]
+fn static_library_cache() {
+    // what a library's compiler compiled is fetched from rig's cache, in this checkout or another, by the identity of the
+    // compiler, its contents and what it prints of its version, which here is a copy of the test helper, which logs
+    // each source it compiles in the build directory
+    let cache = std::env::temp_dir().join(format!("jig-test-{}-c-cache", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let cache_dir = cache.display().to_string();
+    let files = [
+        ("Jig", format!("\
+set c/compiler ['./tools/fake-cc{EXE}', '--rig-test-helper', 'echo', 'compiled', '>>', 'runs.txt', '&&', 'cc']
+set c/archiver ['HELPER', '--rig-test-helper', 'ar']
+static-library uart
+    source 'uart.c'
+    include 'include'
+    default
+")),
+        ("uart.c", "#include \"uart.h\"\nint uart;\n".into()),
+        ("include/uart.h", "#define ONE 1\n".into()),
+    ];
+    let files: Vec<(&str, &str)> = files.iter().map(|(path, contents)| (*path, contents.as_ref())).collect();
+    let compiler = |project: &Project| {
+        let compiler = project.dir.join(format!("tools/fake-cc{EXE}"));
+        std::fs::create_dir_all(compiler.parent().unwrap()).unwrap();
+        std::fs::copy(helper(), &compiler).unwrap();
+        compiler
+    };
+    let build = |project: &Project| {
+        let mut command = jig_command();
+        command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
+        let output = command.output().unwrap();
+        let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+    // the sources compiled in the build directory, rather than in the project root, where the version is asked
+    let runs = |project: &Project| {
+        std::fs::read_to_string(project.dir.join("build/runs.txt")).unwrap_or_default().lines().count()
+    };
+    let project = Project::new("c-cache", &files);
+    compiler(&project);
+    project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    let host = project.host();
+    let object = project.dir.join(format!("build/{host}/c/uart/uart.c.o"));
+    build(&project);
+    assert_eq!(runs(&project), 1);
+    std::fs::remove_file(&object).unwrap();
+    build(&project);
+    assert_eq!(runs(&project), 1);
+    assert_contains(&std::fs::read_to_string(&object).unwrap(), "#define ONE 1\nint uart;\n");
+    // a header it included is part of the key, by its depfile
+    std::fs::write(project.dir.join("include/uart.h"), "#define TWO 2\n").unwrap();
+    build(&project);
+    assert_eq!(runs(&project), 2);
+    // in another checkout, as what the compiler is given is relative to the build directory, but the build directory,
+    // which rig replaces in the keys of the cache
+    let other = Project::new("c-cache-other", &files);
+    let other_compiler = compiler(&other);
+    other.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    build(&other);
+    assert_eq!(runs(&other), 0);
+    assert!(other.dir.join(format!("build/{host}/c/uart/libuart.a")).is_file());
+    // a compiler which changes configures the project again, and compiles
+    std::io::Write::write_all(&mut std::fs::File::options().append(true).open(&other_compiler).unwrap(), b"changed").unwrap();
+    assert_contains(&build(&other), configuring());
+    assert_eq!(runs(&other), 1);
+    let _ = std::fs::remove_dir_all(&cache);
 }
 
 #[cfg(unix)]
