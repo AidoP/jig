@@ -2718,7 +2718,7 @@ fn static_library_errors() {
     let project = Project::new("static-library-errors", &[("Jig", "\
 set c/compiler 'cc'
 static-library main
-    source 'main.cpp'
+    source 'main.f90'
 static-library nothing
     flags '-O2'
 static-library loop
@@ -2746,7 +2746,7 @@ static-library m
 ")]);
     let output = project.configure().failed();
     output
-        .stderr("the language of \"main.cpp\" is not known by its extension")
+        .stderr("the language of \"main.f90\" is not known by its extension")
         .stderr("[unknown-source-language]")
         .stderr("missing required attribute \"source\"")
         .stderr("static library \"loop\" uses itself, through the libraries it uses")
@@ -3257,6 +3257,121 @@ fn book_kernel_boots() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hello from Rust, through C\n", "{stderr}");
+}
+
+#[test]
+fn cxx_graph() {
+    // C++ is compiled by the C++ compiler, with its flags, and what links a static library of it links the C++ runtime
+    let project = Project::new("cxx-graph", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+set cxx/compiler ['HELPER', '--rig-test-helper', 'cxx']
+set cxx/flags ['-std=c++20']
+static-library sum
+    source 'sum.cpp' 'help.c'
+static-library other
+    source 'other.cc'
+    target host-target
+@with cxx/runtime as 'c++'
+static-library libcxx
+    source 'libcxx.cxx'
+executable tool
+    source 'tool.c'
+    use [sum, other]
+crate app 'app.rs'
+    crate-type 'bin'
+    use sum
+crate pinned 'pinned.rs'
+    crate-type 'bin'
+    use libcxx
+")),
+        ("sum.cpp", ""),
+        ("help.c", ""),
+        ("other.cc", ""),
+        ("libcxx.cxx", ""),
+        ("tool.c", ""),
+        ("app.rs", "fn main() {}\n"),
+        ("pinned.rs", "fn main() {}\n"),
+    ]);
+    let output = project.configure().ok();
+    let host = project.host();
+    let helper = rebased(&project, Path::new(&helper()));
+    let sum = format!("{host}/c/sum");
+    assert_contains(output.build(&format!("{sum}/sum.cpp.o")), &format!("\
+    description = CXX {sum}/sum.cpp.o
+    inputs = ../sum.cpp
+    command = {helper} --rig-test-helper cxx {PIC}-std=c++20 -ffile-prefix-map"));
+    // C by the C compiler
+    assert_contains(output.build(&format!("{sum}/help.c.o")), &format!("command = {helper} --rig-test-helper cc "));
+    // linked by the C compiler, with the runtime, once
+    let runtime = if host.contains("-apple-") { "c++" } else { "stdc++" };
+    let tool = output.build(&format!("{host}/tool{EXE}"));
+    assert_contains(tool, &format!("{sum}/libsum.a {host}/c/other/libother.a -l{runtime} -o {host}/tool{EXE}"));
+    assert_contains(output.build(&format!("{host}/app{EXE}")), &format!(" -l static=sum -l dylib={runtime} "));
+    // or the runtime `cxx/runtime` gives
+    assert_contains(output.build(&format!("{host}/pinned{EXE}")), " -l static=libcxx -l dylib=c++ ");
+}
+
+#[test]
+fn cxx_errors() {
+    // C++ needs a C++ compiler, which another target has none of, though it has a C compiler
+    let project = Project::new("cxx-errors", &[("Jig", "\
+set c/riscv64gc-unknown-none-elf/compiler 'clang'
+set c/riscv64gc-unknown-none-elf/archiver 'llvm-ar'
+static-library c_only
+    source 'only.c'
+    target 'riscv64gc-unknown-none-elf'
+static-library mixed
+    source 'mixed.cpp'
+    target 'riscv64gc-unknown-none-elf'
+")]);
+    let output = project.configure().failed();
+    output.stderr("no C++ compiler for target \"riscv64gc-unknown-none-elf\", which `cxx/riscv64gc-unknown-none-elf/compiler` gives");
+    assert_eq!(output.stderr.matches("error[").count(), 1, "{}", output.stderr);
+}
+
+#[cfg(unix)]
+#[test]
+fn cxx_runs() {
+    // a static library of C++, and a shared one, which a C program and a Rust one link, with the host's compilers
+    let has = |program: &str| Command::new(program).arg("--version").output().is_ok_and(|output| output.status.success());
+    if !(has("cc") && has("c++") && has("ar")) {
+        return;
+    }
+    let project = Project::new("cxx-runs", &[
+        ("Jig", "\
+static-library sum
+    source 'sum.cpp'
+shared-library twice
+    source 'twice.cc'
+executable tool
+    source 'tool.c'
+    use [sum, twice]
+crate app 'app.rs'
+    crate-type 'bin'
+    use sum
+"),
+        ("sum.cpp", "\
+#include <numeric>
+#include <vector>
+extern \"C\" int sum(int n) {
+    std::vector<int> values(n);
+    std::iota(values.begin(), values.end(), 1);
+    return std::accumulate(values.begin(), values.end(), 0);
+}
+"),
+        ("twice.cc", "#include <string>\nextern \"C\" int twice(int n) { return std::stoi(std::to_string(n)) * 2; }\n"),
+        ("tool.c", "#include <stdio.h>\nint sum(int);\nint twice(int);\nint main(void) { printf(\"%d %d\", sum(4), twice(6)); return 0; }\n"),
+        ("app.rs", "unsafe extern \"C\" {\n    fn sum(n: i32) -> i32;\n}\nfn main() {\n    print!(\"{}\", unsafe { sum(8) });\n}\n"),
+    ]);
+    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("CXX", "c++"), ("AR", "ar")];
+    project.configure_with(&env).ok();
+    let run = |name: &str| {
+        let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(run("tool"), "10 12");
+    assert_eq!(run("app"), "36");
 }
 
 #[test]
@@ -7307,7 +7422,7 @@ log note '{kernel.use} | {other.use} | {third.use} | {len(none.use)}'
     assert_contains(&externs("other"), &other);
     assert!(!externs("none").contains("--extern"), "{}", externs("none"));
     let project = Project::new("use-list-errors", &[("Jig", "crate app 'app.rs'\n    use [1]\n")]);
-    project.configure().failed().stderr("error[invalid-operand]: list value used where list of crate names is required");
+    project.configure().failed().stderr("error[invalid-operand]: list value used where list of names of crates or libraries is required");
 }
 
 #[test]

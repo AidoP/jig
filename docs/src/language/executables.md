@@ -48,7 +48,9 @@ An executable is linked as
 where each library it uses, through each other too, is given by the path of its archive or shared library, but for the
 static libraries in a shared library, which are not linked again, each before those it uses, as a linker which reads
 each archive once needs. A library with `whole-archive` is wrapped in `-Wl,--whole-archive` and
-`-Wl,--no-whole-archive`, or given as `-Wl,-force_load,<archive>` on Apple's targets. The
+`-Wl,--no-whole-archive`, or given as `-Wl,-force_load,<archive>` on Apple's targets. One with C++ sources, or which
+links a static library with them, is linked with the C++ runtime, `-l<cxx/runtime>`, after the libraries, as it is
+linked by the C compiler, which does not link it. The
 link flags come after what they may need, as `-l` finds only what is needed by what comes before it. `c/link-flags` is
 `LDFLAGS`, or `LDFLAGS_<target>`, by default, as [the other properties](static-libraries.md#compilers-and-flags) are.
 

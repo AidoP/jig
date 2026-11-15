@@ -19,6 +19,8 @@ pub enum Language {
     C,
     /// Assembly, which is preprocessed, by `.S` and `.sx`, or is not, by `.s`.
     Assembly,
+    /// C++, by `.cc`, `.cpp` and `.cxx`.
+    Cxx,
 }
 
 impl Language {
@@ -27,6 +29,7 @@ impl Language {
         match path.extension()?.to_str()? {
             "c" => Some(Self::C),
             "s" | "S" | "sx" => Some(Self::Assembly),
+            "cc" | "cpp" | "cxx" => Some(Self::Cxx),
             _ => None,
         }
     }
@@ -97,6 +100,14 @@ pub struct Native {
     /// What identifies the compiler in rig's cache, if rig caches and it is found, as
     /// [`Project::identify_static_libraries`] finds it once the configuration is evaluated.
     pub cache: Option<String>,
+    /// The C++ compiler, and its first arguments, if it has C++ sources.
+    pub cxx: Vec<String>,
+    /// What identifies the C++ compiler in rig's cache, as `cache` does the C compiler.
+    pub cxx_cache: Option<String>,
+    /// The arguments for C++ sources, from `cxx/flags`, after those derived from the codegen options.
+    pub cxx_flags: Vec<String>,
+    /// The library of the C++ runtime, from `cxx/runtime`, which what links a static library with C++ sources links.
+    pub cxx_runtime: String,
     /// The archiver, and its first arguments.
     pub archiver: Vec<String>,
     /// The arguments for C sources, from `c/flags`, after those derived from the codegen options.
@@ -115,6 +126,10 @@ pub struct Native {
 }
 
 impl Native {
+    /// Whether any of its sources is C++, so that what links it as a static library links the C++ runtime.
+    pub fn has_cxx(&self) -> bool {
+        self.sources.iter().any(|source| source.language == Language::Cxx)
+    }
     /// The archive of a static library, `lib<name>.a`, in its own directory, so that the linker finds it only where it
     /// is used, or the program of an executable, `<build-dir>/<target>/<name>`, as a binary crate's is.
     pub fn output(&self) -> PathBuf {
@@ -212,7 +227,30 @@ pub(super) const TOOLS: &[Tool] = &[
         fallback: None,
         info: "the arguments of the C compiler as it links an executable, `LDFLAGS` by default",
     },
+    Tool {
+        property: "cxx/compiler",
+        variable: "CXX",
+        fallback: Some("c++"),
+        info: "the C++ compiler, as a program or a list of it and its first arguments, `CXX` or `c++` by default",
+    },
+    Tool {
+        property: "cxx/flags",
+        variable: "CXXFLAGS",
+        fallback: None,
+        info: "the arguments of the C++ compiler for C++ sources, `CXXFLAGS` by default",
+    },
+    Tool {
+        property: "cxx/runtime",
+        variable: "",
+        fallback: None,
+        info: "the library of the C++ runtime, which what links a static library of C++ links, `c++` for Apple's and \
+               the BSDs' targets and `stdc++` for others by default",
+    },
 ];
+
+/// The number of [`TOOLS`] which every library or executable needs, which are before those of C++, which only one with
+/// C++ sources needs, so that `CXX` is not read for one without.
+const C_TOOLS: usize = 5;
 
 /// Returns the target and the tool of the name of a property for a target, `c/<target>/<name>` or `asm/<target>/<name>`,
 /// whether or not the target is known.
@@ -273,6 +311,10 @@ impl Project {
                 let operand = Operand { data: value.data.clone(), span, coerce: super::value::Coercion::Strict, origin: value.origin };
                 return self.arguments(&operand);
             }
+        }
+        // one which is not read from the environment, as `cxx/runtime`
+        if tool.variable.is_empty() {
+            return None;
         }
         let split = |value: std::ffi::OsString| -> Vec<String> {
             value.to_string_lossy().split_whitespace().map(String::from).collect()
@@ -460,10 +502,28 @@ impl Project {
                 continue;
             }
             let mut tools = Vec::new();
-            for tool in TOOLS {
+            for tool in &TOOLS[..C_TOOLS] {
                 tools.push(self.tool_arguments(tool, target, span));
             }
-            let [compiler, archiver, c_flags, asm_flags, c_link_flags] = <[_; 5]>::try_from(tools).ok().unwrap();
+            let [compiler, archiver, c_flags, asm_flags, c_link_flags] = <[_; C_TOOLS]>::try_from(tools).ok().unwrap();
+            // C++'s, only for C++
+            let has_cxx = sources.iter().any(|source| source.language == Language::Cxx);
+            let (mut cxx, mut cxx_flags, mut cxx_runtime) = (Vec::new(), Vec::new(), String::new());
+            if has_cxx {
+                let [compiler, flags, runtime] = [&TOOLS[C_TOOLS], &TOOLS[C_TOOLS + 1], &TOOLS[C_TOOLS + 2]];
+                let Some(compiler) = self.tool_arguments(compiler, target, span).filter(|cxx| !cxx.is_empty()) else {
+                    self.diagnostics.push(Diagnostic {
+                        span: Some(span),
+                        message: Message::NoCxxCompiler { target: target.clone() },
+                        severity: Severity::Error,
+                    });
+                    continue;
+                };
+                cxx = compiler;
+                cxx_flags = self.tool_arguments(flags, target, span).unwrap_or_default();
+                let runtime = self.tool_arguments(runtime, target, span).and_then(|runtime| runtime.into_iter().next());
+                cxx_runtime = runtime.unwrap_or_else(|| default_cxx_runtime(target).into());
+            }
             // what is linked by the compiler needs no archiver
             let archiver = if kind.is_linked() { Some(archiver.unwrap_or_default()) } else { archiver };
             let archiver = archiver.filter(|a| !a.is_empty() || kind.is_linked());
@@ -497,6 +557,10 @@ impl Project {
                 cache: None,
                 archiver,
                 c_flags: with_derived(c_flags),
+                cxx,
+                cxx_cache: None,
+                cxx_flags: with_derived(Some(cxx_flags)),
+                cxx_runtime,
                 asm_flags: with_derived(asm_flags),
                 link_flags: c_link_flags.unwrap_or_default().into_iter().chain(link_flags.iter().cloned()).collect(),
                 link_script: link_script.clone(),
@@ -598,15 +662,23 @@ impl Project {
         let mut keys: Vec<_> = self.natives.keys().cloned().collect();
         keys.sort_unstable();
         for key in keys {
-            let compiler = self.natives[&key].compiler.clone();
-            let identity = if let Some(identity) = identities.get(&compiler) {
-                identity.clone()
-            } else {
-                let identity = self.compiler_identity(&compiler);
+            let mut identify = |project: &mut Self, compiler: Vec<String>| {
+                if compiler.is_empty() {
+                    return None;
+                }
+                if let Some(identity) = identities.get(&compiler) {
+                    return identity.clone();
+                }
+                let identity = project.compiler_identity(&compiler);
                 identities.insert(compiler, identity.clone());
                 identity
             };
-            self.natives.get_mut(&key).unwrap().cache = identity;
+            let (compiler, cxx) = (self.natives[&key].compiler.clone(), self.natives[&key].cxx.clone());
+            let c_compiler = identify(self, compiler);
+            let cxx_compiler = identify(self, cxx);
+            let native = self.natives.get_mut(&key).unwrap();
+            native.cache = c_compiler;
+            native.cxx_cache = cxx_compiler;
         }
     }
     /// Returns what identifies a compiler, a program and its first arguments, if its program is found.
@@ -723,8 +795,9 @@ impl Project {
                 return;
             }
             let shared = library.kind == NativeKind::SharedLibrary;
-            for used in project.used_libraries(&library.uses, &library.target) {
-                visit(project, used, within_shared || shared, visited, order);
+            let dependencies: Vec<_> = project.used_libraries(&library.uses, &library.target).collect();
+            for dependency in dependencies.into_iter().rev() {
+                visit(project, dependency, within_shared || shared, visited, order);
             }
             let linked = shared || !within_shared;
             if linked && !order.iter().any(|known| std::ptr::eq(*known, library)) {
@@ -733,13 +806,23 @@ impl Project {
         }
         let mut order = Vec::new();
         let mut visited = std::collections::HashSet::new();
-        for library in self.used_libraries(uses, target) {
+        // in reverse, as the order is reversed, so that libraries which do not use each other are in the order they
+        // are used in
+        let direct: Vec<_> = self.used_libraries(uses, target).collect();
+        for library in direct.into_iter().rev() {
             visit(self, library, false, &mut visited, &mut order);
         }
         // each after those it uses, reversed, so that each comes before them
         order.reverse();
         order
     }
+}
+
+/// Returns the library of the C++ runtime of a target, which links libc++ on Apple's and the BSDs' targets, whose
+/// compilers are clang, and libstdc++ elsewhere, as GCC does.
+fn default_cxx_runtime(target: &str) -> &'static str {
+    let llvm = ["-apple-", "freebsd", "openbsd", "netbsd"].iter().any(|system| target.contains(system));
+    if llvm { "c++" } else { "stdc++" }
 }
 
 /// Whether a target has shared libraries, as one with an operating system does, while one without, such as
@@ -792,7 +875,9 @@ mod tests {
         assert_eq!(Language::of(Path::new("boot.S")), Some(Language::Assembly));
         assert_eq!(Language::of(Path::new("boot.s")), Some(Language::Assembly));
         assert_eq!(Language::of(Path::new("boot.sx")), Some(Language::Assembly));
-        assert_eq!(Language::of(Path::new("main.cpp")), None);
+        assert_eq!(Language::of(Path::new("main.cpp")), Some(Language::Cxx));
+        assert_eq!(Language::of(Path::new("main.cc")), Some(Language::Cxx));
+        assert_eq!(Language::of(Path::new("main.f90")), None);
         assert_eq!(Language::of(Path::new("Makefile")), None);
     }
 

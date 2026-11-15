@@ -864,6 +864,11 @@ impl NativeLinks {
             }
         }
         let mut linked = link(true);
+        // the C++ runtime, if a static library which is linked has C++ sources, which rustc's linker does not link
+        let cxx = libraries.iter().filter(|library| library.kind == NativeKind::StaticLibrary).find(|library| library.has_cxx());
+        if let Some(cxx) = cxx {
+            linked.extend(["-l".to_string(), format!("dylib={}", cxx.cxx_runtime)]);
+        }
         for library in &libraries {
             linked.extend(["-L".to_string(), format!("native={}", at.path(&library.dir).display())]);
         }
@@ -904,11 +909,13 @@ fn native_edges(
         let object = at.path(&library.object(&source.path));
         let input = at.path(&source.path);
         let depfile = depfile_of(&object);
-        let (language_flags, action) = match source.language {
-            crate::project::Language::C => (&library.c_flags, "CC"),
-            crate::project::Language::Assembly => (&library.asm_flags, "AS"),
+        // C++ by its own compiler, which is identified in the cache by itself
+        let (compiler, cache, language_flags, action) = match source.language {
+            crate::project::Language::C => (&library.compiler, &library.cache, &library.c_flags, "CC"),
+            crate::project::Language::Assembly => (&library.compiler, &library.cache, &library.asm_flags, "AS"),
+            crate::project::Language::Cxx => (&library.cxx, &library.cxx_cache, &library.cxx_flags, "CXX"),
         };
-        let mut args: Vec<String> = library.compiler[1..].to_vec();
+        let mut args: Vec<String> = compiler[1..].to_vec();
         if library.position_independent() {
             args.push("-fPIC".into());
         }
@@ -923,19 +930,19 @@ fn native_edges(
         args.extend(remap.iter().cloned());
         args.extend(["-MD".to_string(), "-MF".to_string(), depfile.display().to_string()]);
         args.extend(["-c".to_string(), input.display().to_string(), "-o".to_string(), object.display().to_string()]);
-        compile_commands.push(compile_command(at, &program(&library.compiler), &args, &input, &object));
+        compile_commands.push(compile_command(at, &program(compiler), &args, &input, &object));
         graph.edge(Edge {
             description: describe(action, &object),
             outputs: &[&object],
             inputs: &[&input],
             after: &as_paths(&depends),
             depfile: Some(&depfile),
-            exec: program_in_build_dir(&program(&library.compiler), args, Vec::new()),
+            exec: program_in_build_dir(&program(compiler), args, Vec::new()),
             // a header which is touched, but not changed, rebuilds nothing
             hashed: true,
             // fetched from rig's cache by the identity of the compiler, as rustc is by the toolchain's, as its depfile
             // gives every header it read
-            cache: library.cache.as_deref(),
+            cache: cache.as_deref(),
             pass_env: &library.pass_env,
             ..Default::default()
         })?;
@@ -997,6 +1004,12 @@ fn link_native(
             () if apple => args.push(format!("-Wl,-force_load,{path}")),
             () => args.extend(["-Wl,--whole-archive".to_string(), path, "-Wl,--no-whole-archive".to_string()]),
         }
+    }
+    // the C++ runtime, after what needs it, if it or a static library it links has C++ sources, as it is linked by the C
+    // compiler, which does not link it
+    let static_cxx = libraries.iter().filter(|library| library.kind == NativeKind::StaticLibrary).find(|library| library.has_cxx());
+    if let Some(runtime) = native.has_cxx().then_some(native).or(static_cxx.copied()).map(|cxx| &cxx.cxx_runtime) {
+        args.push(format!("-l{runtime}"));
     }
     // after what they may name, as `-l` finds only what is needed by what comes before it
     args.extend(native.link_flags.iter().cloned());
