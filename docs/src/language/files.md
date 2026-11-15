@@ -14,7 +14,11 @@ value is a reference to it, so it can be an input, or a `link-script`. Its outpu
   default, with its `mode`, which a symbolic `install-mode` changes. A file whose installed permissions are executable
   is a program for `jig install --proxy`
 
-```
+<!-- jig-test
+declare kernel-base
+    default 0x8000_0000
+-->
+```jig
 file kernel-link
     output 'kernel.x'
     content '''

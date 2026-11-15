@@ -78,11 +78,26 @@ GitHub Pages from main, and then makes what it says current, complete and checke
      `jig test`, `jig lint`, `declare` and the builtin properties have examples, each configured and run before it
      was added. Writing them found that `jig build -n` failed on every project, as the state it opened was locked by
      the same process, which is fixed, with an integration test.
-4. **Checked docs.**
+4. **Done: checked docs.**
    - A test configures each example of a `Jig` file in the book, marked as a `jig` code block, so that an example
      which no longer configures fails.
    - A test checks that the builtin properties and the diagnostics the book lists are those jig has, and every link
      between the book's pages, and to a heading, leads somewhere.
+   - **Since:**
+     - The integration test `book_examples_configure` configures each of the book's 29 examples marked `jig`. An
+       example which is part of a configuration has what it needs in a comment before it, `<!-- jig-test ... -->`,
+       which the book doesn't show: the declarations it uses, and a line `files: <path> ...` of the files it reads.
+       Those left unmarked are jig's own `Jig.local`, one which runs `git`, and one which needs nightly.
+     - The diagnostics page lists every diagnostic, by area, with what it is reported for, and the unit test
+       `book::lists_every_diagnostic` checks it against `DIAGNOSTIC_IDS`, both ways.
+     - `book::lists_every_builtin_property` checks the builtin properties page against the properties jig declares,
+       with `codegen/<option>` and the like as patterns, both ways.
+     - `book::links_lead_somewhere` checks each link between pages, and to a heading as mdBook names it, and that
+       every page is in the summary. mdBook no longer makes a missing page, with `create-missing = false`.
+     - Each test was checked to fail: with an example broken, a diagnostic's row removed, a builtin property removed,
+       and a link to a page, and to a heading, broken.
+     - Writing them found an example which failed for anyone without `CI` set, `@if env('CI') == 'true'`, now
+       `try(env('CI'), '')`.
 5. **Built by jig, in CI, and published.**
    - A custom command, `book`, in `Jig` builds the book with mdBook into `build/book`, when `mdbook` is found, and
      `jig build custom/book` builds it.

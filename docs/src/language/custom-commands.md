@@ -35,7 +35,7 @@ A reference is its paths, as they are already resolved, while an absolute path i
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output
 cannot be, contain or be within the output of a crate, its test harness, or another custom command.
 
-```
+```jig
 custom device-tree
     input 'virt.dts'
     output 'virt.dtb'

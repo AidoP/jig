@@ -22,6 +22,8 @@ mod value;
 
 pub use customs::CustomKind;
 pub use diagnostic::{Diagnostic, Message, Severity, severity_override};
+#[cfg(test)]
+pub(crate) use diagnostic::DIAGNOSTIC_IDS;
 pub use generated::GeneratedFile;
 pub use install::Installed;
 pub use syntax::Span;
@@ -281,6 +283,12 @@ impl Project {
     /// The directory of what is built, from the `build-dir` property, relative to the project root.
     ///
     /// The property is read-only once this is used, so that everything is built in the same directory.
+    /// Returns the names of the properties which are declared, in no order.
+    #[cfg(test)]
+    pub fn declared(&self) -> Vec<&str> {
+        let declared = self.properties_idx.iter().filter(|&(_, &id)| self.properties[id].is_some());
+        declared.map(|(name, _)| name.as_str()).collect()
+    }
     pub fn build_dir(&mut self) -> PathBuf {
         if let Some(dir) = &self.build_dir {
             return dir.clone();

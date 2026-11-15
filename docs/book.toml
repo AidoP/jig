@@ -10,3 +10,5 @@ edit-url-template = "https://github.com/AidoP/jig/edit/main/docs/{path}"
 
 [build]
 build-dir = "../build/book"
+# a page the summary lists which is missing is an error, rather than made empty
+create-missing = false

@@ -18,7 +18,11 @@ and those of a target, builtin or declared, are `inherit`, `test`, `runner`, `li
 which is `false` for a custom target. The configuration is generated again when the target's libraries change, so it
 follows the standard library being installed.
 
-```
+<!-- jig-test
+declare targets
+    default [host-target]
+-->
+```jig
 @for target in targets
 @if {target}.has-std
 crate app 'app.rs'
@@ -58,7 +62,15 @@ This converts between `unsigned` and `signed`, parses a `str` as an integer or a
 as `0` or `1`, and treats an integer as `true` unless it is zero. Integer literals are only coerced between
 `unsigned` and `signed`.
 
-```
+<!-- jig-test
+declare pages
+    default '4'
+declare small
+    default 'false'
+declare size
+declare large
+-->
+```jig
 set size {pages} * 0x1000 - 1
 set large size >= 0x10_0000 && !{small}
 ```
@@ -67,7 +79,11 @@ Within a string, an expression in `{}` is replaced with its value, and `{{` and 
 The expression cannot start with `{`, which would be `{{`, so a name computed from its start is put in `()`, as in
 `'{({host-target}/core)}'`. It can contain strings, which are templates themselves.
 
-```
+<!-- jig-test
+declare size
+    default 0x4000
+-->
+```jig
 log note 'size is {size} with {size / 0x1000} pages'
 log note 'home is {env('HOME')}'
 ```
@@ -77,7 +93,7 @@ between are indented by 4 spaces more, which is removed, or are blank, and are j
 end. A line starting with `#`, in the first column, is a comment which is skipped. Like other strings, each line is a
 template.
 
-```
+```jig
 log note '''
     first line
       indented line

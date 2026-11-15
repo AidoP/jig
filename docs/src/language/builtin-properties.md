@@ -51,7 +51,7 @@
   a dict of those which are set
 - `diagnostic/<id>`: the severity of a diagnostic, as [diagnostics](diagnostics.md) describes
 
-```
+```jig
 set build-dir 'out'
 set test-tags ['slow']
 
