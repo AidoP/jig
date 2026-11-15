@@ -1,6 +1,6 @@
 # rig as a library
 
-`rig/` is rig, the build engine which builds projects, as [rig's design](design/build-engine.md) describes. It is a crate which `jig`
+`rig/` is rig, the build engine which builds projects, as [rig's design](rig/design.md) describes. It is a crate which `jig`
 uses, and has a `Cargo.toml` so that cargo projects can use it as a git or path dependency. `jig generate` writes rig's
 graph to `graph` in the build directory, and rig builds the project, keeping the state of the build in `.rig` in the
 build directory.

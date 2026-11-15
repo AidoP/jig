@@ -36,11 +36,17 @@
 # rig
 
 - [rig as a library](rig.md)
-- [rig's design](design/build-engine.md)
+- [rig's design](rig/design.md)
+  - [The graph](rig/graph.md)
+  - [The state, and how changes are found](rig/changes.md)
+  - [Environment variables](rig/environment.md)
+  - [Running a build](rig/execution.md)
+  - [The cache](rig/cache.md)
+  - [Workers](rig/workers.md)
+  - [Why rig is as it is](rig/rationale.md)
 
 # Developing jig
 
 - [Developing jig](developing.md)
 - [Plans](plans.md)
-  - [Removing ninja](design/remove-ninja.md)
-  - [Cleaning up the docs](design/doc-cleanup.md)
+  - [Cleaning up the docs](plans/doc-cleanup.md)

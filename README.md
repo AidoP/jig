@@ -34,4 +34,4 @@ by `mdbook build docs`. What was in this README is now in the book:
 - Statements, Meta-statements, Expressions, Builtin properties and Diagnostics:
   [The configuration language](docs/src/language.md)
 
-rig's design is in [rig's design](docs/src/design/build-engine.md).
+rig's design is in [rig's design](docs/src/rig/design.md).

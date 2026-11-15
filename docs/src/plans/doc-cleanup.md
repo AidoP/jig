@@ -20,8 +20,9 @@ GitHub Pages from main, and then makes what it says current, complete and checke
 - **The README stays short.** It says what jig is, how to bootstrap and install it, and links to the book, as a release
   ships it beside `jig`.
 - **No PDF.** The book is a website only.
-- **The plans stay as they were written,** as the record of how jig and rig were made, in the book's last part, as rig's
-  phases do in its design. What is current is described elsewhere.
+- **A plan is removed once it is done.** What it made is described in the rest of the book, and its history is in
+  git. So `build-engine.md`, of the phases which built rig, and `remove-ninja.md` are gone, and this plan goes when it
+  is done.
 
 ## The book's layout
 
@@ -29,8 +30,9 @@ GitHub Pages from main, and then makes what it says current, complete and checke
 - **Using jig:** installing, the commands, toolchains, caching, workers, and the user's configuration.
 - **The configuration language:** an overview, then statements, meta-statements, expressions, functions, properties,
   crates, codegen options and profiles, custom commands, generated files, targets, builtin properties and diagnostics.
-- **rig:** rig as a library, and rig's design.
-- **Developing jig:** building and testing jig itself, its tests on Windows, and the plans.
+- **rig:** rig as a library, and rig's design: the graph, the state and how changes are found, environment variables,
+  running a build, the cache, workers, and why rig is as it is.
+- **Developing jig:** building and testing jig itself, its tests on Windows, and the plans under way.
 
 ## Steps
 
@@ -38,21 +40,29 @@ GitHub Pages from main, and then makes what it says current, complete and checke
    - `docs/book.toml` and `docs/src/SUMMARY.md` set up the book in the layout above.
    - The README's sections are moved into the book's pages as they are written, with only the references which now lead
      to another page made links, such as "see below". Its headings become the pages' titles.
-   - `build-engine.md` and `remove-ninja.md` move into `docs/src/design/` as they are, with this plan, so that the links
-     to them work on the site.
+   - `build-engine.md` and `remove-ninja.md` move into the book as they are, with this plan, so that the links to them
+     work on the site.
    - The README keeps what jig is, how to bootstrap, build and install it, and links to the book's pages.
    - Check: `mdbook build docs` succeeds without warnings, and every line of the old README is in a page.
    - **Since:** the README's 1054 lines are 27 pages. Every line of its body is in exactly one of them, as checked
      when it was split, but for its headings, which became titles, and its sentence of what building needs, which is
      split between installing and developing. Each relative link and heading the site's pages link to exists. The
      README lists where each of its sections went. `docs/book.toml` builds the book into `build/book`.
-2. **rig's design as it is.**
-   - `build-engine.md` is split: what describes rig as it is now becomes the design chapter, in the present tense, and
-     its phases move to a history page, kept as they were written.
-   - The design describes what the phases left out of it, or which changed since it was written: the graph's inputs,
-     dependencies and what an edge is built after, edges as programs without a shell, the test helper, and the version
-     of each format: the graph's (10), the worker protocol's (11) and jig's database (30).
-   - Its decisions and risks become a page of why rig is as it is.
+2. **Done: rig's design as it is.**
+   - What `build-engine.md` said of rig as it is now, and what its phases built, are the design chapter, in the present
+     tense, in `docs/src/rig/`: an overview, with rig's goals, principles, architecture and the version of each format,
+     then the graph, the state and how changes are found, environment variables, running a build, the cache, workers,
+     and why rig is as it is.
+   - The design describes what changed since it was written: edges' inputs, dependencies and what they are built after,
+     commands as programs without a shell, no JSON event stream, the toolchain's identity of the channel's manifest
+     alone, and the version of each format: the graph's (10), the state log's (4), the cache's (2), the protocol's (11)
+     and jig's database (30).
+   - Its decisions and risks, and what was decided against, as io_uring, a daemon and bazel-remote, with the
+     measurements which decided them, are a page of why rig is as it is.
+   - `build-engine.md` and `remove-ninja.md` are removed, as both are done. The measurements and test lists of each
+     phase, and how ninja was replaced, are in git's history.
+   - Check: `mdbook build docs` succeeds without warnings, each relative link and heading the site's pages link to
+     exists, and nothing links to the removed pages.
 3. **What is missing.**
    - A page of the files jig keeps: `.jig` at the project root, with what configuring asked rustc, and in the build
      directory, `graph`, `graph.d`, `.rig` and the cache, with when each is written and read again.
