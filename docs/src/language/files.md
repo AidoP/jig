@@ -32,3 +32,17 @@ crate kernel 'kernel/main.rs'
     crate-type 'bin'
     link-script kernel-link
 ```
+
+Assembly needs no C compiler, as rustc assembles it with LLVM's assembler, for any target it has: a `.s` file is
+included in a crate with `global_asm!`, such as the kernel's entry point, `_start`, which its linker script names.
+rustc lists the file in the crate's dep-info, so the crate is built again when it changes, and is cached by its
+contents, as the crate's own sources are. The file is in LLVM's syntax for the target, which is GNU's, but for x86,
+where it is Intel's unless it starts with `.att_syntax`. A `.S` file, which the C preprocessor reads first, needs a C
+compiler, as a `custom` command.
+
+```rust
+// kernel/main.rs
+#![no_std]
+#![no_main]
+core::arch::global_asm!(include_str!("boot.s"));
+```

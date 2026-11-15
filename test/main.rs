@@ -2510,6 +2510,42 @@ fn rig_rebuilds_when_a_crate_variable_changes() {
 }
 
 #[test]
+fn assembly_in_a_crate() {
+    // assembly is included with `global_asm!`, which rustc assembles, with no C compiler, and lists in the crate's
+    // dep-info, so the crate is built again when the assembly changes. Its byte is labelled with and without the `_`
+    // which Apple's and 32-bit Windows' symbols have, and `.data` is a section in each of ELF, Mach-O and COFF
+    let assembly = |value: u8| format!(".data\n.globl jig_value\n.globl _jig_value\njig_value:\n_jig_value:\n    .byte {value}\n");
+    let project = Project::new("assembly", &[
+        ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n"),
+        ("app.rs", "\
+core::arch::global_asm!(include_str!(\"value.s\"));
+unsafe extern \"C\" {
+    static jig_value: u8;
+}
+fn main() {
+    print!(\"{}\", unsafe { jig_value });
+}
+"),
+        ("value.s", &assembly(1)),
+    ]);
+    project.configure_with(&[("JIG_CACHE", "off")]).ok();
+    let run = || {
+        let output = jig_command().arg("run").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
+    };
+    assert_eq!(run().0, "1");
+    let (stdout, stderr) = run();
+    assert_eq!(stdout, "1");
+    assert!(!stderr.contains("RUSTC"), "{stderr}");
+    // a byte of two digits, so that the file changes size too, whatever the resolution of its timestamp
+    std::fs::write(project.dir.join("value.s"), assembly(12)).unwrap();
+    let (stdout, stderr) = run();
+    assert_eq!(stdout, "12");
+    assert_contains(&stderr, "RUSTC");
+}
+
+#[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
     // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs

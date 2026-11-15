@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Not started.**
+linking them into Rust crates. **Phase 0 is done**; the others are not started.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -44,7 +44,7 @@ leaves room for each, in [later](#phase-6-later).
 - **Running programs.** `jig run`, `jig test` and a target's `runner` already decide how a program is run, which is
   where a shared library's directory is added to the search path.
 
-## Phase 0: assembly without a C compiler
+## Phase 0: assembly without a C compiler (done)
 
 rustc assembles with LLVM's assembler, for every target it has, so a `.s` file reaches a crate as
 
@@ -55,9 +55,12 @@ core::arch::global_asm!(include_str!("boot.s"));
 and rustc's dep-info already lists `boot.s`, so the crate is rebuilt when it changes, and cached by it. This covers the
 common case of jig's bare-metal users, a boot stub for a kernel with a `link-script`, with no new code.
 
-- Document it in the README, beside `link-script`, with the kernel example.
-- Add an integration test of a crate whose `include_str!`'d assembly is edited, which is rebuilt.
-- Say what it does not cover: `.S` files, which need the C preprocessor, and assembly in GNU syntax which LLVM's
+- [Generated files](../language/files.md) documents it beside `link-script`, with the kernel example.
+- `assembly_in_a_crate`, an integration test, runs a program whose byte is defined in `include_str!`'d assembly,
+  which is not built again when nothing changed, and is built again with the new byte when the assembly is edited.
+  The byte is labelled both with and without a leading `_`, and is in `.data`, so the same file links on ELF, Mach-O
+  and COFF, and on every host CI runs, without a C compiler.
+- It says what it does not cover: `.S` files, which need the C preprocessor, and assembly in GNU syntax which LLVM's
   assembler refuses. Those wait for phase 1.
 
 ## The statements
@@ -281,8 +284,8 @@ shared library is only for a target which has them, so one for a target without 
 - Write `compile_commands.json` to the build directory beside `.rust-project.json`, with each source's command and
   `"directory"` the build directory, so clangd finds the includes and defines of each file.
 - `jig check` compiles C with `-fsyntax-only`, so that C's errors are shown where Rust's are.
-- An example in the README of a RISC-V kernel with a boot stub in `.S`, a linker script from a `file` statement, its
-  own `static-library c`, and a runner of QEMU, built with clang.
+- An example in the book, beside the kernel's linker script, of a RISC-V kernel with a boot stub in `.S`, a linker
+  script from a `file` statement, its own `static-library c`, and a runner of QEMU, built with clang.
 
 ### Phase 6: later
 
