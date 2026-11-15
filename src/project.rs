@@ -402,19 +402,7 @@ impl Project {
                 undeclared.push(UndeclaredValue { name: name.clone(), value: idx });
             }
         }
-        // a value restored by `@with` is not the value of its property, which may have no other
-        for &value in &self.reverted {
-            let property = self.values[value].property;
-            if self.properties[property].is_some() {
-                continue;
-            }
-            let Some((name, _)) = self.properties_idx.iter().find(|&(_, &id)| id == property) else {
-                continue;
-            };
-            if undeclared.iter().all(|undeclared| undeclared.name != *name) {
-                undeclared.push(UndeclaredValue { name: name.clone(), value });
-            }
-        }
+        // a value `@with` gave a property, and restored, needs no declaration, as it is only for the statements after it
         undeclared.sort_by_key(|undeclared| undeclared.value);
         // the names which `defined` or `select` were given before they were declared, unless they were set, which is
         // reported where they were, once for where each was given, as a call in a loop is evaluated several times

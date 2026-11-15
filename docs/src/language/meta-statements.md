@@ -69,12 +69,23 @@ log note 'added {a}, the total is {total}'
 
 - `@with <name> as <value>`: process the meta-statements and statement after it, and the statements chained to it with
   `@then`, with the property `<name>` set to the value, as by `set`, then restore its previous value, unless they set
-  it. Unlike `@for`, the property is set everywhere, including in files used by the statements. As with `set`, it can
-  be declared later, which checks the value. Conditions after it continue the chain of those before it, or start one
+  it. Unlike `@for`, the property is set everywhere, including in files used by the statements. Unlike `set`, the
+  property needn't be declared, as its value is only for the statements, while one which is declared later checks the
+  value. Conditions after it continue the chain of those before it, or start one
 
 ```jig
 @with target as 'riscv64gc-unknown-none-elf'
 crate kernel 'kernel.rs'
 @then
 crate boot 'boot.rs'
+```
+
+A property which is only for a file's statements, such as a board a file of its own describes, needs no declaration:
+
+<!-- jig-test
+files: boards/Jig
+-->
+```jig
+@with board as 'virt'
+use 'boards'
 ```
