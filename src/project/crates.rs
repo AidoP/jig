@@ -139,6 +139,8 @@ impl Project {
                         "lib" => kind = rust::Kind::Lib,
                         "bin" => kind = rust::Kind::Bin,
                         "proc-macro" => kind = rust::Kind::ProcMacro,
+                        "staticlib" => kind = rust::Kind::StaticLib,
+                        "cdylib" => kind = rust::Kind::CDylib,
                         _ => self.diagnostics.push(Diagnostic {
                             span: Some(span),
                             message: Message::InvalidCrateType(crate_type),
@@ -208,7 +210,8 @@ impl Project {
         }
         let mut install = match kind {
             rust::Kind::Bin => Install::executable(),
-            rust::Kind::Lib => Install::library(0o644),
+            rust::Kind::Lib | rust::Kind::StaticLib => Install::library(0o644),
+            rust::Kind::CDylib => Install::library(0o755),
             // a dynamic library, which is executable
             rust::Kind::ProcMacro => Install::library(0o755),
         };

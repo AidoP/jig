@@ -3375,6 +3375,125 @@ extern \"C\" int sum(int n) {
 }
 
 #[test]
+fn rust_for_c_graph() {
+    // a crate for C, a `staticlib` or `cdylib`, is linked by the executables and libraries of C which use it, with the
+    // libraries of the system a static one needs, which rustc writes, and through the static libraries which use it
+    let project = Project::new("rust-for-c-graph", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+crate counter 'counter.rs'
+    crate-type 'staticlib'
+crate greeter 'greeter.rs'
+    crate-type 'cdylib'
+static-library wrap
+    source 'wrap.c'
+    use counter
+executable tool
+    source 'tool.c'
+    use [wrap, greeter]
+")),
+        ("counter.rs", ""),
+        ("greeter.rs", ""),
+        ("wrap.c", ""),
+        ("tool.c", ""),
+    ]);
+    let output = project.configure().ok();
+    let host = project.host();
+    let counter = output.build(&format!("{host}/libcounter.a"));
+    assert_contains(counter, &format!("{host}/libcounter.a {host}/libcounter.a.libs\n"));
+    assert_contains(counter, &format!(" --print=native-static-libs={host}/libcounter.a.libs "));
+    assert_contains(counter, " --crate-type=staticlib ");
+    let greeter = if host.contains("-windows") {
+        "greeter.dll"
+    } else if host.contains("-apple-") {
+        "libgreeter.dylib"
+    } else {
+        "libgreeter.so"
+    };
+    let cdylib = output.build(&format!("{host}/{greeter}"));
+    assert_contains(cdylib, " --crate-type=cdylib ");
+    if !host.contains("-windows") && !host.contains("-apple-") {
+        assert_contains(cdylib, " -C link-arg=-Wl,-soname,libgreeter.so ");
+    }
+    let tool = output.build(&format!("{host}/tool{EXE}"));
+    assert_contains(tool, &format!(
+        " {host}/c/wrap/libwrap.a {host}/{greeter} {host}/libcounter.a @{host}/libcounter.a.libs -o {host}/tool{EXE}"
+    ));
+}
+
+#[test]
+fn rust_for_c_errors() {
+    let project = Project::new("rust-for-c-errors", &[("Jig", "\
+crate lib 'lib.rs'
+crate counter 'counter.rs'
+    crate-type 'staticlib'
+crate app 'app.rs'
+    crate-type 'bin'
+    use counter
+executable tool
+    source 'tool.c'
+    use lib
+")]);
+    project
+        .configure()
+        .failed()
+        .stderr("crate \"counter\" is a staticlib, which cannot be used by another crate")
+        .stderr("crate \"lib\" is not a library for C, which C can link with `crate-type 'staticlib'` or `'cdylib'`")
+        .stderr("[use-rust-crate]");
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_for_c_runs() {
+    // C programs which call Rust, from a `staticlib`, through a library crate it uses, and from a `cdylib`, which
+    // `jig run` finds, with the host's C compiler
+    let has = |program: &str| Command::new(program).arg("--version").output().is_ok_and(|output| output.status.success());
+    if !has("cc") {
+        return;
+    }
+    let project = Project::new("rust-for-c-runs", &[
+        ("Jig", "\
+crate util 'util.rs'
+crate counter 'counter.rs'
+    crate-type 'staticlib'
+    use util
+crate greeter 'greeter.rs'
+    crate-type 'cdylib'
+executable count
+    source 'count.c'
+    use counter
+executable greet
+    source 'greet.c'
+    use greeter
+"),
+        ("util.rs", "pub fn base() -> i32 {\n    40\n}\n"),
+        ("counter.rs", "\
+#[unsafe(no_mangle)]
+pub extern \"C\" fn count(n: i32) -> i32 {
+    let values: Vec<i32> = (0..n).collect();
+    util::base() + values.len() as i32
+}
+"),
+        ("greeter.rs", "\
+#[unsafe(no_mangle)]
+pub extern \"C\" fn greeting() -> *const core::ffi::c_char {
+    c\"hello from Rust\".as_ptr()
+}
+"),
+        ("count.c", "#include <stdio.h>\nint count(int);\nint main(void) { printf(\"%d\", count(2)); return 0; }\n"),
+        ("greet.c", "#include <stdio.h>\nconst char *greeting(void);\nint main(void) { printf(\"%s\", greeting()); return 0; }\n"),
+    ]);
+    let env = [("JIG_CACHE", "off"), ("CC", "cc")];
+    project.configure_with(&env).ok();
+    let run = |name: &str| {
+        let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(run("count"), "42");
+    assert_eq!(run("greet"), "hello from Rust");
+}
+
+#[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an
     // error from rig, as the crates a crate uses are its dependencies, which may be missing, rather than its inputs

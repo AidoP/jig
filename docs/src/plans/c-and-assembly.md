@@ -370,7 +370,15 @@ which call it with `jig test`, and the installed program by its rpath, without t
   sources, and the C++ compiler is identified in the cache as the C compiler is. `cxx_graph`, `cxx_errors` and
   `cxx_runs` test it, the last with the host's `c++`. A `use` of a list of libraries which are declared, as
   `use [sum, twice]`, failed, as their names were references to them, and is fixed.
-- **Rust for C**, a `staticlib` and `cdylib` crate type, which an executable or a library uses.
+- **Rust for C (done)**: `crate-type 'staticlib'` and `'cdylib'`, which libraries and executables of C use, as they
+  use each other, and directly or through the static libraries they link, and crates cannot, as `use-binary`, while a
+  crate of another type which C uses is `use-rust-crate`. A `staticlib` is built with
+  `--print=native-static-libs=<file>`, a second output of its edge, which the link reads as `@<file>`, as gcc and
+  clang do, so jig does not parse what rustc prints, though rustc prints a note of it at each build, which cannot be
+  turned off. A `cdylib` is given `-Wl,-soname,lib<name>.so` on ELF, as otherwise what links it records its path in the
+  build directory, and is in the search path `jig run` and `jig test` give. On Windows a `cdylib` is linked as its DLL,
+  which MinGW's linker takes, rather than an import library, which rustc writes elsewhere. `rust_for_c_graph`,
+  `rust_for_c_errors` and `rust_for_c_runs`, with the host's `cc`, test it.
 - **An archiver in jig.** Archives are a simple format, so jig could write them itself, as `jig archive`, and not need
   an archiver at all. The GNU and BSD formats need a symbol table, which needs the symbols of ELF, Mach-O and COFF
   objects read. Worth it only if finding an archiver for each target turns out to be the main source of friction.

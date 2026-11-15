@@ -453,8 +453,9 @@ impl Project {
                 }
                 let message = match d {
                     None => Message::UnknownCrate { name: used.name.clone(), target: c.target.clone() },
-                    Some(d) if d.kind == rust::Kind::Bin => {
-                        Message::UseBinary { name: used.name.clone(), declared: d.name_span }
+                    Some(d) if d.kind == rust::Kind::Bin || d.kind.is_for_c() => {
+                        let what = if d.kind == rust::Kind::Bin { "binary" } else { d.kind.crate_type() };
+                        Message::UseBinary { name: used.name.clone(), what, declared: d.name_span }
                     },
                     Some(_) => continue,
                 };

@@ -344,7 +344,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             target: c.target.clone(),
             spec: TargetFlag::new(&c.target, project, build_dir).spec,
             // a library is checked without `--test`, as its metadata is used by the crates which depend on it
-            test: c.test && !matches!(c.kind, Kind::Lib | Kind::ProcMacro),
+            test: c.test && !matches!(c.kind, Kind::Lib | Kind::ProcMacro | Kind::StaticLib | Kind::CDylib),
             kind: c.kind,
             output: c.output(),
             deps,
@@ -459,7 +459,7 @@ fn write_graph(
     // what clangd reads to compile each source of C as it is built, as rust-analyzer reads `.rust-project.json`
     let mut compile_commands = Vec::new();
     for library in project.natives() {
-        let archive = native_edges(&mut graph, project, library, at, &mut compile_commands)?;
+        let archive = native_edges(&mut graph, project, crates, library, at, &mut compile_commands)?;
         everything.push(archive.clone());
         if library.default {
             defaults.push(archive);
@@ -536,6 +536,11 @@ fn write_graph(
             if c.target == host && host.contains("-apple-") && default_linker {
                 linked_flags.codegen("link-arg=-Wl,-oso_prefix,.");
             }
+            // what links a shared library for C on ELF records it by its soname, rather than the path it was given,
+            // which is relative to the build directory, while rustc gives one on Apple's targets an install name
+            if c.kind == Kind::CDylib && !c.target.contains("-apple-") && !c.target.contains("-windows") {
+                linked_flags.codegen(&format!("link-arg=-Wl,-soname,lib{}.so", c.name));
+            }
             linked_flags
         };
         let linked_flags = link(&flags);
@@ -579,13 +584,19 @@ fn write_graph(
             leading.push(format!("--emit=metadata={}", path.display()));
             leading.extend(["--error-format=json", "--json=artifacts,diagnostic-rendered-ansi"].map(String::from));
         }
+        // a static library for C writes the libraries of the system it needs, which what links it reads
+        let native_static_libs = (c.kind == Kind::StaticLib).then(|| at.path(&c.native_static_libs()));
+        if let Some(path) = &native_static_libs {
+            leading.push(format!("--print=native-static-libs={}", path.display()));
+        }
         let mut exec = rust.exec("rustc", &leading, crate_flags, None);
         if linked {
             exec.env.extend(linker_env(&codegen, &c.target, project));
         }
         let placement = placement(unit, units, project, linked);
         let early: Vec<&Path> = metadata.iter().map(PathBuf::as_path).collect();
-        let outputs: Vec<&Path> = [output.as_path()].into_iter().chain(early.iter().copied()).collect();
+        let outputs: Vec<&Path> =
+            [output.as_path()].into_iter().chain(early.iter().copied()).chain(native_static_libs.as_deref()).collect();
         graph.edge(Edge {
             description: describe("RUSTC", &output),
             outputs: &outputs,
@@ -882,6 +893,7 @@ impl NativeLinks {
 fn native_edges(
     graph: &mut RigGraph,
     project: &Project,
+    crates: &[Crate],
     library: &crate::project::Native,
     at: &Rebase,
     compile_commands: &mut Vec<String>,
@@ -949,7 +961,7 @@ fn native_edges(
         objects.push(object);
     }
     if library.kind.is_linked() {
-        return link_native(graph, project, library, &objects, at);
+        return link_native(graph, project, crates, library, &objects, at);
     }
     let archive = at.path(&library.output());
     let mut args: Vec<String> = library.archiver[1..].to_vec();
@@ -980,6 +992,7 @@ fn native_edges(
 fn link_native(
     graph: &mut RigGraph,
     project: &Project,
+    crates: &[Crate],
     native: &crate::project::Native,
     objects: &[PathBuf],
     at: &Rebase,
@@ -1003,6 +1016,21 @@ fn link_native(
             () if !library.whole_archive || library.kind == NativeKind::SharedLibrary => args.push(path),
             () if apple => args.push(format!("-Wl,-force_load,{path}")),
             () => args.extend(["-Wl,--whole-archive".to_string(), path, "-Wl,--no-whole-archive".to_string()]),
+        }
+    }
+    // the libraries for C of Rust, each after what uses it, and a static library with the libraries of the system it needs
+    let mut rust_inputs = Vec::new();
+    let for_c = project.linked_crates(native).into_iter().filter_map(|name| {
+        crates.iter().find(|c| c.name == name && c.target == native.target && c.kind.is_for_c())
+    });
+    for c in for_c {
+        let output = at.path(&c.output());
+        args.push(output.display().to_string());
+        rust_inputs.push(output);
+        if c.kind == Kind::StaticLib {
+            let libs = at.path(&c.native_static_libs());
+            args.push(format!("@{}", libs.display()));
+            rust_inputs.push(libs);
         }
     }
     // the C++ runtime, after what needs it, if it or a static library it links has C++ sources, as it is linked by the C
@@ -1032,7 +1060,12 @@ fn link_native(
         }
     }
     args.extend(["-o".to_string(), output.display().to_string()]);
-    let inputs: Vec<&Path> = as_paths(objects).into_iter().chain(as_paths(&linked)).chain(link_script.as_deref()).collect();
+    let inputs: Vec<&Path> = as_paths(objects)
+        .into_iter()
+        .chain(as_paths(&linked))
+        .chain(as_paths(&rust_inputs))
+        .chain(link_script.as_deref())
+        .collect();
     let program = if is_path(&native.compiler[0]) {
         at.path(Path::new(&native.compiler[0])).display().to_string()
     } else {
@@ -1192,7 +1225,14 @@ fn write_database(
 
     // the directories of the shared libraries, which what links them finds them in as `jig run` and `jig test` run it
     let shared = project.natives().into_iter().filter(|native| native.kind == NativeKind::SharedLibrary);
-    let library_path: Vec<String> = shared.map(|native| native.dir.display().to_string()).collect();
+    let mut library_path: Vec<String> = shared.map(|native| native.dir.display().to_string()).collect();
+    // and of the shared libraries for C of Rust, in the directories of their targets
+    for unit in units.iter().filter(|unit| unit.kind == Kind::CDylib) {
+        let dir = unit.dir.display().to_string();
+        if !library_path.contains(&dir) {
+            library_path.push(dir);
+        }
+    }
     let test_tags = project.test_tags();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets = installed.iter().map(|file| rig_graph::path_string(&at.path(&file.path)));
@@ -1433,7 +1473,9 @@ impl Rust<'_> {
 /// Returns a command of rustc or clippy which writes its dep-info alone, as the command does, without compiling the
 /// crate, by which rig finds the sources of a crate which has not been built, to send it to a worker.
 fn discovery(exec: &rig::Exec) -> rig::Exec {
-    let emits = |arg: &&String| arg.starts_with("--emit=") && !arg.starts_with("--emit=dep-info=");
+    let emits = |arg: &&String| {
+        (arg.starts_with("--emit=") && !arg.starts_with("--emit=dep-info=")) || arg.starts_with("--print=")
+    };
     let args = exec.args.iter().filter(|arg| !emits(arg)).cloned().collect();
     rig::Exec { args, stderr: None, ..exec.clone() }
 }
@@ -1590,7 +1632,7 @@ fn externs(crates: &[Crate]) -> Vec<Vec<usize>> {
             for &index in named.get(used.name.as_str()).into_iter().flatten() {
                 let d = &crates[index];
                 // a procedural macro is for the host target, but can be used by a crate for any target
-                if (d.target == c.target || d.kind == Kind::ProcMacro) && d.kind != Kind::Bin {
+                if (d.target == c.target || d.kind == Kind::ProcMacro) && matches!(d.kind, Kind::Lib | Kind::ProcMacro) {
                     externs.push(index);
                 }
             }

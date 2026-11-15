@@ -19,8 +19,8 @@ compiler, archived, and linked into the crates which `use` it. It is followed by
   `define [UART_BASE: 0x1000]`. It can be repeated
 - `flags <arguments>`: arguments passed to the compiler for every source, after those of the properties below, as a
   `str`, which is one, or a list of them. It can be repeated
-- `use <name>`: another static library, or a [shared library](shared-libraries.md), for the same target, as a name or
-  a list of them, which is linked after this one, as a linker which reads each archive once needs, and whose
+- `use <name>`: another static library, or a [shared library](shared-libraries.md), or a crate for C, a `staticlib` or
+  `cdylib`, as [crates](crates.md) describes, for the same target, as a name or a list of them, which is linked after this one, as a linker which reads each archive once needs, and whose
   `public-include` directories this one is compiled with
 - `whole-archive <bool>`: link every object of the library, even one which nothing refers to, such as the entry point
   of a kernel, which only its linker script names. It is `false` by default, and `true` without a value

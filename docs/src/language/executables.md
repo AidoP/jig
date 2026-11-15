@@ -50,7 +50,9 @@ static libraries in a shared library, which are not linked again, each before th
 each archive once needs. A library with `whole-archive` is wrapped in `-Wl,--whole-archive` and
 `-Wl,--no-whole-archive`, or given as `-Wl,-force_load,<archive>` on Apple's targets. One with C++ sources, or which
 links a static library with them, is linked with the C++ runtime, `-l<cxx/runtime>`, after the libraries, as it is
-linked by the C compiler, which does not link it. The
+linked by the C compiler, which does not link it. A crate for C, a `staticlib` or `cdylib`, which it or a static
+library it links uses, is given by its path after them, with `@<build-dir>/<target>/lib<name>.a.libs` after a static
+one, the libraries of the system it needs. The
 link flags come after what they may need, as `-l` finds only what is needed by what comes before it. `c/link-flags` is
 `LDFLAGS`, or `LDFLAGS_<target>`, by default, as [the other properties](static-libraries.md#compilers-and-flags) are.
 
