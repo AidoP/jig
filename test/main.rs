@@ -2552,6 +2552,10 @@ const PIC: &str = if cfg!(windows) { "" } else { "-fPIC " };
 /// The flags jig gives the archiver, which on Apple's hosts are without `D`, which their `ar` does not take.
 const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
 
+/// The environment jig gives the archiver, as `jig graph` shows it before the program, which on Apple's hosts makes
+/// their `ar` leave out the times of the objects, in place of `D`.
+const ARCHIVE_ENV: &str = if cfg!(target_vendor = "apple") { "ZERO_AR_DATE=1 " } else { "" };
+
 /// The lines which make the test helper the C compiler and the archiver, which stand in for them as its `cc` and `ar`
 /// steps, so that the tests of static libraries need neither.
 const FAKE_C_TOOLS: &str = "\
@@ -2614,7 +2618,7 @@ crate app 'app.rs'
 {uart}/libuart.a
     description = AR {uart}/libuart.a
     inputs = {uart}/src-uart.c.o {uart}/src-boot.S.o
-    command = {helper} ar {ARCHIVE_FLAGS} {uart}/libuart.a {uart}/src-uart.c.o {uart}/src-boot.S.o"));
+    command = {ARCHIVE_ENV}{helper} ar {ARCHIVE_FLAGS} {uart}/libuart.a {uart}/src-uart.c.o {uart}/src-boot.S.o"));
     // what uses a library is compiled with its public include directories
     let driver = format!("{host}/c/driver");
     assert_contains(output.build(&format!("{driver}/driver.c.o")), " -Os -Wall -std=c11 -I../include -ffile-prefix-map");
@@ -2697,13 +2701,13 @@ fn static_library_tools_from_the_environment() {
     let object = |output: &Output, source: &str| output.build(&format!("{host}/c/uart/{source}.o")).to_string();
     assert_contains(&object(&output, "uart.c"), &format!("command = ccache gcc {PIC}-O1 -Wextra -ffile-prefix-map"));
     assert_contains(&object(&output, "boot.s"), &format!("command = ccache gcc {PIC}-g -ffile-prefix-map"));
-    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = llvm-ar {ARCHIVE_FLAGS} "));
+    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = {ARCHIVE_ENV}llvm-ar {ARCHIVE_FLAGS} "));
     let output = project.configure_with(&[("CC", "gcc"), (variable.as_str(), "clang")]).ok();
     assert_contains(&object(&output, "uart.c"), &format!("command = clang {PIC}-ffile-prefix-map"));
     // without them, `cc` and `ar`
     let output = project.configure_with(&[]).ok();
     assert_contains(&object(&output, "uart.c"), &format!("command = cc {PIC}-ffile-prefix-map"));
-    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = ar {ARCHIVE_FLAGS} "));
+    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = {ARCHIVE_ENV}ar {ARCHIVE_FLAGS} "));
     // the properties replace the variables, and those for a target replace the others
     std::fs::write(project.dir.join("Jig"), format!("\
 set c/compiler 'gcc-14'
