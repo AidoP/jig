@@ -89,6 +89,9 @@ pub struct Native {
     pub uses: Vec<rust::Use>,
     /// Whether every object is linked, even one nothing refers to.
     pub whole_archive: bool,
+    /// Whether a static library is linked as its objects, in the order of its sources, rather than from an archive,
+    /// which is not made.
+    pub link_objects: bool,
     /// What is built before the library's sources are compiled, but is not an input.
     pub depends: Vec<PathBuf>,
     /// The environment variables the compiler and archiver inherit, whose values are inputs.
@@ -154,6 +157,14 @@ impl Native {
             NativeKind::SharedLibrary | NativeKind::StaticLibrary => hosted,
             NativeKind::Executable => false,
         }
+    }
+    /// What is built of it, which is what links it: its objects, for a static library linked as them, or else its
+    /// output, or its import library for a shared library for Windows.
+    pub fn linked_files(&self) -> Vec<PathBuf> {
+        if self.link_objects {
+            return self.sources.iter().map(|source| self.object(&source.path)).collect();
+        }
+        vec![self.link_output()]
     }
     /// What links a library: its output, but for a shared library for Windows, which is linked by its import library,
     /// `lib<name>.dll.a`, which its link writes beside it.
@@ -377,6 +388,7 @@ impl Project {
         let mut flags = Vec::new();
         let mut uses = Vec::new();
         let mut whole_archive = false;
+        let mut link_objects = false;
         let mut default = false;
         let mut pass_env = Vec::new();
         let mut link_flags = Vec::new();
@@ -440,6 +452,17 @@ impl Project {
                             link_script = self.operand_path(operand, &base).or(link_script);
                         },
                         attribute => self.install_attribute(&mut install, attribute, operand),
+                    }
+                },
+                // whether a static library is linked from its archive, or as its objects
+                "link" if kind == NativeKind::StaticLibrary => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        continue;
+                    };
+                    match &operand.data {
+                        Data::Str(link) if link == "archive" || link == "objects" => link_objects = link == "objects",
+                        _ => self.invalid_operand(&operand, "`'archive'` or `'objects'`", false),
                     }
                 },
                 "whole-archive" if kind.is_linked() => {
@@ -524,9 +547,10 @@ impl Project {
                 let runtime = self.tool_arguments(runtime, target, span).and_then(|runtime| runtime.into_iter().next());
                 cxx_runtime = runtime.unwrap_or_else(|| default_cxx_runtime(target).into());
             }
-            // what is linked by the compiler needs no archiver
-            let archiver = if kind.is_linked() { Some(archiver.unwrap_or_default()) } else { archiver };
-            let archiver = archiver.filter(|a| !a.is_empty() || kind.is_linked());
+            // what is linked by the compiler, or as its objects, needs no archiver
+            let unarchived = kind.is_linked() || link_objects;
+            let archiver = if unarchived { Some(archiver.unwrap_or_default()) } else { archiver };
+            let archiver = archiver.filter(|a| !a.is_empty() || unarchived);
             let (Some(compiler), Some(archiver)) = (compiler.filter(|c| !c.is_empty()), archiver) else {
                 self.diagnostics.push(Diagnostic {
                     span: Some(span),
@@ -550,6 +574,7 @@ impl Project {
                 flags: flags.clone(),
                 uses: uses.clone(),
                 whole_archive,
+                link_objects,
                 depends: depends.clone(),
                 pass_env: pass_env.clone(),
                 default,
@@ -587,10 +612,10 @@ impl Project {
                     });
                 },
                 Entry::Vacant(entry) => {
-                    let output = entry.insert(library).output();
+                    let paths = entry.insert(library).linked_files();
                     let referent = Referent::Native { name: name.clone(), target: target.clone() };
                     let property = format!("{target}/{name}");
-                    self.declare_reference(property, span, kind.item(), Ref { referent, paths: vec![output] });
+                    self.declare_reference(property, span, kind.item(), Ref { referent, paths });
                 },
             }
         }
