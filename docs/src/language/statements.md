@@ -70,6 +70,21 @@ Where a string or path is needed, a reference is the path of the crate's output,
 outputs, separated by spaces. These are relative to the project root, and are not resolved again relative to the file
 which refers to them.
 
+Where a path or a program is taken, as by `command`, `input`, `output`, `depends`, `link-script`, `runner` and `run`, a
+name computed in `{}` alone, as `{name}`, or each string of a list in `{}`, names what it refers to, as a statement's
+name computed in `{}` does: a crate, custom command, generated file or test. A string in `{}` which names none of them,
+a string literal, and a property's value without `{}` are strings, as paths or programs. So a crate and its test can be
+declared together for each of a list of names:
+
+```jig
+@for name in ['boot']
+crate {name} '{name}.rs'
+    crate-type 'bin'
+@then
+test {name}
+    command {name}
+```
+
 <!-- jig-test
 crate kernel 'kernel.rs'
     target 'riscv64gc-unknown-none-elf'

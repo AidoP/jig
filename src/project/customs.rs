@@ -414,6 +414,7 @@ impl Project {
     /// Returns the paths of a value, which is a path relative to `base`, a reference, whose paths are already
     /// resolved, or a list of them.
     pub(super) fn operand_paths(&mut self, operand: Operand, base: &Path) -> Option<Vec<PathBuf>> {
+        let operand = self.computed_reference(operand);
         let span = operand.span;
         let items = match operand.data {
             Data::List(items) => items,
@@ -455,6 +456,7 @@ impl Project {
     /// Returns the path of a value which is one file, a path relative to `base` or a reference to a crate or custom
     /// command with one output.
     pub(super) fn operand_path(&mut self, operand: Operand, base: &Path) -> Option<PathBuf> {
+        let operand = self.computed_reference(operand);
         let span = operand.span;
         let path = match &operand.data {
             Data::Ref(reference) if reference.paths.len() == 1 => reference.paths[0].clone(),
@@ -491,9 +493,16 @@ impl Project {
     ///
     /// The operands must give at least one argument, and none can have a newline.
     pub(super) fn operands_command(&mut self, operands: &[Operand], file: usize) -> Option<Runner> {
+        let operands: Vec<Operand> = operands
+            .iter()
+            .map(|operand| {
+                let Operand { data, span, coerce, origin } = operand;
+                self.computed_reference(Operand { data: data.clone(), span: *span, coerce: *coerce, origin: *origin })
+            })
+            .collect();
         let mut arguments = Vec::new();
         let mut program = None;
-        for operand in operands {
+        for operand in &operands {
             if arguments.is_empty() && let Some(reference) = leading_reference(&operand.data) {
                 program = reference.paths.first().cloned();
             }
