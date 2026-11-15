@@ -98,7 +98,7 @@ GitHub Pages from main, and then makes what it says current, complete and checke
        and a link to a page, and to a heading, broken.
      - Writing them found an example which failed for anyone without `CI` set, `@if env('CI') == 'true'`, now
        `try(env('CI'), '')`.
-5. **Built by jig, in CI, and published.**
+5. **Done: built by jig, in CI, and published.**
    - A custom command, `book`, in `Jig` builds the book with mdBook into `build/book`, when `mdbook` is found, and
      `jig build custom/book` builds it.
    - CI installs mdBook at the pinned version and builds the book for every pull request, failing on a warning, and
@@ -107,6 +107,14 @@ GitHub Pages from main, and then makes what it says current, complete and checke
      `actions/deploy-pages`, in a job with `pages: write` and `id-token: write`, in the `github-pages` environment. The
      repository's Pages are set to be built by GitHub Actions, once, in its settings.
    - The README links to the published book.
+   - **Since:** `Jig` reads the pages from the summary, splitting it at `](`, as a configuration has no glob, so the
+     custom command `book` has each page as an input, and a page added to the summary is built from too, as reading
+     it configures the project again when it changes. A page which the summary lists and is missing fails the build
+     before mdBook runs. CI's `book` job installs mdBook's release of `MDBOOK`, builds the book with
+     `jig build custom/book`, fails if mdBook warns, and uploads the artifact `book`, and from main, the Pages
+     artifact, which `publish-book` deploys with `actions/deploy-pages`, one publish at a time. The site's address is
+     <https://aidop.github.io/jig/>, once the repository's Pages are set to be built by GitHub Actions. This plan is
+     removed once the site is published.
 
 ## Risks
 

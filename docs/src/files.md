@@ -30,6 +30,7 @@ The build directory is `build` by default, or the `build-dir` property. Every pa
   - and beside each, the depfile rustc writes, `<output>.d`.
 - **`targets/<name>.json`**, the specification of each custom target.
 - **`tmp/`**, rustc's temporary files, in a directory for each crate it compiles.
+- **`book/`**, for jig itself, this book, which `jig build custom/book` builds.
 - The outputs of custom commands and `file` statements, where they give them.
 
 Removing the build directory removes all of it, after which the next command configures the project again, and

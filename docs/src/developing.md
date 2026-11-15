@@ -38,3 +38,34 @@ target x86_64-pc-windows-gnu
 
 Then `jig test rig@x86_64-pc-windows-gnu jig@x86_64-pc-windows-gnu` runs their tests for Windows, and `jig lint` lints
 them for Windows too.
+
+## The book
+
+This book is in `docs/`, and is built with [mdBook](https://rust-lang.github.io/mdBook/), of the version CI gives as
+`MDBOOK`, by the custom command `book`:
+
+```
+./build/bootstrap/jig build custom/book
+```
+
+It is built into `build/book`, from the pages `docs/src/SUMMARY.md` lists, which `Jig` reads from it, so that a page
+which is added to the summary is built from too. CI builds it for each pull request, failing on a warning, and keeps
+it as the artifact `book`, and publishes it from main to [GitHub Pages](https://aidop.github.io/jig/).
+
+jig's tests check the book: each example of a `Jig` file, a code block marked `jig`, configures, and the diagnostics and
+builtin properties it lists, and its links, are those jig has. An example which is part of a configuration has what it
+needs in a comment directly before it, which the book doesn't show:
+
+````
+<!-- jig-test
+files: local.jig
+declare uart-base
+    default 0x1000_0000
+-->
+```jig
+use 'local.jig'
+    file
+log note 'UART at {uart-base}'
+```
+````
+
