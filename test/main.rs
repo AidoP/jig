@@ -2545,6 +2545,258 @@ fn main() {
     assert_contains(&stderr, "RUSTC");
 }
 
+/// The flags jig gives the archiver, which on Apple's hosts are without `D`, which their `ar` does not take.
+const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
+
+/// The lines which make the test helper the C compiler and the archiver, which stand in for them as its `cc` and `ar`
+/// steps, so that the tests of static libraries need neither.
+const FAKE_C_TOOLS: &str = "\
+set c/compiler ['HELPER', '--rig-test-helper', 'cc']
+set c/archiver ['HELPER', '--rig-test-helper', 'ar']
+";
+
+#[test]
+fn static_library_graph() {
+    let project = Project::new("static-library-graph", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+set codegen/opt-level 's'
+set c/flags ['-Wall', '-std=c11']
+set asm/flags '-x86'
+static-library uart
+    source 'src/uart.c' 'src/boot.S'
+    include 'src'
+    public-include 'include'
+    define [UART_BASE: 0x1000, FAST: true]
+    define 'DEBUG'
+    flags '-fno-builtin'
+    whole-archive
+static-library driver
+    source 'driver.c'
+    use uart
+crate util 'util.rs'
+    use driver
+crate app 'app.rs'
+    crate-type 'bin'
+    use util
+    default
+")),
+        ("src/uart.c", ""),
+        ("src/boot.S", ""),
+        ("driver.c", ""),
+        ("util.rs", ""),
+        ("app.rs", "fn main() {}\n"),
+    ]);
+    let output = project.configure().ok();
+    let host = project.host();
+    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    let uart = format!("{host}/c/uart");
+    // each source is compiled in the build directory, by its language, with the flags derived from the codegen options,
+    // those of the properties, the library's own, its include directories and its macros, and its depfile
+    let remap = "-ffile-prefix-map=build=. -ffile-prefix-map=../=";
+    assert_contains(output.build(&format!("{uart}/src-uart.c.o")), &format!("\
+{uart}/src-uart.c.o
+    description = CC {uart}/src-uart.c.o
+    inputs = ../src/uart.c
+    command = {helper} cc -Os -Wall -std=c11 -fno-builtin -I../src -I../include -DFAST=true -DUART_BASE=4096 -DDEBUG \
+{remap} -MD -MF {uart}/src-uart.c.o.d -c ../src/uart.c -o {uart}/src-uart.c.o
+    depfile = {uart}/src-uart.c.o.d
+    hashed = true"));
+    assert_contains(output.build(&format!("{uart}/src-boot.S.o")), &format!("\
+    description = AS {uart}/src-boot.S.o
+    inputs = ../src/boot.S
+    command = {helper} cc -Os -x86 -fno-builtin "));
+    // the objects are archived, by the archive's own edge
+    assert_contains(output.build(&format!("{uart}/libuart.a")), &format!("\
+{uart}/libuart.a
+    description = AR {uart}/libuart.a
+    inputs = {uart}/src-uart.c.o {uart}/src-boot.S.o
+    command = {helper} ar {ARCHIVE_FLAGS} {uart}/libuart.a {uart}/src-uart.c.o {uart}/src-boot.S.o"));
+    // what uses a library is compiled with its public include directories
+    let driver = format!("{host}/c/driver");
+    assert_contains(output.build(&format!("{driver}/driver.c.o")), " -Os -Wall -std=c11 -I../include -ffile-prefix-map");
+    // a library crate records the libraries it uses, through each other, without depending on them
+    let util = output.build(&format!("{host}/libutil.rlib"));
+    assert_contains(util, " -l static:-bundle=driver -l static:-bundle,+whole-archive=uart ");
+    assert!(!util.contains(".a"), "{util}");
+    // what links finds each library in its own directory, and depends on its archive
+    let app = output.build(&format!("{host}/app{EXE}"));
+    assert_contains(app, &format!(" -L native={driver} -L native={uart} "));
+    assert_contains(app, &format!("{driver}/libdriver.a {uart}/libuart.a"));
+    assert!(!app.contains("-l static"), "{app}");
+}
+
+#[test]
+fn static_library_rebuilds() {
+    // a library is compiled again when a header its source includes changes, and archived again, but the library
+    // crate which uses it is not compiled again, as it does not copy the archive into its rlib
+    let project = Project::new("static-library-rebuilds", &[
+        ("Jig", &format!("{FAKE_C_TOOLS}\
+static-library uart
+    source 'uart.c' 'extra.c'
+    include 'include'
+    default
+crate util 'util.rs'
+    use uart
+    default
+")),
+        ("uart.c", "#include \"uart.h\"\nint uart;\n"),
+        ("extra.c", "int extra;\n"),
+        ("include/uart.h", "#define ONE 1\n"),
+        ("util.rs", ""),
+    ]);
+    project.configure_with(&[("JIG_CACHE", "off")]).ok();
+    let build = || {
+        let output = jig_command().arg("build").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        assert!(output.status.success(), "{shown}");
+        shown
+    };
+    let host = project.host();
+    let archive = project.dir.join(format!("build/{host}/c/uart/libuart.a"));
+    let shown = build();
+    assert_contains(&shown, &format!("CC {host}/c/uart/uart.c.o"));
+    assert_contains(&shown, &format!("AR {host}/c/uart/libuart.a"));
+    assert_contains(&std::fs::read_to_string(&archive).unwrap(), "#define ONE 1\nint uart;\n");
+    assert!(!build().contains("CC "));
+    std::fs::write(project.dir.join("include/uart.h"), "#define TWO 2\n").unwrap();
+    let shown = build();
+    assert_contains(&shown, &format!("CC {host}/c/uart/uart.c.o"));
+    assert!(!shown.contains("extra.c.o"), "{shown}");
+    assert_contains(&shown, "AR ");
+    assert!(!shown.contains("RUSTC"), "{shown}");
+    assert_contains(&std::fs::read_to_string(&archive).unwrap(), "#define TWO 2\nint uart;\n");
+    // a source which is removed is not left in the archive, though `ar` adds to an archive which is there
+    std::fs::write(project.dir.join("Jig"), format!("{FAKE_C_TOOLS}\
+static-library uart
+    source 'uart.c'
+    include 'include'
+    default
+").replace("HELPER", &helper())).unwrap();
+    build();
+    let members = std::fs::read_to_string(&archive).unwrap();
+    assert!(!members.contains("extra"), "{members}");
+}
+
+#[test]
+fn static_library_tools_from_the_environment() {
+    // the compiler, archiver and flags are `CC`, `AR`, `CFLAGS` and `ASFLAGS` by default, split at whitespace, and those
+    // for a target, as `CC_<target>`, replace them, while the properties replace both
+    let project = Project::new("static-library-environment", &[
+        ("Jig", "static-library uart\n    source 'uart.c' 'boot.s'\n"),
+        ("uart.c", ""),
+        ("boot.s", ""),
+    ]);
+    let host = project.host();
+    let variable = format!("CC_{}", host.replace(['-', '.'], "_"));
+    let env = [("CC", "ccache gcc"), ("AR", "llvm-ar"), ("CFLAGS", "-O1  -Wextra"), ("ASFLAGS", "-g")];
+    let output = project.configure_with(&env).ok();
+    let object = |output: &Output, source: &str| output.build(&format!("{host}/c/uart/{source}.o")).to_string();
+    assert_contains(&object(&output, "uart.c"), "command = ccache gcc -O1 -Wextra -ffile-prefix-map");
+    assert_contains(&object(&output, "boot.s"), "command = ccache gcc -g -ffile-prefix-map");
+    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = llvm-ar {ARCHIVE_FLAGS} "));
+    let output = project.configure_with(&[("CC", "gcc"), (variable.as_str(), "clang")]).ok();
+    assert_contains(&object(&output, "uart.c"), "command = clang -ffile-prefix-map");
+    // without them, `cc` and `ar`
+    let output = project.configure_with(&[]).ok();
+    assert_contains(&object(&output, "uart.c"), "command = cc -ffile-prefix-map");
+    assert_contains(output.build(&format!("{host}/c/uart/libuart.a")), &format!("command = ar {ARCHIVE_FLAGS} "));
+    // the properties replace the variables, and those for a target replace the others
+    std::fs::write(project.dir.join("Jig"), format!("\
+set c/compiler 'gcc-14'
+set c/{host}/compiler ['clang', '--target=x']
+static-library uart\n    source 'uart.c'\n")).unwrap();
+    let output = project.configure_with(&[("CC", "gcc")]).ok();
+    assert_contains(&object(&output, "uart.c"), "command = clang --target=x -ffile-prefix-map");
+}
+
+#[test]
+fn static_library_errors() {
+    let project = Project::new("static-library-errors", &[("Jig", "\
+set c/compiler 'cc'
+static-library main
+    source 'main.cpp'
+static-library nothing
+    flags '-O2'
+static-library loop
+    source 'loop.c'
+    use other
+static-library other
+    source 'other.c'
+    use loop
+static-library missing
+    source 'missing.c'
+    use absent
+    colour 'blue'
+static-library bare
+    source 'bare.c'
+    target 'riscv64gc-unknown-none-elf'
+static-library twice
+    source 'a.c'
+static-library twice
+    source 'b.c'
+crate util
+static-library util
+    source 'util.c'
+static-library m
+    source 'm.c'
+")]);
+    let output = project.configure().failed();
+    output
+        .stderr("the language of \"main.cpp\" is not known by its extension")
+        .stderr("[unknown-source-language]")
+        .stderr("missing required attribute \"source\"")
+        .stderr("static library \"loop\" uses itself, through the libraries it uses")
+        .stderr("static library \"other\" uses itself")
+        .stderr("no static library \"absent\" for target")
+        .stderr("unknown static-library attribute \"colour\"")
+        .stderr("no C compiler or archiver for target \"riscv64gc-unknown-none-elf\"")
+        .stderr("`c/riscv64gc-unknown-none-elf/compiler`")
+        .stderr("redeclaration of \"twice\" for target")
+        .stderr("redeclaration of \"util\" for target")
+        .stderr("static library \"m\" replaces the system's `libm` in the links which use it");
+}
+
+#[cfg(unix)]
+#[test]
+fn static_library_links() {
+    // a program links C from static libraries through a library crate, with the host's C compiler and archiver
+    if Command::new("cc").arg("--version").output().is_err() || Command::new("ar").arg("--version").output().is_err() {
+        return;
+    }
+    let project = Project::new("static-library-links", &[
+        ("Jig", "\
+static-library base
+    source 'base.c'
+    public-include 'include'
+    define [BASE: 40]
+static-library sum
+    source 'sum.c'
+    use base
+crate util 'util.rs'
+    use sum
+crate app 'app.rs'
+    crate-type 'bin'
+    use util
+"),
+        ("include/base.h", "int base(void);\n"),
+        ("base.c", "#include \"base.h\"\nint base(void) { return BASE; }\n"),
+        ("sum.c", "#include \"base.h\"\nint sum(int value) { return base() + value; }\n"),
+        ("util.rs", "unsafe extern \"C\" {\n    fn sum(value: i32) -> i32;\n}\npub fn two() -> i32 {\n    unsafe { sum(2) }\n}\n"),
+        ("app.rs", "fn main() {\n    print!(\"{}\", util::two());\n}\n"),
+    ]);
+    project.configure_with(&[("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")]).ok();
+    let output = jig_command()
+        .arg("run")
+        .env("JIG_CACHE", "off")
+        .env("CC", "cc")
+        .env("AR", "ar")
+        .current_dir(&project.dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
+}
+
 #[test]
 fn removed_crates_are_not_needed() {
     // a crate which used another, once both the other and its `extern crate` are removed, is built again, without an

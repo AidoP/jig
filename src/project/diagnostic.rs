@@ -47,6 +47,7 @@ impl core::fmt::Display for Severity {
 #[derive(Clone, Copy)]
 pub enum Item {
     Crate,
+    StaticLibrary,
     CustomCommand,
     File,
     Test,
@@ -58,6 +59,7 @@ impl Item {
     pub fn keyword(self) -> &'static str {
         match self {
             Self::Crate => "crate",
+            Self::StaticLibrary => "static-library",
             Self::CustomCommand => "custom",
             Self::File => "file",
             Self::Test => "test",
@@ -70,6 +72,7 @@ impl core::fmt::Display for Item {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             Self::Crate => "crate",
+            Self::StaticLibrary => "static library",
             Self::CustomCommand => "custom command",
             Self::File => "file",
             Self::Test => "test",
@@ -174,6 +177,12 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "unknown-target",
     "mismatched-type",
     "builtin-file",
+    "unknown-source-language",
+    "no-c-compiler",
+    "redeclare-library",
+    "unknown-static-library",
+    "library-cycle",
+    "name-shadows-system",
 ];
 
 /// The message of a diagnostic, each kind of which is identified by [`Message::id`].
@@ -286,6 +295,27 @@ pub enum Message {
     UnknownCrateAttribute {
         name: String,
     },
+    /// A source of a static library whose extension has no language.
+    UnknownSourceLanguage(PathBuf),
+    /// A static library for a target with no C compiler or archiver.
+    NoCCompiler {
+        target: String,
+    },
+    /// A static library declared again for a target, or with the name of a crate for it.
+    RedeclareLibrary {
+        name: String,
+        target: String,
+        previous: Span,
+    },
+    /// A static library which another uses, and which is not declared for its target.
+    UnknownStaticLibrary {
+        name: String,
+        target: String,
+    },
+    /// A static library which uses itself, through others.
+    LibraryCycle(String),
+    /// A static library named after one which the standard library links, which it replaces where it is used.
+    NameShadowsSystem(String),
     UnknownAttribute {
         /// The keyword of the statement.
         keyword: &'static str,
@@ -499,6 +529,25 @@ impl core::fmt::Display for Message {
             Self::ReadOnlyProperty { name, builtin: true, .. } => write!(f, "cannot set read-only builtin property {name:?}"),
             Self::UnknownDeclarationAttribute { name, .. } => write!(f, "unknown declare attribute {name:?}"),
             Self::UnknownCrateAttribute { name, .. } => write!(f, "unknown crate attribute {name:?}"),
+            Self::UnknownSourceLanguage(path) => write!(
+                f,
+                "the language of {path:?} is not known by its extension, which is `.c` for C, or `.s`, `.S` or `.sx` for \
+                 assembly",
+            ),
+            Self::NoCCompiler { target } => write!(
+                f,
+                "no C compiler or archiver for target {target:?}, which `c/{target}/compiler` and \
+                 `c/{target}/archiver` give",
+            ),
+            Self::RedeclareLibrary { name, target, .. } => {
+                write!(f, "redeclaration of {name:?} for target {target:?}, as a static library")
+            },
+            Self::UnknownStaticLibrary { name, target } => write!(f, "no static library {name:?} for target {target:?}"),
+            Self::LibraryCycle(name) => write!(f, "static library {name:?} uses itself, through the libraries it uses"),
+            Self::NameShadowsSystem(name) => write!(
+                f,
+                "static library {name:?} replaces the system's `lib{name}` in the links which use it",
+            ),
             Self::UnknownAttribute { keyword, name } => write!(f, "unknown {keyword} attribute {name:?}"),
             Self::RepeatedAttribute(name) => write!(f, "attribute {name:?} cannot be repeated"),
             Self::MissingAttribute(name) => write!(f, "missing required attribute {name:?}"),
@@ -673,6 +722,12 @@ impl Message {
             Self::ReadOnlyProperty { .. } => "read-only-property",
             Self::UnknownDeclarationAttribute { .. } => "unknown-declaration-attribute",
             Self::UnknownCrateAttribute { .. } => "unknown-crate-attribute",
+            Self::UnknownSourceLanguage(_) => "unknown-source-language",
+            Self::NoCCompiler { .. } => "no-c-compiler",
+            Self::RedeclareLibrary { .. } => "redeclare-library",
+            Self::UnknownStaticLibrary { .. } => "unknown-static-library",
+            Self::LibraryCycle(_) => "library-cycle",
+            Self::NameShadowsSystem(_) => "name-shadows-system",
             Self::UnknownAttribute { .. } => "unknown-attribute",
             Self::RepeatedAttribute { .. } => "repeated-attribute",
             Self::MissingAttribute { .. } => "missing-attribute",
@@ -857,7 +912,7 @@ impl Project {
                 writeln!(w, "{style_note}note{style_white}: declared here{style_reset}")?;
                 write_location(w, &self.files[declared.file], declared, style_note, style_reset)?;
             },
-            Message::RedeclareCustom { previous, .. } => {
+            Message::RedeclareCustom { previous, .. } | Message::RedeclareLibrary { previous, .. } => {
                 writeln!(w, "{style_note}note{style_white}: previously declared here{style_reset}")?;
                 write_location(w, &self.files[previous.file], previous, style_note, style_reset)?;
             },

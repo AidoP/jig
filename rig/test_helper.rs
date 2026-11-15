@@ -23,6 +23,11 @@
 //! - `zeros <count>`, as many zero bytes, `size <file>`, its size in bytes, with a newline, `first <file>`, the first
 //!   character of each of its lines, and `strip <text> <prefix>`, the text without the prefix.
 //! - `run <program> <argument> ...`, which runs a program, whose stdout is the step's, and fails as it does.
+//! - `cc <argument> ...`, which stands in for a C compiler: it writes the object of `-o`, which is its arguments on a
+//!   line, then the source of `-c`, with each line `#include "<header>"` replaced by the header, found beside the source
+//!   or in a directory of `-I`, and the depfile of `-MF`, listing the source and the headers.
+//! - `ar <flags> <archive> <member> ...`, which stands in for an archiver: it adds each member to the archive, by its
+//!   file name, replacing one of the same name, as `ar r` does, each as `--- <name> <size>` on a line, then its contents.
 //! - `spawn <seconds> <file>`, which runs the helper again to sleep, writing its process ID to the file, and waits for
 //!   it, and `tokens`, which takes two of the jobserver's tokens, prints them, and gives them back, on Unix.
 
@@ -214,6 +219,8 @@ fn step(words: &[String]) -> Result<(), Failure> {
             io(std::fs::write(file, child.id().to_string()))?;
             io(child.wait().map(|_| ()))?;
         },
+        ["cc", args @ ..] => compile(args)?,
+        ["ar", _, archive, members @ ..] => archive_members(archive, members)?,
         #[cfg(unix)]
         ["tokens"] => out = tokens()?,
         _ => return Err(failed(format!("the test helper has no step {words:?}"))),
@@ -225,6 +232,68 @@ fn step(words: &[String]) -> Result<(), Failure> {
         },
         None => io(std::io::stdout().write_all(&out)),
     }
+}
+
+/// Stand in for a C compiler, as the `cc` step.
+fn compile(args: &[&str]) -> Result<(), Failure> {
+    let after = |flag: &str| args.iter().position(|arg| *arg == flag).and_then(|i| args.get(i + 1)).copied();
+    let (Some(source), Some(object)) = (after("-c"), after("-o")) else {
+        return Err(failed("cc needs -c <source> and -o <object>"));
+    };
+    let dirs: Vec<&Path> = std::iter::once(Path::new(source).parent().unwrap_or(Path::new(".")))
+        .chain(args.iter().filter_map(|arg| arg.strip_prefix("-I")).map(Path::new))
+        .collect();
+    let mut out = format!("{}\n", args.join(" ")).into_bytes();
+    let mut headers = Vec::new();
+    for line in String::from_utf8_lossy(&read(source)?).lines() {
+        let header = line.strip_prefix("#include \"").and_then(|rest| rest.strip_suffix('"'));
+        match header {
+            Some(header) => {
+                let found = dirs.iter().map(|dir| dir.join(header)).find(|path| path.is_file());
+                let path = found.ok_or_else(|| failed(format!("{source}: {header} not found")))?;
+                out.extend(read(&path.display().to_string())?);
+                headers.push(path.display().to_string());
+            },
+            None => out.extend(format!("{line}\n").into_bytes()),
+        }
+    }
+    std::fs::write(object, out).map_err(failed)?;
+    if let Some(depfile) = after("-MF") {
+        let rule = format!("{object}: {source} {}\n", headers.join(" "));
+        std::fs::write(depfile, rule).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// Stand in for an archiver, as the `ar` step.
+fn archive_members(archive: &str, members: &[&str]) -> Result<(), Failure> {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Ok(bytes) = std::fs::read(archive) {
+        let mut rest = bytes.as_slice();
+        while !rest.is_empty() {
+            let end = rest.iter().position(|&byte| byte == b'\n').ok_or_else(|| failed("a truncated archive"))?;
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            let mut parts = header.trim_start_matches("--- ").rsplitn(2, ' ');
+            let size: usize = parts.next().and_then(|size| size.parse().ok()).ok_or_else(|| failed("a bad archive"))?;
+            let name = parts.next().unwrap_or_default().to_string();
+            entries.push((name, rest[end + 1..end + 1 + size].to_vec()));
+            rest = &rest[end + 1 + size..];
+        }
+    }
+    for member in members {
+        let name = Path::new(member).file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let contents = read(member)?;
+        match entries.iter_mut().find(|(known, _)| *known == name) {
+            Some(entry) => entry.1 = contents,
+            None => entries.push((name, contents)),
+        }
+    }
+    let mut out = Vec::new();
+    for (name, contents) in entries {
+        out.extend(format!("--- {name} {}\n", contents.len()).into_bytes());
+        out.extend(contents);
+    }
+    std::fs::write(archive, out).map_err(failed)
 }
 
 /// Returns a word with a `$<name>` at its start replaced by the variable's value, or nothing if it is not set.

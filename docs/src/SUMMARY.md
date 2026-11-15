@@ -32,6 +32,7 @@
   - [Crates](language/crates.md)
   - [Codegen options and profiles](language/codegen.md)
   - [Custom commands](language/custom-commands.md)
+  - [Static libraries](language/static-libraries.md)
   - [Generated files](language/files.md)
   - [Targets](language/targets.md)
   - [Builtin properties](language/builtin-properties.md)

@@ -153,6 +153,29 @@ impl Project {
             let name = custom.name.clone();
             return self.attribute_value(Item::CustomCommand, &name, attribute, attribute_span, value, operand_span);
         }
+        if let Some(Referent::StaticLibrary { name, target }) = &referent
+            && let Some(library) = self.static_library(name, target)
+        {
+            let names = |uses: &[rust::Use]| Data::List(uses.iter().map(|used| Data::Str(used.name.clone())).collect());
+            let value = match attribute {
+                "source" => AttributeValue::Set(paths(&library.sources.iter().map(|source| source.path.clone()).collect::<Vec<_>>())),
+                "target" => AttributeValue::Set(Data::Str(library.target.clone())),
+                "output" => AttributeValue::Set(Data::Str(library.output().display().to_string())),
+                "include" => AttributeValue::Set(paths(&library.include)),
+                "public-include" => AttributeValue::Set(paths(&library.public_include)),
+                "define" => AttributeValue::Set(strings(&library.defines)),
+                "flags" => AttributeValue::Set(strings(&library.flags)),
+                "use" => AttributeValue::Set(names(&library.uses)),
+                "depends" => AttributeValue::Set(paths(&library.depends)),
+                "whole-archive" => AttributeValue::Set(Data::Bool(library.whole_archive)),
+                "default" => AttributeValue::Set(Data::Bool(library.default)),
+                "compiler" => AttributeValue::Set(strings(&library.compiler)),
+                "archiver" => AttributeValue::Set(strings(&library.archiver)),
+                _ => AttributeValue::Unknown,
+            };
+            let name = library.name.clone();
+            return self.attribute_value(Item::StaticLibrary, &name, attribute, attribute_span, value, operand_span);
+        }
         if let Some(Referent::File(name)) = &referent && let Some(file) = self.generated_file(name) {
             let value = match attribute {
                 "output" => AttributeValue::Set(Data::Str(file.output.display().to_string())),
