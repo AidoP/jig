@@ -1983,8 +1983,15 @@ pub(crate) fn run_command(
     environment: &Environment,
     spawned: &dyn Fn(u32),
 ) -> (Outcome, Vec<u8>) {
-    let mut command = Command::new(&exec.program);
     let working = exec.dir.as_ref().map_or_else(|| dir.to_path_buf(), |working| dir.join(working));
+    // a program which is a relative path is relative to its working directory, which on Windows is found from rig's
+    // own, as it is not on Unix, so there it is joined to it
+    let relative = Path::new(&exec.program);
+    let mut command = if cfg!(windows) && relative.is_relative() && relative.components().count() > 1 {
+        Command::new(working.join(relative))
+    } else {
+        Command::new(&exec.program)
+    };
     command.args(&exec.args).current_dir(working);
     let (program, stderr_file) = (exec.program.as_str(), exec.stderr.as_ref().map(|path| dir.join(path)));
     if let Some(inherit) = environment.inherit {
@@ -2593,6 +2600,28 @@ mod tests {
         // with nothing captured from stderr
         assert_eq!(finished, [("out".to_string(), String::new())]);
         assert_eq!(build.build(&[]).1, Vec::<(String, String)>::new());
+    }
+
+    #[test]
+    fn runs_a_relative_program_from_its_working_directory() {
+        // a program given by a relative path is found from the edge's working directory, on Windows as on Unix, where
+        // the system would otherwise find it from rig's, as a compiler given by its path is, from the build directory
+        let mut exec = crate::test_helper::exec(vec!["echo".into(), "found".into(), ">".into(), "../out".into()]);
+        let name = format!("tool{}", std::env::consts::EXE_SUFFIX);
+        exec.program = Path::new("..").join("tools").join(&name).display().to_string();
+        exec.dir = Some("sub".into());
+        let mut build = Build::new("relative-program", program(exec), &[]);
+        std::fs::create_dir_all(build.dir.join("sub")).unwrap();
+        std::fs::create_dir_all(build.dir.join("tools")).unwrap();
+        // copied by another process, as a file this one had open for writing could be held open by a process another
+        // test forks, until that process executes its program, and could not be run until then
+        let tool = build.dir.join("tools").join(&name);
+        let helper = crate::test_helper::program();
+        let copy = Command::new(&helper).args([crate::test_helper::FLAG, "cp", &helper]).arg(&tool).status();
+        assert!(copy.is_ok_and(|status| status.success()));
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(build.read("out"), "found\n");
     }
 
     #[test]

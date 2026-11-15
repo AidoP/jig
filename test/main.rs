@@ -118,6 +118,15 @@ impl Project {
         String::from_utf8(output.stdout).unwrap().trim().into()
     }
 }
+/// Returns the test helper as rig's graph has it where it is the program of a compiler or archiver, which is given by
+/// its path, relative to the build directory, as it is the program of the first command which runs it.
+fn graph_helper(output: &Output) -> String {
+    let line = output.graph.lines().find(|line| line.contains(" --rig-test-helper ") && line.contains("command = ")).unwrap();
+    let command = &line[line.find("command = ").unwrap() + "command = ".len()..];
+    // after what the archiver is given of its environment, as `<name>=<value>`
+    let command = command.split(' ').skip_while(|word| word.contains('=')).collect::<Vec<_>>().join(" ");
+    command[..command.find(" --rig-test-helper").unwrap()].to_string()
+}
 /// Returns an absolute path as rig's graph has it, relative to the project's build directory once symbolic links are
 /// followed.
 fn rebased(project: &Project, path: &Path) -> String {
@@ -2596,7 +2605,7 @@ crate app 'app.rs'
     ]);
     let output = project.configure().ok();
     let host = project.host();
-    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    let helper = format!("{} --rig-test-helper", graph_helper(&output));
     let uart = format!("{host}/c/uart");
     // each source is compiled in the build directory, by its language, with the flags derived from the codegen options,
     // those of the properties, the library's own, its include directories and its macros, and its depfile
@@ -2907,7 +2916,7 @@ log note '{{tool.link-flags}} {{tool.use}} {{tool.install-dir}}'
     let output = project.configure().ok();
     output.stderr("note: -static -lm helpers bin");
     let host = project.host();
-    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    let helper = format!("{} --rig-test-helper", graph_helper(&output));
     assert_contains(output.build(&format!("{host}/c/tool/main.c.o")), &format!("command = {helper} cc -ffile-prefix-map"));
     assert_contains(output.build(&format!("{host}/c/tool/start.s.o")), &format!("description = AS {host}/c/tool/start.s.o"));
     let whole = if host.contains("-apple-") {
@@ -3038,7 +3047,7 @@ log note '{{codec.rpath}} {{codec.install-dir}} {{codec.install-mode}}'
     let output = project.configure().ok();
     output.stderr("note: $ORIGIN lib 493");
     let host = project.host();
-    let helper = format!("{} --rig-test-helper", rebased(&project, Path::new(&helper())));
+    let helper = format!("{} --rig-test-helper", graph_helper(&output));
     let codec = format!("{host}/c/codec");
     let (file, linked, names) = if host.contains("-windows") {
         ("codec.dll".to_string(), "libcodec.dll.a".to_string(), format!("-Wl,--out-implib,{codec}/libcodec.dll.a"))
@@ -3298,7 +3307,7 @@ crate pinned 'pinned.rs'
     ]);
     let output = project.configure().ok();
     let host = project.host();
-    let helper = rebased(&project, Path::new(&helper()));
+    let helper = graph_helper(&output);
     let sum = format!("{host}/c/sum");
     assert_contains(output.build(&format!("{sum}/sum.cpp.o")), &format!("\
     description = CXX {sum}/sum.cpp.o
