@@ -123,6 +123,7 @@ impl Project {
             "log" => self.parse_log(parser),
             "crate" => self.parse_crate(parser),
             "static-library" => self.parse_native(parser, super::native::NativeKind::StaticLibrary),
+            "shared-library" => self.parse_native(parser, super::native::NativeKind::SharedLibrary),
             "executable" => self.parse_native(parser, super::native::NativeKind::Executable),
             "custom" => self.parse_custom(parser, false),
             "file" => self.parse_file_statement(parser),

@@ -25,7 +25,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
 /// again, as the project is configured again for a database of another version.
-const VERSION: u32 = 30;
+const VERSION: u32 = 31;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -74,6 +74,9 @@ pub struct Database<'a> {
     pub rustc_host: &'a str,
     pub rustc_targets: Vec<&'a str>,
     pub rustc_verbose_version: &'a str,
+    /// The directories of the shared libraries of C, relative to the project root, which `jig run` and `jig test` add
+    /// to the platform's search path of shared libraries, so that what links them finds them as it runs.
+    pub library_path: Vec<&'a str>,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -194,6 +197,7 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.str(database.rustc_host);
     w.strs(&database.rustc_targets);
     w.str(database.rustc_verbose_version);
+    w.strs(&database.library_path);
     w.len(database.flychecks.len());
     for flycheck in &database.flychecks {
         w.str(flycheck.label);
@@ -272,6 +276,7 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
         rustc_host: r.str()?,
         rustc_targets: r.strs()?,
         rustc_verbose_version: r.str()?,
+        library_path: r.strs()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -352,6 +357,7 @@ mod tests {
             rustc_host: "x86_64-unknown-linux-gnu",
             rustc_targets: vec!["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
             rustc_verbose_version: "rustc 1.101.0-nightly\nrelease: 1.101.0-nightly",
+            library_path: vec!["build/x86_64/c/codec"],
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },

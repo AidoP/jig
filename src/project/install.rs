@@ -205,13 +205,13 @@ impl Project {
             }
         }
         for native in self.natives() {
-            if native.kind == super::NativeKind::Executable && native.install.enabled {
+            if native.kind.is_linked() && native.install.enabled {
                 installed.push(Installed {
                     path: native.output(),
                     dir: native.install.dir.clone(),
                     mode: native.install.mode,
-                    program: true,
-                    item: Item::Executable,
+                    program: native.kind == super::NativeKind::Executable,
+                    item: native.kind.item(),
                     name: format!("{}/{}", native.target, native.name),
                     span: native.name_span,
                 });

@@ -176,10 +176,11 @@ impl Project {
                 },
                 "link-flags" => AttributeValue::Set(strings(&library.link_flags)),
                 "link-script" => AttributeValue::optional(library.link_script.as_ref().map(|path| Data::Str(path.display().to_string()))),
+                "rpath" => AttributeValue::Set(strings(&library.rpath)),
                 attribute => install_attribute(&library.install, attribute),
             };
             let name = library.name.clone();
-            let item = if library.kind == NativeKind::StaticLibrary { Item::StaticLibrary } else { Item::Executable };
+            let item = library.kind.item();
             return self.attribute_value(item, &name, attribute, attribute_span, value, operand_span);
         }
         if let Some(Referent::File(name)) = &referent && let Some(file) = self.generated_file(name) {

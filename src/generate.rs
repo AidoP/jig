@@ -788,7 +788,7 @@ struct NativeLinks {
     /// What a library crate records in its metadata, that what links it needs the libraries, without copying them into
     /// its rlib, so that it depends on neither, as `-l static:-bundle=<name>`.
     recorded: Vec<String>,
-    /// What links: its own libraries, as `-l static=<name>`, and the directory of each library which it or a library
+    /// What links: its own libraries, as `-l static=<name>`, or `-l dylib=<name>` for a shared library, and the directory of each library which it or a library
     /// crate it links uses, as `-L native=<dir>`, as each library has its own, so that it is only found where it is used.
     linked: Vec<String>,
     /// The archives of the libraries which what links uses, through the crates it links too.
@@ -797,10 +797,15 @@ struct NativeLinks {
 impl NativeLinks {
     fn new(project: &Project, crates: &[Crate], units: &[Unit], index: usize, at: &Rebase) -> Self {
         let c = &crates[index];
-        let own = project.transitive_static_libraries(&c.uses, &c.target);
+        let own = project.link_libraries(&c.uses, &c.target);
         let link = |bundle: bool| -> Vec<String> {
             let mut args = Vec::new();
             for library in &own {
+                // a shared library is linked as itself, wherever it is used
+                if library.kind == NativeKind::SharedLibrary {
+                    args.extend(["-l".to_string(), format!("dylib={}", library.name)]);
+                    continue;
+                }
                 let mut modifiers = Vec::new();
                 if !bundle {
                     modifiers.push("-bundle");
@@ -817,7 +822,7 @@ impl NativeLinks {
         let mut libraries: Vec<&crate::project::Native> = own.clone();
         for dep in transitive_libraries(crates, units, index) {
             let d = &crates[dep];
-            for library in project.transitive_static_libraries(&d.uses, &d.target) {
+            for library in project.link_libraries(&d.uses, &d.target) {
                 if !libraries.iter().any(|known| std::ptr::eq(*known, library)) {
                     libraries.push(library);
                 }
@@ -827,7 +832,7 @@ impl NativeLinks {
         for library in &libraries {
             linked.extend(["-L".to_string(), format!("native={}", at.path(&library.dir).display())]);
         }
-        let archives = libraries.iter().map(|library| at.path(&library.output())).collect();
+        let archives = libraries.iter().map(|library| at.path(&library.link_output())).collect();
         Self { recorded: link(false), linked, archives }
     }
 }
@@ -842,7 +847,7 @@ fn native_edges(
 ) -> Result<PathBuf, Error> {
     // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
     let mut include: Vec<PathBuf> = library.include.iter().chain(&library.public_include).cloned().collect();
-    for used in project.transitive_static_libraries(&library.uses, &library.target) {
+    for used in project.reachable_libraries(&library.uses, &library.target) {
         include.extend(used.public_include.iter().cloned());
     }
     let mut seen = std::collections::HashSet::new();
@@ -868,6 +873,9 @@ fn native_edges(
             crate::project::Language::Assembly => (&library.asm_flags, "AS"),
         };
         let mut args: Vec<String> = library.compiler[1..].to_vec();
+        if library.position_independent() {
+            args.push("-fPIC".into());
+        }
         args.extend(language_flags.iter().cloned());
         args.extend(library.flags.iter().cloned());
         for dir in &include {
@@ -896,8 +904,8 @@ fn native_edges(
         })?;
         objects.push(object);
     }
-    if library.kind == NativeKind::Executable {
-        return link_executable(graph, project, library, &objects, at);
+    if library.kind.is_linked() {
+        return link_native(graph, project, library, &objects, at);
     }
     let archive = at.path(&library.output());
     let mut args: Vec<String> = library.archiver[1..].to_vec();
@@ -915,58 +923,81 @@ fn native_edges(
     Ok(archive)
 }
 
-/// Add the edge which links an executable from its objects and the static libraries it uses, with the compiler,
-/// returning the executable, rebased.
+/// Add the edge which links an executable or a shared library from its objects and the libraries it uses, with the
+/// compiler, returning its output, rebased.
 ///
-/// Each library is given by the path of its archive, after the objects and before those it uses, as a linker which
-/// reads each archive once needs, and one which is `whole-archive` is wrapped in the flags which link every object of
-/// it, which are `-force_load` on Apple's targets and `--whole-archive` on others. The link flags follow them, then the
-/// linker script, of the executable or else of its target.
-fn link_executable(
+/// Each library is given by the path of its archive, or of a shared library, or its import library on Windows, after the
+/// objects and before those it uses, as a linker which reads each archive once needs, and a static library which is
+/// `whole-archive` is wrapped in the flags which link every object of it, which are `-force_load` on Apple's targets
+/// and `--whole-archive` on others. The link flags follow them, then the directories of `rpath`, the linker script, of
+/// the executable or else of its target, and what names a shared library: its soname, as `lib<name>.so`, which what
+/// links it records to load it by, its install name, `@rpath/lib<name>.dylib`, on Apple's targets, or its import
+/// library on Windows.
+fn link_native(
     graph: &mut RigGraph,
     project: &Project,
-    executable: &crate::project::Native,
+    native: &crate::project::Native,
     objects: &[PathBuf],
     at: &Rebase,
 ) -> Result<PathBuf, Error> {
-    let output = at.path(&executable.output());
-    let libraries = project.transitive_static_libraries(&executable.uses, &executable.target);
-    let archives: Vec<PathBuf> = libraries.iter().map(|library| at.path(&library.output())).collect();
-    let link_script = executable.link_script.as_ref().or_else(|| project.target(&executable.target)?.link_script.as_ref());
+    let output = at.path(&native.output());
+    let libraries = project.link_libraries(&native.uses, &native.target);
+    let linked: Vec<PathBuf> = libraries.iter().map(|library| at.path(&library.link_output())).collect();
+    let link_script = native.link_script.as_ref().or_else(|| project.target(&native.target)?.link_script.as_ref());
     let link_script = link_script.map(|path| at.path(path));
-    let mut args: Vec<String> = executable.compiler[1..].to_vec();
+    let apple = native.target.contains("-apple-");
+    let windows = native.target.contains("-windows");
+    let mut args: Vec<String> = native.compiler[1..].to_vec();
+    let mut outputs = vec![output.clone()];
+    if native.kind == NativeKind::SharedLibrary {
+        args.push(if apple { "-dynamiclib" } else { "-shared" }.into());
+    }
     args.extend(objects.iter().map(|object| object.display().to_string()));
-    let apple = executable.target.contains("-apple-");
-    for (library, archive) in libraries.iter().zip(&archives) {
-        let archive = archive.display().to_string();
+    for (library, path) in libraries.iter().zip(&linked) {
+        let path = path.display().to_string();
         match () {
-            () if !library.whole_archive => args.push(archive),
-            () if apple => args.push(format!("-Wl,-force_load,{archive}")),
-            () => args.extend(["-Wl,--whole-archive".to_string(), archive, "-Wl,--no-whole-archive".to_string()]),
+            () if !library.whole_archive || library.kind == NativeKind::SharedLibrary => args.push(path),
+            () if apple => args.push(format!("-Wl,-force_load,{path}")),
+            () => args.extend(["-Wl,--whole-archive".to_string(), path, "-Wl,--no-whole-archive".to_string()]),
         }
     }
     // after what they may name, as `-l` finds only what is needed by what comes before it
-    args.extend(executable.link_flags.iter().cloned());
+    args.extend(native.link_flags.iter().cloned());
+    for dir in &native.rpath {
+        args.push(format!("-Wl,-rpath,{dir}"));
+    }
     if let Some(path) = &link_script {
         args.push(format!("-T{}", path.display()));
     }
+    if native.kind == NativeKind::SharedLibrary {
+        let file_name = native.output().file_name().unwrap().to_string_lossy().into_owned();
+        match () {
+            () if windows => {
+                let import = at.path(&native.link_output());
+                args.push(format!("-Wl,--out-implib,{}", import.display()));
+                outputs.push(import);
+            },
+            () if apple => args.extend(["-install_name".to_string(), format!("@rpath/{file_name}")]),
+            () => args.push(format!("-Wl,-soname,{file_name}")),
+        }
+    }
     args.extend(["-o".to_string(), output.display().to_string()]);
-    let inputs: Vec<&Path> = as_paths(objects).into_iter().chain(as_paths(&archives)).chain(link_script.as_deref()).collect();
-    let program = if is_path(&executable.compiler[0]) {
-        at.path(Path::new(&executable.compiler[0])).display().to_string()
+    let inputs: Vec<&Path> = as_paths(objects).into_iter().chain(as_paths(&linked)).chain(link_script.as_deref()).collect();
+    let program = if is_path(&native.compiler[0]) {
+        at.path(Path::new(&native.compiler[0])).display().to_string()
     } else {
-        executable.compiler[0].clone()
+        native.compiler[0].clone()
     };
     graph.edge(Edge {
         description: describe("LINK", &output),
-        outputs: &[&output],
+        outputs: &as_paths(&outputs),
         inputs: &inputs,
-        after: &as_paths(&at.paths(&executable.depends)),
+        after: &as_paths(&at.paths(&native.depends)),
         exec: program_in_build_dir(&program, args, Vec::new()),
         hashed: true,
         // fetched from rig's cache by the identity of the compiler, which links, as it compiled
-        cache: executable.cache.as_deref(),
-        pass_env: &executable.pass_env,
+        cache: native.cache.as_deref(),
+        pass_env: &native.pass_env,
         ..Default::default()
     })?;
     Ok(output)
@@ -1109,6 +1140,9 @@ fn write_database(
         programs.push((native.short_name(&host), path, target, runner, native.default));
     }
 
+    // the directories of the shared libraries, which what links them finds them in as `jig run` and `jig test` run it
+    let shared = project.natives().into_iter().filter(|native| native.kind == NativeKind::SharedLibrary);
+    let library_path: Vec<String> = shared.map(|native| native.dir.display().to_string()).collect();
     let test_tags = project.test_tags();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets = installed.iter().map(|file| rig_graph::path_string(&at.path(&file.path)));
@@ -1138,6 +1172,7 @@ fn write_database(
         rustc_host: &rustc.host,
         rustc_targets: rustc.targets.iter().map(String::as_str).collect(),
         rustc_verbose_version: &rustc.verbose_version,
+        library_path: library_path.iter().map(String::as_str).collect(),
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {

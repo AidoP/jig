@@ -455,11 +455,11 @@ impl Project {
                 {
                     d = Some(host_crate);
                 }
-                if d.is_none() && self.static_library(&used.name, &c.target).is_some() {
+                if d.is_none() && self.library(&used.name, &c.target).is_some() {
                     continue;
                 }
                 if d.is_none() && self.native(&used.name, &c.target).is_some() {
-                    let diagnostic = self.unknown_static_library(&used.name, &c.target, used.span);
+                    let diagnostic = self.unknown_library(&used.name, &c.target, used.span);
                     self.diagnostics.push(diagnostic);
                     continue;
                 }
@@ -473,7 +473,7 @@ impl Project {
                 self.diagnostics.push(Diagnostic { span: Some(used.span), message, severity: Severity::Error });
             }
         }
-        self.check_static_libraries();
+        self.check_libraries();
         self.check_outputs();
         self.check_installs();
         self.override_severities();

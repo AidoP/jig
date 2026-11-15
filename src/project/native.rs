@@ -42,18 +42,26 @@ pub struct Source {
 /// What is built from C and assembly, the objects of whose sources are archived or linked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NativeKind {
-    /// A static library, `lib<name>.a`, which crates and executables link.
+    /// A static library, `lib<name>.a`, which crates, shared libraries and executables link.
     StaticLibrary,
+    /// A shared library, linked by the C compiler, which crates, shared libraries and executables link, and load as
+    /// they run.
+    SharedLibrary,
     /// A program, linked by the C compiler.
     Executable,
 }
 
 impl NativeKind {
-    fn item(self) -> Item {
+    pub(super) fn item(self) -> Item {
         match self {
             Self::StaticLibrary => Item::StaticLibrary,
+            Self::SharedLibrary => Item::SharedLibrary,
             Self::Executable => Item::Executable,
         }
+    }
+    /// Whether it is linked by the compiler, as a shared library or an executable is, rather than archived.
+    pub fn is_linked(self) -> bool {
+        self != Self::StaticLibrary
     }
 }
 
@@ -97,8 +105,11 @@ pub struct Native {
     pub asm_flags: Vec<String>,
     /// The arguments of the compiler as it links an executable, from `c/link-flags`, followed by its own.
     pub link_flags: Vec<String>,
-    /// The linker script of an executable, which replaces that of its target.
+    /// The linker script of an executable or shared library, which replaces that of its target.
     pub link_script: Option<PathBuf>,
+    /// The directories an executable or shared library looks for the shared libraries it uses in as it runs, as
+    /// `-Wl,-rpath,<dir>`.
+    pub rpath: Vec<String>,
     /// Where `jig install` installs an executable, if it does.
     pub install: Install,
 }
@@ -109,10 +120,32 @@ impl Native {
     pub fn output(&self) -> PathBuf {
         match self.kind {
             NativeKind::StaticLibrary => self.dir.join(format!("lib{}.a", self.name)),
+            // as the platform's linker finds it by its name
+            NativeKind::SharedLibrary if self.target.contains("-windows") => self.dir.join(format!("{}.dll", self.name)),
+            NativeKind::SharedLibrary if self.target.contains("-apple-") => self.dir.join(format!("lib{}.dylib", self.name)),
+            NativeKind::SharedLibrary => self.dir.join(format!("lib{}.so", self.name)),
             NativeKind::Executable => {
                 let suffix = if self.target.contains("-windows") { ".exe" } else { "" };
                 self.dir.parent().unwrap().parent().unwrap().join(format!("{}{suffix}", self.name))
             },
+        }
+    }
+    /// Whether its objects are compiled with `-fPIC`: those of a shared library, and of a static library for a target
+    /// with an operating system, which a shared library may link, as Rust's are for such a target, but not for Windows,
+    /// whose code is independent of where it is loaded without it.
+    pub fn position_independent(&self) -> bool {
+        let hosted = has_shared_libraries(&self.target) && !self.target.contains("-windows");
+        match self.kind {
+            NativeKind::SharedLibrary | NativeKind::StaticLibrary => hosted,
+            NativeKind::Executable => false,
+        }
+    }
+    /// What links a library: its output, but for a shared library for Windows, which is linked by its import library,
+    /// `lib<name>.dll.a`, which its link writes beside it.
+    pub fn link_output(&self) -> PathBuf {
+        match self.kind {
+            NativeKind::SharedLibrary if self.target.contains("-windows") => self.dir.join(format!("lib{}.dll.a", self.name)),
+            _ => self.output(),
         }
     }
     /// The name of an executable for `jig run`, with its target if it is not the host target, as a crate's test is.
@@ -306,7 +339,9 @@ impl Project {
         let mut pass_env = Vec::new();
         let mut link_flags = Vec::new();
         let mut link_script = None;
-        let mut install = Install::executable();
+        let mut rpath = Vec::new();
+        // a shared library is executable, as a procedural macro is
+        let mut install = if kind == NativeKind::Executable { Install::executable() } else { Install::library(0o755) };
         let mut targets: Option<(Vec<String>, Span)> = None;
         while parser.indent().is_some() {
             let Some((attribute, attribute_span)) = self.parse_ident(parser) else {
@@ -350,15 +385,14 @@ impl Project {
                     };
                     uses.extend(names.into_iter().map(|name| rust::Use { name, span }));
                 },
-                "link-flags" | "link-script" | "install" | "install-dir" | "install-mode"
-                    if kind == NativeKind::Executable =>
-                {
+                "link-flags" | "link-script" | "rpath" | "install" | "install-dir" | "install-mode" if kind.is_linked() => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         continue;
                     };
                     match attribute {
                         "link-flags" => link_flags.extend(self.arguments(&operand).unwrap_or_default()),
+                        "rpath" => rpath.extend(self.arguments(&operand).unwrap_or_default()),
                         "link-script" => {
                             let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
                             link_script = self.operand_path(operand, &base).or(link_script);
@@ -366,7 +400,7 @@ impl Project {
                         attribute => self.install_attribute(&mut install, attribute, operand),
                     }
                 },
-                "whole-archive" if kind == NativeKind::Executable => {
+                "whole-archive" if kind.is_linked() => {
                     parser.skip_line();
                     self.diagnostics.push(Diagnostic {
                         span: Some(attribute_span),
@@ -402,7 +436,7 @@ impl Project {
             });
             return;
         }
-        if kind == NativeKind::StaticLibrary && SYSTEM_LIBRARIES.contains(&name.as_str()) {
+        if kind != NativeKind::Executable && SYSTEM_LIBRARIES.contains(&name.as_str()) {
             self.diagnostics.push(Diagnostic {
                 span: Some(span),
                 message: Message::NameShadowsSystem(name.clone()),
@@ -430,9 +464,9 @@ impl Project {
                 tools.push(self.tool_arguments(tool, target, span));
             }
             let [compiler, archiver, c_flags, asm_flags, c_link_flags] = <[_; 5]>::try_from(tools).ok().unwrap();
-            // an executable is linked by the compiler, so it needs no archiver
-            let archiver = if kind == NativeKind::Executable { Some(archiver.unwrap_or_default()) } else { archiver };
-            let archiver = archiver.filter(|a| !a.is_empty() || kind == NativeKind::Executable);
+            // what is linked by the compiler needs no archiver
+            let archiver = if kind.is_linked() { Some(archiver.unwrap_or_default()) } else { archiver };
+            let archiver = archiver.filter(|a| !a.is_empty() || kind.is_linked());
             let (Some(compiler), Some(archiver)) = (compiler.filter(|c| !c.is_empty()), archiver) else {
                 self.diagnostics.push(Diagnostic {
                     span: Some(span),
@@ -466,6 +500,7 @@ impl Project {
                 asm_flags: with_derived(asm_flags),
                 link_flags: c_link_flags.unwrap_or_default().into_iter().chain(link_flags.iter().cloned()).collect(),
                 link_script: link_script.clone(),
+                rpath: rpath.clone(),
                 install: install.clone(),
             };
             let key = (name.clone(), target.clone());
@@ -596,35 +631,42 @@ impl Project {
         natives.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
         natives
     }
-    /// Returns the static library for a target with a name, if one is declared.
-    pub fn static_library(&self, name: &str, target: &str) -> Option<&Native> {
-        self.native(name, target).filter(|native| native.kind == NativeKind::StaticLibrary)
+    /// Returns the static or shared library for a target with a name, if one is declared.
+    pub fn library(&self, name: &str, target: &str) -> Option<&Native> {
+        self.native(name, target).filter(|native| native.kind != NativeKind::Executable)
     }
-    /// Returns the static library or executable for a target with a name, if one is declared.
+    /// Returns the static library, shared library or executable for a target with a name, if one is declared.
     pub fn native(&self, name: &str, target: &str) -> Option<&Native> {
         self.natives.get(&(name.to_string(), target.to_string()))
     }
-    /// Returns the message of what a crate, static library or executable uses which is not a static library for its
-    /// target: an executable, which cannot be used, or nothing.
-    pub(super) fn unknown_static_library(&self, name: &str, target: &str, span: Span) -> Diagnostic {
+    /// Returns the diagnostic of what a crate, library or executable uses which is not a library for its target: an
+    /// executable, which cannot be used, or nothing.
+    pub(super) fn unknown_library(&self, name: &str, target: &str, span: Span) -> Diagnostic {
         let message = match self.native(name, target) {
             Some(native) => Message::UseExecutable { name: name.into(), declared: native.name_span },
-            None => Message::UnknownStaticLibrary { name: name.into(), target: target.into() },
+            None => Message::UnknownLibrary { name: name.into(), target: target.into() },
         };
         Diagnostic { span: Some(span), message, severity: Severity::Error }
     }
-    /// Report what the static libraries and the crates use which is not a static library for their target, and
-    /// libraries which use each other.
-    pub(super) fn check_static_libraries(&mut self) {
+    /// Report what the libraries and executables use which is not a library for their target, libraries which use
+    /// each other, and shared libraries for a target without an operating system.
+    pub(super) fn check_libraries(&mut self) {
         let mut keys: Vec<_> = self.natives.keys().cloned().collect();
         keys.sort_unstable();
         let mut reported = Vec::new();
         for key in &keys {
             let library = &self.natives[key];
             for used in &library.uses {
-                if self.static_library(&used.name, &library.target).is_none() {
-                    reported.push(self.unknown_static_library(&used.name, &library.target, used.span));
+                if self.library(&used.name, &library.target).is_none() {
+                    reported.push(self.unknown_library(&used.name, &library.target, used.span));
                 }
+            }
+            if library.kind == NativeKind::SharedLibrary && !has_shared_libraries(&library.target) {
+                reported.push(Diagnostic {
+                    span: Some(library.name_span),
+                    message: Message::SharedLibraryTarget { target: library.target.clone() },
+                    severity: Severity::Error,
+                });
             }
         }
         // a library which reaches itself through those it uses
@@ -641,43 +683,69 @@ impl Project {
                     });
                     break;
                 }
-                if seen.insert(name) && let Some(used) = self.static_library(name, &library.target) {
+                if seen.insert(name) && let Some(used) = self.library(name, &library.target) {
                     stack.extend(used.uses.iter().map(|used| used.name.as_str()));
                 }
             }
         }
         self.diagnostics.extend(reported);
     }
-    /// Returns the static libraries a crate or library uses directly, among its `uses`, by their names.
-    pub fn used_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a Native> {
-        uses.iter().filter_map(move |used| self.static_library(&used.name, target))
+    /// Returns the libraries a crate, library or executable uses directly, among its `uses`, by their names.
+    pub fn used_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a Native> {
+        uses.iter().filter_map(move |used| self.library(&used.name, target))
     }
-    /// Returns the static libraries used by these, through each other too, each once, in an order where each comes
-    /// before those it uses, as a single-pass linker needs.
-    pub fn transitive_static_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
+    /// Returns every library used by these, through each other too, each once, as for the directories of their headers.
+    pub fn reachable_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
+        let mut found: Vec<&Native> = Vec::new();
+        let mut stack: Vec<&Native> = self.used_libraries(uses, target).collect();
+        while let Some(library) = stack.pop() {
+            if found.iter().any(|known| known.name == library.name) {
+                continue;
+            }
+            found.push(library);
+            stack.extend(self.used_libraries(&library.uses, &library.target));
+        }
+        found
+    }
+    /// Returns the libraries which what uses these links, each once, in an order where each comes before those it uses,
+    /// as a single-pass linker needs: the libraries used through each other, but for the static libraries a shared
+    /// library uses, which are linked into it, while the shared libraries it uses are needed by what links it, to
+    /// resolve what it refers to.
+    pub fn link_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
         fn visit<'a>(
             project: &'a Project,
             library: &'a Native,
-            visited: &mut std::collections::HashSet<&'a str>,
+            within_shared: bool,
+            visited: &mut std::collections::HashSet<(&'a str, bool)>,
             order: &mut Vec<&'a Native>,
         ) {
-            if !visited.insert(&library.name) {
+            if !visited.insert((&library.name, within_shared)) {
                 return;
             }
-            for used in project.used_static_libraries(&library.uses, &library.target) {
-                visit(project, used, visited, order);
+            let shared = library.kind == NativeKind::SharedLibrary;
+            for used in project.used_libraries(&library.uses, &library.target) {
+                visit(project, used, within_shared || shared, visited, order);
             }
-            order.push(library);
+            let linked = shared || !within_shared;
+            if linked && !order.iter().any(|known| std::ptr::eq(*known, library)) {
+                order.push(library);
+            }
         }
         let mut order = Vec::new();
         let mut visited = std::collections::HashSet::new();
-        for library in self.used_static_libraries(uses, target) {
-            visit(self, library, &mut visited, &mut order);
+        for library in self.used_libraries(uses, target) {
+            visit(self, library, false, &mut visited, &mut order);
         }
         // each after those it uses, reversed, so that each comes before them
         order.reverse();
         order
     }
+}
+
+/// Whether a target has shared libraries, as one with an operating system does, while one without, such as
+/// `riscv64gc-unknown-none-elf`, does not.
+fn has_shared_libraries(target: &str) -> bool {
+    !target.split('-').any(|part| part == "none")
 }
 
 /// The attributes of a `static-library` statement which are taken by [`Project::static_library_attribute`].

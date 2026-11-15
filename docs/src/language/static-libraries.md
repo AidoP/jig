@@ -16,9 +16,9 @@ compiler, archived, and linked into the crates which `use` it. It is followed by
   `define [UART_BASE: 0x1000]`. It can be repeated
 - `flags <arguments>`: arguments passed to the compiler for every source, after those of the properties below, as a
   `str`, which is one, or a list of them. It can be repeated
-- `use <name>`: another static library for the same target, as a name or a list of them, which is linked after this
-  one, as a linker which reads each archive once needs, and whose `public-include` directories this one is compiled
-  with
+- `use <name>`: another static library, or a [shared library](shared-libraries.md), for the same target, as a name or
+  a list of them, which is linked after this one, as a linker which reads each archive once needs, and whose
+  `public-include` directories this one is compiled with
 - `whole-archive <bool>`: link every object of the library, even one which nothing refers to, such as the entry point
   of a kernel, which only its linker script names. It is `false` by default, and `true` without a value
 - `depends <path> ...`, `pass-env <names>` and `default <bool>`: as for a [custom command](custom-commands.md), where
@@ -53,10 +53,11 @@ Each source is compiled in the build directory to an object, `<build-dir>/<targe
 path of the source, as
 
 ```
-<compiler> <derived> <flags> <library's flags> -I<include> ... -D<define> ... -MD -MF <object>.d -c <source> -o <object>
+<compiler> -fPIC <derived> <flags> <library's flags> -I<include> ... -D<define> ... -MD -MF <object>.d -c <source> -o <object>
 ```
 
-where `<derived>` is `-O<level>` from `codegen/opt-level`, and `-g` from a `codegen/debuginfo` which is not 0, as they
+where `-fPIC` is given for a target with an operating system, but Windows, so that a shared library can link the
+library, as Rust's libraries are compiled for such a target, and `<derived>` is `-O<level>` from `codegen/opt-level`, and `-g` from a `codegen/debuginfo` which is not 0, as they
 are set where the library is declared, so that a [profile](codegen.md) reaches C too, and `<flags>` is `c/flags` for C,
 and `asm/flags` for assembly, which come after them, so they can replace them. The compiler writes a depfile, so a
 source is compiled again when a header it includes changes, and the paths it writes, in debug information and

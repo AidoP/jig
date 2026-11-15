@@ -1,7 +1,7 @@
 # C and assembly
 
 A plan for building C and assembly sources with jig, as static libraries, shared libraries and executables, and
-linking them into Rust crates. **Phases 0 to 3 are done**; the others are not started.
+linking them into Rust crates. **Phases 0 to 4 are done**; the others are not started.
 
 jig builds Rust crates with rustc, and anything else with a `custom` command. A project with C or assembly in it today
 writes a `custom` command for each object, with no headers discovered, no cache unless it says `cache`, no compiler
@@ -233,7 +233,7 @@ and archiving, `use` from crates and from each other, and attributes taken with 
 [static libraries](../language/static-libraries.md) describes. What was built differs from the plan above in places:
 
 - **Diagnostics.** `unknown-source-language`, `no-c-compiler`, `redeclare-library` (a library declared again, or with
-  a crate's name), `unknown-static-library` (one library using another which isn't declared for its target),
+  a crate's name), `unknown-static-library`, since `unknown-library` (one library using another which isn't declared for its target),
   `library-cycle`, and the note `name-shadows-system`. A crate which uses a name which is neither a crate nor a static
   library for its target is still `unknown-crate`, rather than a `c-target` of its own.
 - **Stale members.** `ar` adds to an archive which is there, and rig has no step before a command, so rather than the
@@ -316,11 +316,33 @@ the order of archives, `whole-archive`, the link flags, the target's linker scri
 it is built by default. `executable_errors` checks the diagnostics, and `executable_runs`, on Unix where `cc` and `ar`
 are installed, runs one with `jig run`, with its arguments and exit code, by a test, and installed by `jig install`.
 
-### Phase 4: shared libraries
+### Phase 4: shared libraries (done)
 
-`shared-library`, with `-fPIC`, the soname, install name or import library of each platform, `-l dylib=` for crates,
-`use` from executables and other shared libraries, the search path set by `jig run` and `jig test`, and `rpath`. A
-shared library is only for a target which has them, so one for a target without an operating system is an error.
+`shared-library`, as [shared libraries](../language/shared-libraries.md) describes: compiled with `-fPIC`, linked with
+`-shared`, or `-dynamiclib`, and the soname, install name or import library of each platform, `-l dylib=` for crates,
+used by executables and other shared libraries by their paths, `rpath` on executables and shared libraries, installed
+in `lib`, and the error `shared-library-target` for a target without an operating system. `jig run` and the tests
+`jig test` runs here put the directories of the project's shared libraries before `LD_LIBRARY_PATH`,
+`DYLD_LIBRARY_PATH` or `PATH`, from a list the database keeps.
+
+As built, it differs from the plan above in places:
+
+- **A shared library is a boundary.** What uses one links it alone, and the shared libraries it uses, but not the
+  static libraries linked into it, so that their objects are not in two images.
+- **Static libraries are position-independent** on targets with an operating system but Windows, as Rust's libraries
+  are, as a shared library which links one could not otherwise be linked on x86_64. A bare-metal target's are not.
+- **The search path is the project's.** `jig run` and `jig test` add the directories of every shared library of the
+  project, rather than those of the program they run, as the database does not know what a test's command links. A
+  library of another target in them is skipped by the loader. Tests which run on workers do not have them.
+- **`rpath` is an attribute of executables and shared libraries** only. A crate gives one with
+  `codegen/link-arg '-Wl,-rpath,...'`.
+- `unknown-static-library` is `unknown-library`, as a crate or library may use a shared library too.
+
+Tests: `shared_library_graph`, with the test helper as the compiler, checks the compile and link commands of each
+platform, that an executable links the library by its path and a crate by `-l dylib=` and `-L native=`, without the
+static library in it, and attributes. `shared_library_errors` checks the diagnostics, and `shared_library_runs`, on Unix
+where `cc` and `ar` are installed, runs a C program and a Rust program which link one with `jig run`, a crate's tests
+which call it with `jig test`, and the installed program by its rpath, without the search path.
 
 ### Phase 5: editors and kernels
 
