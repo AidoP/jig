@@ -1,5 +1,7 @@
 # Static libraries
 
+[A kernel in Rust, C and assembly](../kernel.md) shows static libraries in a project without an operating system.
+
 A `static-library` statement declares a static library of C and assembly, `lib<name>.a`, which is compiled by a C
 compiler, archived, and linked into the crates which `use` it. It is followed by indented attributes:
 
@@ -76,6 +78,14 @@ not cached.
 The objects are archived by `<archiver> crsD <archive> <object> ...`, or `crs` on macOS, whose `ar` does the same with
 `ZERO_AR_DATE`, so that the archive depends only on the objects. When a source is removed from the library, its
 archive is removed as the project is configured, so that it keeps no object of it.
+
+## Editors
+
+jig writes `compile_commands.json` to the build directory, with the command of each source of C and assembly, as it is
+compiled there, so that clangd finds the include directories, the macros and the flags of each file. clangd looks for
+it in `build`, beside the directories of the sources, so it finds it there without being told, where the build
+directory is `build`, and otherwise with `--compile-commands-dir=<build-dir>`, or `CompilationDatabase` in `.clangd`.
+It is written as the project is configured, only when it changes, and removed when the project has no C.
 
 ## Compilers and flags
 

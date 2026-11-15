@@ -27,7 +27,13 @@ The build directory is `build` by default, or the `build-dir` property. Every pa
   - `check/` and `lint/`, the diagnostics of checking and linting each crate, which `jig check` and `jig lint` show;
   - `doc/`, the documentation of the crates with `doc`;
   - `unwind/`, the libraries built again without `panic=abort` for what must unwind;
+  - `c/<name>/`, the objects of a [static library](language/static-libraries.md), shared library or executable, with
+    the depfile the compiler writes beside each, and a library's archive or shared library, with
+    `lib<name>.a.members`, the objects its archive was made of;
+  - an executable of C, by its name, as a binary is;
   - and beside each, the depfile rustc writes, `<output>.d`.
+- **`compile_commands.json`**, how each source of C and assembly is compiled, for clangd, as
+  [static libraries](language/static-libraries.md#editors) describes, if the project has any.
 - **`targets/<name>.json`**, the specification of each custom target.
 - **`tmp/`**, rustc's temporary files, in a directory for each crate it compiles.
 - **`book/`**, for jig itself, this book, which `jig build custom/book` builds.
