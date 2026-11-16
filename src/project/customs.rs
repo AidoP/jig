@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
+use super::running::{ATTRIBUTES, Running};
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Data, Operand, Ref, Referent};
@@ -33,16 +34,13 @@ pub struct Custom {
     /// The tags of a test, by which `jig test` chooses it. A test with tags only runs without being asked for if one
     /// of its tags is in `test-tags`.
     pub tags: Vec<String>,
-    /// How rig detects that the command's files have changed, if this is given, in place of `change-detection`.
-    pub change_detection: Option<String>,
-    /// Whether the command has the `cache` attribute.
-    pub cached: bool,
+    /// The attributes of a command which runs: its environment, how its files are stamped, and whether it is cached,
+    /// which a command is not unless it has `cache`. A test takes only `env`.
+    pub running: Running,
     /// The identity of the command in rig's cache, if it has the `cache` attribute and rig caches. It covers the
     /// toolchain, and the program if it is found in `PATH`. [`Project::identify_cached_customs`] sets it once the
     /// configuration is evaluated.
     pub cache: Option<String>,
-    /// The environment variables the command reads from those it inherits, whose values are its inputs.
-    pub pass_env: Vec<String>,
 }
 
 /// Whether a [`Custom`] is a build command or a test, with what only that kind has.
@@ -139,9 +137,7 @@ impl Project {
         let mut command: Option<Runner> = None;
         let mut default = false;
         let mut tags = Vec::new();
-        let mut change_detection = None;
-        let mut cache = false;
-        let mut pass_env = Vec::new();
+        let mut running = Running::default();
         let mut install = Install::data();
         // an attribute which failed has already been reported, so it is not reported as missing too
         let mut failed = false;
@@ -175,28 +171,14 @@ impl Project {
                     };
                     depends.extend(new);
                 },
-                "change-detection" if !test => {
+                // a test is not an edge of rig's graph, so it is not cached, stamped or sent to workers
+                name if ATTRIBUTES.contains(&name) && (!test || name == "env") => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         failed = true;
                         continue;
                     };
-                    let value = match operand.data {
-                        Data::Str(ref value) if value == "timestamp" || value == "hash" => Some(value.clone()),
-                        _ => None,
-                    };
-                    if value.is_none() {
-                        self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
-                    }
-                    change_detection = value.or(change_detection);
-                },
-                "pass-env" if !test => {
-                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
-                        parser.skip_line();
-                        failed = true;
-                        continue;
-                    };
-                    pass_env.extend(self.variable_names(&operand).unwrap_or_default());
+                    self.running_attribute(&mut running, name, &operand);
                 },
                 "tag" if test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -206,15 +188,15 @@ impl Project {
                     };
                     tags.extend(self.tags(&operand).unwrap_or_default());
                 },
-                "default" | "cache" | "install" | "install-dir" | "install-mode" if !test => {
+                "default" | "install" | "install-dir" | "install-mode" if !test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
                         failed = true;
                         continue;
                     };
-                    if attribute == "default" || attribute == "cache" {
+                    if attribute == "default" {
                         if let Some(value) = self.flag(&operand) {
-                            *if attribute == "default" { &mut default } else { &mut cache } = value;
+                            default = value;
                         }
                     } else {
                         self.install_attribute(&mut install, attribute, operand);
@@ -286,10 +268,8 @@ impl Project {
             program: runner.program,
             kind,
             tags,
-            change_detection,
-            cached: cache,
+            running,
             cache: None,
-            pass_env,
         };
         let declared = custom.name.clone();
         if self.add_custom(custom) && !test {
@@ -301,7 +281,7 @@ impl Project {
     /// computes each.
     pub fn identify_cached_customs(&mut self) {
         for index in 0..self.customs.len() {
-            if self.customs[index].cached {
+            if self.customs[index].running.cache == Some(true) {
                 let runner = Runner { command: self.customs[index].command.clone(), program: self.customs[index].program.clone() };
                 self.customs[index].cache = self.custom_identity(&runner);
             }

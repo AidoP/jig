@@ -2,7 +2,7 @@
 
 An `executable` statement declares a program of C and assembly, which is compiled as a
 [static library](static-libraries.md) is, with the same compiler, flags and [cache](../caching.md), and linked by the
-compiler. It takes the attributes of a static library but `whole-archive`, where `use` names the static and
+compiler. It takes the attributes of a static library but `link`, `whole-archive` and `install-headers`, where `use` names the static and
 [shared libraries](shared-libraries.md) it links, and these:
 
 - `link-flags <arguments>`: arguments of the compiler as it links, after those of `c/link-flags`, as a `str`, which is

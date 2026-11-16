@@ -19,6 +19,7 @@ mod probe;
 mod properties;
 mod semver;
 mod references;
+mod running;
 pub mod rust;
 mod statements;
 mod syntax;

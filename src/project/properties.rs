@@ -190,6 +190,12 @@ impl Project {
         if !self.check_clippy_level(ident, &operand.data, operand.span) {
             return false;
         }
+        // and the way rig finds that files have changed, as the `change-detection` attribute's is
+        let detection = |data: &Data| matches!(data, Data::Str(value) if value == "timestamp" || value == "hash");
+        if ident == "change-detection" && !detection(&operand.data) {
+            self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
+            return false;
+        }
         // the codegen options of a target, and clippy's lints, are declared when they are first used
         self.declare_on_demand(ident);
         let property = self.declare(ident.into(), None);

@@ -10,6 +10,7 @@ use super::install::Install;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
 use super::value::{Coercion, Data, Operand, Ref, Referent};
+use super::running::{ATTRIBUTES, Running};
 use super::{Project, rust};
 
 /// Which of a crate's targets its tests are built for, from its `test` attribute: all or none of them, or those named.
@@ -73,13 +74,12 @@ impl Project {
         let mut tested = Tested::All(false);
         let mut doc = false;
         let mut tags = Vec::new();
-        let mut worker_tags = Vec::new();
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
         let mut cfg = Vec::new();
-        let mut env = Vec::new();
-        let mut pass_env = Vec::new();
+        // a crate is cached by default, when rig caches
+        let mut running = Running::default();
         let mut kind = rust::Kind::Lib;
         let mut link_script = None;
         let mut codegen = Vec::new();
@@ -125,11 +125,6 @@ impl Project {
                         tags.extend(new);
                     }
                 },
-                "worker-tag" => {
-                    if let Some(new) = self.tags(&attribute.operand()) {
-                        worker_tags.extend(new);
-                    }
-                },
                 "crate-type" => {
                     let span = attribute.data_span;
                     let Some(crate_type) = self.str_operand(attribute.operand()) else {
@@ -162,16 +157,7 @@ impl Project {
                         cfg.extend(options);
                     }
                 },
-                "env" => {
-                    if let Some(variables) = self.env_variables(&attribute.operand()) {
-                        env.extend(variables);
-                    }
-                },
-                "pass-env" => {
-                    if let Some(names) = self.variable_names(&attribute.operand()) {
-                        pass_env.extend(names);
-                    }
-                },
+                name if ATTRIBUTES.contains(&name) => self.running_attribute(&mut running, name, &attribute.operand()),
                 "depends" => {
                     let base = self.files[parser.file].path.parent().unwrap().to_path_buf();
                     if let Some(paths) = self.operand_paths(attribute.operand(), &base) {
@@ -280,13 +266,15 @@ impl Project {
                         uses: uses.clone(),
                         depends: depends.clone(),
                         cfg: cfg.clone(),
-                        env: env.clone(),
-                        pass_env: pass_env.clone(),
+                        env: running.env.clone(),
+                        pass_env: running.pass_env.clone(),
+                        change_detection: running.change_detection.clone(),
+                        cached: running.cache.unwrap_or(true),
                         codegen: codegen[i].clone(),
                         lints: lints.clone(),
                         link_script: link_script.clone(),
                         install: install.clone(),
-                        worker_tags: worker_tags.clone(),
+                        worker_tags: running.worker_tags.clone(),
                     });
                     declared.push(c.target.clone());
                     // the test is forward declared, so that it can be referred to, and completed once the target is known
@@ -348,7 +336,7 @@ impl Project {
     }
     /// Returns the environment variables of an `env` attribute, which is a dict of their names to their values,
     /// reporting a value which is not, or a name which cannot be an environment variable's.
-    fn env_variables(&mut self, operand: &Operand) -> Option<Vec<(String, String)>> {
+    pub(super) fn env_variables(&mut self, operand: &Operand) -> Option<Vec<(String, String)>> {
         let Data::Dict(entries) = &operand.data else {
             self.invalid_operand(operand, "dict", false);
             return None;
@@ -413,10 +401,8 @@ impl Project {
             program: None,
             kind: CustomKind::Test { runner: None, harness: true, on_workers: None },
             tags,
-            change_detection: None,
-            cached: false,
+            running: Running::default(),
             cache: None,
-            pass_env: Vec::new(),
         });
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, now that the runner of

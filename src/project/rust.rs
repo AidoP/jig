@@ -29,6 +29,10 @@ pub struct Crate {
     pub env: Vec<(String, String)>,
     /// The environment variables rustc inherits, which `env!` reads, whose values are inputs of the crate.
     pub pass_env: Vec<String>,
+    /// How rig detects that the crate's files have changed, in place of `change-detection`, if it is given.
+    pub change_detection: Option<String>,
+    /// Whether rig caches what is built of the crate, when it caches, which `cache false` turns off.
+    pub cached: bool,
     /// The codegen options passed with `-C`, as `<option>=<value>`, from the properties set where it was declared.
     pub codegen: Vec<String>,
     /// The flags which give clippy's lints their levels, as `-W clippy::<lint>`, from the properties set where it was

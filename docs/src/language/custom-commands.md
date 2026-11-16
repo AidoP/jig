@@ -30,6 +30,15 @@ A `custom` statement is followed by indented attributes:
   them, such as `pass-env ['CC', 'CFLAGS']`. The command runs again when one of their values changes, and a command
   which is cached inherits only these and those which locate tools, as a cached crate does, so that every variable
   which can change its outputs is part of the key it is cached by
+- `env <variables>`: the environment variables the command runs with, beside those it inherits, as a dict of their
+  names to their values, as for a crate, such as `env [LC_ALL: 'C']`. It can be repeated, and is part of the command,
+  so the command runs again when they change. A test takes it too
+- `worker-tag <tags>`: the tags a worker must have for rig to send it the command, when it is cached, as for a crate
+
+These five, `env`, `pass-env`, `worker-tag`, `change-detection` and `cache`, are taken alike by every statement which
+runs a command: a crate, a custom command, and the statements of C, while a test takes only `env`, as it is run by
+`jig test` rather than by rig. A command is not cached unless it has `cache`, while a crate and the statements of C are
+cached unless they have `cache false`.
 
 A reference is its paths, as they are already resolved, while an absolute path is kept. While the attributes are
 evaluated, the `input` and `output` properties are lists of references to the inputs and outputs so far. An output

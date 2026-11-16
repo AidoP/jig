@@ -1,5 +1,5 @@
-//! The `install`, `install-dir` and `install-mode` attributes of crates, custom commands and generated files, which
-//! `jig install` copies the outputs of.
+//! The `install`, `install-dir` and `install-mode` attributes of crates, custom commands, generated files and the
+//! statements of C, which `jig install` copies the outputs of, with a static library's headers.
 
 use std::path::{Path, PathBuf};
 
@@ -205,16 +205,29 @@ impl Project {
             }
         }
         for native in self.natives() {
-            if native.kind.is_linked() && native.install.enabled {
-                installed.push(Installed {
-                    path: native.output(),
-                    dir: native.install.dir.clone(),
-                    mode: native.install.mode,
-                    program: native.kind == super::NativeKind::Executable,
-                    item: native.kind.item(),
-                    name: format!("{}/{}", native.target, native.name),
-                    span: native.name_span,
-                });
+            if !native.install.enabled {
+                continue;
+            }
+            let name = format!("{}/{}", native.target, native.name);
+            installed.push(Installed {
+                path: native.output(),
+                dir: native.install.dir.clone(),
+                mode: native.install.mode,
+                program: native.kind == super::NativeKind::Executable,
+                item: native.kind.item(),
+                name: name.clone(),
+                span: native.name_span,
+            });
+            // in `include`, under the path each has in its directory, and once, though the library is for several
+            // targets
+            for (header, dir) in &native.headers {
+                let under = header.parent().and_then(|parent| parent.strip_prefix(dir).ok()).unwrap_or(Path::new(""));
+                let dir = Path::new("include").join(under).display().to_string();
+                if installed.iter().any(|file| file.path == *header && file.dir == dir) {
+                    continue;
+                }
+                let (path, item, name, span) = (header.clone(), native.kind.item(), name.clone(), native.name_span);
+                installed.push(Installed { path, dir, mode: 0o644, program: false, item, name, span });
             }
         }
         for custom in &self.customs {

@@ -1,6 +1,7 @@
 # jig install
 
-`jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, as the
+`jig install [<prefix>]` builds the outputs of the crates, custom commands and statements of C with the `install`
+attribute, and the headers of a static library with `install-headers`, as the
 target `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
 directory, and is the `install-prefix` property, relative to the project root, without one. It takes the options of
