@@ -58,3 +58,4 @@
 - [Developing jig](developing.md)
 - [Plans](plans.md)
   - [C and assembly](plans/c-and-assembly.md)
+  - [Consistency and gaps](plans/consistency.md)

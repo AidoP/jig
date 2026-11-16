@@ -67,11 +67,12 @@ commands:
                          build the project, or the targets given, with as many jobs at once, going on until as many
                          commands have failed, `0` for any, or showing what would run, and why, with `-n`, the
                          commands rather than their descriptions with `-v`, or only what they print with `--quiet`
-    test [-v] [--all] [--tag <tag> ...] [<name> ...]
+    test [-v] [-j <jobs>] [--timeout <seconds>] [--all] [--tag <tag> ...] [<name> ...] [-- <argument> ...]
                          build and run the tests without tags and those with a tag in `test-tags`, or only those named
                          or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the
                          output of each test, such as the tests of a crate's test harness, rather than only those which
-                         fail
+                         fail, `-j` runs as many at once, `--timeout` fails a test which runs for longer, and each
+                         test is given the arguments after `--`
     run [<name>] [--] [<argument> ...]
                          build a binary crate and run it with arguments, by its target's runner if it has one, where
                          a crate for a target other than the host is `<name>@<target>`, unless it is the only one with
@@ -163,18 +164,9 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             Ok(ExitCode::SUCCESS)
         },
         "test" => {
-            let mut selection = test_runner::Selection::default();
-            let mut verbose = false;
-            let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
-            while let Some(arg) = args.next() {
-                match arg.as_str() {
-                    "-v" | "--verbose" => verbose = true,
-                    "--all" => selection.all = true,
-                    "--tag" => selection.tags.push(args.next().ok_or(Error::MissingArg("tag"))?),
-                    _ => selection.names.push(arg),
-                }
-            }
-            test_runner::test(&selection, verbose).map(|()| ExitCode::SUCCESS)
+            let args: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
+            let (selection, options) = test_runner::parse(&args)?;
+            test_runner::test(&selection, &options).map(|()| ExitCode::SUCCESS)
         },
         "run" => {
             let mut args = args.peekable();
@@ -557,6 +549,10 @@ enum Error {
         stderr: String,
     },
     UnknownTest(String),
+    /// An option which a command does not take, with the command.
+    UnknownOption(&'static str, String),
+    /// A `--timeout` which is not a number of seconds above zero.
+    InvalidTimeout(String),
     /// A tag given to `jig test` which no test has.
     UnknownTag(String),
     TestsFailed(usize),
@@ -633,6 +629,8 @@ impl core::fmt::Display for Error {
                  reported:\n{stderr}",
             ),
             Self::UnknownTest(name) => write!(f, "no test named {name:?}"),
+            Self::UnknownOption(command, option) => write!(f, "`jig {command}` does not take {option:?}\n\n{USAGE}"),
+            Self::InvalidTimeout(value) => write!(f, "`--timeout` is {value:?}, rather than a number of seconds"),
             Self::UnknownTag(tag) => write!(f, "no test tagged {tag:?}"),
             Self::TestsFailed(1) => write!(f, "1 test failed"),
             Self::TestsFailed(count) => write!(f, "{count} tests failed"),
@@ -689,7 +687,7 @@ impl core::fmt::Display for Error {
                      command",
                 )
             },
-            Self::InvalidJobs(jobs) => write!(f, "`--jobs` is {jobs:?}, rather than a number of jobs"),
+            Self::InvalidJobs(jobs) => write!(f, "{jobs:?} is not a number of jobs"),
             Self::Serve(error) => write!(f, "failed to serve the cache: {error}"),
             Self::InvalidColour(when) => write!(f, "`--color` is {when:?}, rather than `auto`, `always` or `never`"),
             Self::UnknownCacheCommand(command) => {
