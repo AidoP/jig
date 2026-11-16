@@ -1,7 +1,9 @@
 //! `jig test`, which runs the tests recorded in the database.
 
 use std::fmt::Write as _;
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::Error;
@@ -17,6 +19,79 @@ pub struct Selection {
     pub tags: Vec<String>,
     /// Every test.
     pub all: bool,
+}
+
+/// How `jig test` runs the tests it chooses.
+pub struct Options {
+    /// Show what every test printed, rather than only what the failed tests did.
+    pub verbose: bool,
+    /// The most tests which run here at once.
+    pub jobs: usize,
+    /// How long a test may run here before it is killed, and fails.
+    pub timeout: Option<Duration>,
+    /// The arguments each test is given after its own.
+    pub args: Vec<String>,
+}
+
+/// Parse the arguments of `jig test`: its options, the names of tests, and after `--`, the arguments of the tests.
+pub fn parse(args: &[String]) -> Result<(Selection, Options), Error> {
+    let mut selection = Selection::default();
+    let mut options = Options { verbose: false, jobs: 1, timeout: None, args: Vec::new() };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-v" | "--verbose" => options.verbose = true,
+            "--all" => selection.all = true,
+            "--tag" => selection.tags.push(args.next().ok_or(Error::MissingArg("tag"))?.clone()),
+            "--timeout" => {
+                let value = args.next().ok_or(Error::MissingArg("seconds"))?;
+                let seconds = value.parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+                let timeout = seconds.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+                options.timeout = Some(timeout.ok_or_else(|| Error::InvalidTimeout(value.clone()))?);
+            },
+            "--" => options.args.extend(args.by_ref().cloned()),
+            // as `jig build` takes it, with the number in the same argument or the next
+            _ if arg.starts_with("-j") => {
+                let value = match &arg[2..] {
+                    "" => args.next().ok_or(Error::MissingArg("jobs"))?,
+                    inline => inline,
+                };
+                let jobs = value.parse::<usize>().ok().filter(|&jobs| jobs > 0);
+                options.jobs = jobs.ok_or_else(|| Error::InvalidJobs(value.to_string()))?;
+            },
+            _ if arg.starts_with('-') => return Err(Error::UnknownOption("test", arg.clone())),
+            _ => selection.names.push(arg.clone()),
+        }
+    }
+    Ok((selection, options))
+}
+
+/// What running a test gave: whether it passed, what it printed, which for a failure starts with how it ended, and
+/// how long it took.
+type Outcome = (bool, String, Duration);
+
+/// The outcomes of the tests which run here, by their index among the tests chosen, each set once its test has
+/// finished, which the thread that shows the results waits for in turn.
+#[derive(Default)]
+struct Finished {
+    outcomes: Mutex<Vec<Option<Outcome>>>,
+    changed: Condvar,
+}
+impl Finished {
+    fn set(&self, index: usize, outcome: Outcome) {
+        self.outcomes.lock().unwrap_or_else(PoisonError::into_inner)[index] = Some(outcome);
+        self.changed.notify_all();
+    }
+    /// Wait for the outcome of a test, and take it.
+    fn take(&self, index: usize) -> Outcome {
+        let mut outcomes = self.outcomes.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            match outcomes[index].take() {
+                Some(outcome) => return outcome,
+                None => outcomes = self.changed.wait(outcomes).unwrap_or_else(PoisonError::into_inner),
+            }
+        }
+    }
 }
 
 impl Selection {
@@ -55,7 +130,8 @@ impl Selection {
 /// captured, and its result is shown with how long it took. The output of a failed test is shown at the end. With
 /// `verbose`, the output of every test is shown below its result, such as the results of the individual tests in a
 /// crate's test harness.
-pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
+pub fn test(selection: &Selection, options: &Options) -> Result<(), Error> {
+    let verbose = options.verbose;
     let project = Configured::find(Output::Stdout)?;
     // the configuration is up to date, so the tests are chosen before what they need is built, which is only theirs
     let bytes = project.read()?;
@@ -81,15 +157,31 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     let width = tests.iter().map(|test| test.name.chars().count()).max().unwrap_or(0);
     let started = Instant::now();
     let mut failures = Vec::new();
-    // the tests which run on workers are sent at once, and run while those here run in turn
+    // the tests which run on workers are sent at once, and run while those here do
     let workers = Workers::new(&project, tests.iter().any(|test| !test.on_workers.is_empty()))?;
+    let here: Vec<usize> = (0..tests.len()).filter(|&index| tests[index].on_workers.is_empty()).collect();
+    let finished = Finished::default();
+    finished.outcomes.lock().unwrap_or_else(PoisonError::into_inner).resize_with(tests.len(), || None);
+    // the next of the tests which run here to start, which each job takes in turn, so that they start in order
+    let next = AtomicUsize::new(0);
+    let job = || {
+        while let Some(&index) = here.get(next.fetch_add(1, Ordering::SeqCst)) {
+            let outcome = run_here(tests[index], &project, &database.library_path, style.pretty, options);
+            finished.set(index, outcome);
+        }
+    };
     crate::timings::step("test", || std::thread::scope(|scope| {
         let mut sent: Vec<_> = tests
             .iter()
-            .map(|test| (!test.on_workers.is_empty()).then(|| scope.spawn(|| workers.run(test, style.pretty))))
+            .map(|test| (!test.on_workers.is_empty()).then(|| scope.spawn(|| workers.run(test, style.pretty, options))))
             .collect();
-        for (test, sent) in tests.iter().zip(&mut sent) {
-            // shown before the test runs, so that it is clear which one is running
+        for _ in 0..options.jobs.min(here.len()) {
+            scope.spawn(job);
+        }
+        // The results are shown in the order the tests were chosen, each once its test has finished, whichever
+        // finished first, so that what is shown does not depend on the number of jobs.
+        for (index, (test, sent)) in tests.iter().zip(&mut sent).enumerate() {
+            // shown before the test finishes, so that it is clear which one is waited for
             print!("test {:width$} ... ", test.name);
             let _ = std::io::stdout().flush();
             let (passed, report, elapsed) = match sent.take() {
@@ -97,7 +189,7 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
                     let failed = || (false, "the test could not be sent\n".into(), Duration::ZERO);
                     sent.join().unwrap_or_else(|_| failed())
                 },
-                None => run_here(test, &project, &database.library_path, style.pretty),
+                None => finished.take(index),
             };
             let result = if passed { style.ok("ok") } else { style.failed("FAILED") };
             println!("{result} {}", style.dim(&format!("({})", duration(elapsed))));
@@ -127,35 +219,120 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
 }
 
 /// Run a test here, from the project root, with its output captured, and with the directories of the project's
-/// shared libraries added to the platform's search path for them. Returns whether it passed, what it printed, which
-/// for a failure starts with how it ended, and how long it took.
-fn run_here(test: &database::Test, project: &Configured, library_path: &[&str], pretty: bool) -> (bool, String, Duration) {
+/// shared libraries added to the platform's search path for them. It is given the arguments of `jig test` after its
+/// own, and is killed, and fails, if it runs for longer than the timeout.
+fn run_here(
+    test: &database::Test,
+    project: &Configured,
+    library_path: &[&str],
+    pretty: bool,
+    options: &Options,
+) -> Outcome {
     let mut command = std::process::Command::new(test.command[0]);
     // finding the shared libraries of C which what it runs links
     crate::platform::add_library_path(&mut command, &project.root, library_path);
     // with the toolchain the project is configured with, as its commands are
     crate::toolchain::apply(&mut command, project.toolchain.as_deref());
-    let test_started = Instant::now();
-    command.args(&test.command[1..]);
+    command.args(&test.command[1..]).args(&options.args);
     // a test harness colours its results as jig does, though its output is captured
     if test.libtest {
         command.arg(if pretty { "--color=always" } else { "--color=never" });
     }
-    let output = command.current_dir(&project.root).stdin(std::process::Stdio::null()).output();
-    let elapsed = test_started.elapsed();
-    let (passed, report) = match output {
-        Ok(output) => {
+    command.current_dir(&project.root).stdin(std::process::Stdio::null());
+    match run_captured(&mut command, options.timeout) {
+        Ok(Captured { ended, stdout, stderr, elapsed }) => {
             let mut report = String::new();
-            if !output.status.success() {
-                let _ = writeln!(report, "{}", output.status);
+            match ended {
+                Ended::Exited(status) if status.success() => (),
+                Ended::Exited(status) => _ = writeln!(report, "{status}"),
+                Ended::TimedOut(timeout) => _ = writeln!(report, "timed out after {}", duration(timeout)),
             }
-            report.push_str(&String::from_utf8_lossy(&output.stdout));
-            report.push_str(&String::from_utf8_lossy(&output.stderr));
-            (output.status.success(), report)
+            report.push_str(&String::from_utf8_lossy(&stdout));
+            report.push_str(&String::from_utf8_lossy(&stderr));
+            (matches!(ended, Ended::Exited(status) if status.success()), report, elapsed)
         },
-        Err(error) => (false, format!("failed to run {:?}: {error}\n", test.command[0])),
+        Err(error) => (false, format!("failed to run {:?}: {error}\n", test.command[0]), Duration::ZERO),
+    }
+}
+
+/// How a command which was run ended.
+#[derive(Clone, Copy)]
+enum Ended {
+    Exited(std::process::ExitStatus),
+    /// It ran for longer than this, and was killed.
+    TimedOut(Duration),
+}
+
+/// A command which was run, with what it wrote.
+struct Captured {
+    ended: Ended,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    /// How long it ran, until it exited or was killed.
+    elapsed: Duration,
+}
+
+/// How long what a command wrote is waited for once it has been killed. A process it started may still hold its
+/// pipes open, which would otherwise be waited for as long as that process runs.
+const DRAIN: Duration = Duration::from_millis(200);
+
+/// Run a command with its stdout and stderr captured, killing it if it runs for longer than a timeout.
+///
+/// Only the command's own process is killed, not the processes it started. What it wrote before it was killed is
+/// returned.
+fn run_captured(command: &mut std::process::Command, timeout: Option<Duration>) -> std::io::Result<Captured> {
+    use std::process::Stdio;
+    let started = Instant::now();
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Each pipe is read on a thread of its own as it is written, so that the command never blocks on a full pipe,
+    // and what was read is there to take even if the pipe is never closed.
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let (done, ended) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&written);
+        std::thread::spawn(move || {
+            let mut buffer = [0; 8192];
+            let mut pipe = pipe;
+            while let Some(Ok(len @ 1..)) = pipe.as_mut().map(|pipe| pipe.read(&mut buffer)) {
+                shared.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(&buffer[..len]);
+            }
+            let _ = done.send(());
+        });
+        (written, ended)
     };
-    (passed, report, elapsed)
+    let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as Box<dyn Read + Send>));
+    let ended = match timeout {
+        None => Ended::Exited(child.wait()?),
+        Some(timeout) => {
+            let deadline = Instant::now() + timeout;
+            // polled, more often at first, so that a test which is quick is not held up
+            let mut pause = Duration::from_millis(1);
+            loop {
+                if let Some(status) = child.try_wait()? {
+                    break Ended::Exited(status);
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Ended::TimedOut(timeout);
+                }
+                std::thread::sleep(pause.min(left));
+                pause = (pause * 2).min(Duration::from_millis(20));
+            }
+        },
+    };
+    let elapsed = started.elapsed();
+    let drained = Instant::now() + DRAIN;
+    let drain = |(written, done): (Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>)| {
+        match ended {
+            Ended::Exited(_) => _ = done.recv(),
+            Ended::TimedOut(_) => _ = done.recv_timeout(drained.saturating_duration_since(Instant::now())),
+        }
+        std::mem::take(&mut *written.lock().unwrap_or_else(PoisonError::into_inner))
+    };
+    Ok(Captured { ended, stdout: drain(stdout), stderr: drain(stderr), elapsed })
 }
 
 /// The workers tests are sent to, with the cache what they print is fetched into, and the project root, which the
@@ -180,15 +357,15 @@ impl Workers {
     }
     /// Run a test on the first worker which runs its target, sending it the test's files, returning whether it passed,
     /// what it printed, with why it failed first if it did, and how long it took, from when it was sent.
-    fn run(&self, test: &database::Test, pretty: bool) -> (bool, String, Duration) {
+    fn run(&self, test: &database::Test, pretty: bool, options: &Options) -> Outcome {
         let started = Instant::now();
-        let (passed, report) = match self.try_run(test, pretty) {
+        let (passed, report) = match self.try_run(test, pretty, &options.args) {
             Ok(ran) => ran,
             Err(why) => (false, format!("{why}\n")),
         };
         (passed, report, started.elapsed())
     }
-    fn try_run(&self, test: &database::Test, pretty: bool) -> Result<(bool, String), String> {
+    fn try_run(&self, test: &database::Test, pretty: bool, given: &[String]) -> Result<(bool, String), String> {
         let target = test.on_workers;
         let cache = self.cache.as_ref().ok_or("a test runs on a worker only with rig's cache, which is off")?;
         // a statically linked harness runs on any Linux of its architecture, as it needs no loader
@@ -219,6 +396,7 @@ impl Workers {
             inputs.push(rig::worker::Input { path: (*path).to_string(), blob, executable });
         }
         let mut args: Vec<String> = test.command[1..].iter().map(|&arg| arg.to_string()).collect();
+        args.extend(given.iter().cloned());
         if test.libtest {
             args.push(if pretty { "--color=always" } else { "--color=never" }.into());
         }
@@ -391,6 +569,47 @@ mod tests {
         // jig itself is linked as its target is
         let jig = std::env::current_exe().unwrap();
         let _ = linked_statically(&jig);
+    }
+
+    #[test]
+    fn parses_arguments() {
+        let parse = |args: &[&str]| parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let ok = |args: &[&str]| parse(args).unwrap_or_else(|error| panic!("{error}"));
+        let (selection, options) = ok(&["-v", "-j", "3", "a", "--tag", "slow", "b", "--", "-x", "--all"]);
+        assert_eq!((selection.names, selection.tags, selection.all), (vec!["a".into(), "b".into()], vec!["slow".into()], false));
+        assert_eq!((options.verbose, options.jobs, options.timeout), (true, 3, None));
+        // what follows `--` is for the tests, whatever it is
+        assert_eq!(options.args, ["-x", "--all"]);
+        let (selection, options) = ok(&["-j8", "--timeout", "1.5", "--all"]);
+        assert!(selection.all && selection.names.is_empty());
+        assert_eq!((options.jobs, options.timeout), (8, Some(Duration::from_millis(1500))));
+        // one job at a time, and no timeout, by default
+        let (_, options) = ok(&[]);
+        assert_eq!((options.verbose, options.jobs, options.timeout), (false, 1, None));
+        // an option it does not have is not the name of a test
+        assert!(matches!(parse(&["--quiet"]), Err(Error::UnknownOption("test", option)) if option == "--quiet"));
+        assert!(matches!(parse(&["-j0"]), Err(Error::InvalidJobs(_))));
+        assert!(matches!(parse(&["-j", "many"]), Err(Error::InvalidJobs(_))));
+        assert!(matches!(parse(&["-j"]), Err(Error::MissingArg("jobs"))));
+        for timeout in ["0", "-1", "soon", "inf", "NaN"] {
+            assert!(matches!(parse(&["--timeout", timeout]), Err(Error::InvalidTimeout(_))), "{timeout}");
+        }
+    }
+
+    #[test]
+    fn waits_for_outcomes_in_any_order() {
+        let finished = Finished::default();
+        finished.outcomes.lock().unwrap().resize_with(2, || None);
+        std::thread::scope(|scope| {
+            // the second finishes first, and the first is still waited for
+            scope.spawn(|| {
+                finished.set(1, (false, "second".into(), Duration::ZERO));
+                std::thread::sleep(Duration::from_millis(20));
+                finished.set(0, (true, "first".into(), Duration::ZERO));
+            });
+            assert_eq!(finished.take(0).1, "first");
+            assert_eq!(finished.take(1).1, "second");
+        });
     }
 
     #[test]

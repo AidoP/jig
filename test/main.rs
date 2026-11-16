@@ -4848,6 +4848,52 @@ log note run({'HELPER'}, '--rig-test-helper', 'echo', 'a string')
 }
 
 #[test]
+fn tests_run_at_once_with_a_timeout_and_arguments() {
+    let helper = "command 'HELPER' '--rig-test-helper'";
+    let project = Project::new("test-jobs", &[("Jig", &format!("\
+test first
+    {helper} 'touch' 'first-started' '&&' 'wait-for' 'second-started' '30' '&&' 'echo' 'first ran'
+test second
+    {helper} 'touch' 'second-started' '&&' 'wait-for' 'first-started' '30'
+test stuck
+    {helper} 'echo' 'stuck started' '&&' 'sleep' '120'
+test words
+    {helper} 'args' 'own'
+"))]);
+    project.configure().ok();
+    let test = |args: &[&str]| {
+        let output = jig_command().arg("test").args(args).current_dir(&project.dir).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+        (output.status.success(), stdout, stderr)
+    };
+    // each waits for the other to have started, which they have only if they run at once, and the results are
+    // shown in the order the tests were chosen in, whichever finished first
+    let (passed, stdout, _) = test(&["-j", "2", "-v", "second", "first"]);
+    assert!(passed, "{stdout}");
+    assert_contains(&stdout, "running 2 tests\ntest second ... ");
+    assert_contains(&stdout, "\ntest first  ... ");
+    assert_contains(&stdout, "    first ran\n");
+    // a test which runs for longer than the timeout is killed, and fails, with what it printed until then
+    let started = std::time::Instant::now();
+    let (passed, stdout, stderr) = test(&["--timeout", "1", "stuck"]);
+    assert!(!passed, "{stdout}");
+    assert!(started.elapsed() < std::time::Duration::from_mins(1), "{:?}", started.elapsed());
+    assert_contains(&stdout, "---- stuck ----\ntimed out after 1.00s\nstuck started\n");
+    assert_contains(&stderr, "1 test failed");
+    // the arguments after `--` follow a test's own, though they look like options
+    let (passed, stdout, _) = test(&["-v", "words", "--", "--all", "two words"]);
+    assert!(passed, "{stdout}");
+    assert_contains(&stdout, "    own|--all|two words|\n");
+    // an option `jig test` does not have is not taken as the name of a test
+    let (passed, _, stderr) = test(&["--quiet"]);
+    assert!(!passed);
+    assert_contains(&stderr, "`jig test` does not take \"--quiet\"");
+    let (passed, _, stderr) = test(&["-j", "0"]);
+    assert!(!passed);
+    assert_contains(&stderr, "\"0\" is not a number of jobs");
+}
+
+#[test]
 fn crate_tests_for_some_targets() {
     // a crate declared for the host and a target it can't run, whose tests are built only for those `test` names
     let jig = |test: &str| format!("crate lib 'lib.rs'\n    target [host-target, 'riscv64gc-unknown-none-elf']\n    test {test}\n");
