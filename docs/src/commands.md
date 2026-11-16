@@ -2,7 +2,17 @@
 
 jig is run as `jig [+<toolchain>] [--color <when>] [--timings] <command> [<argument> ...]`, where `+<toolchain>` chooses
 a rustup toolchain (see [toolchains](toolchains.md)), `--color` is `auto`, `always` or `never`, and `--timings` shows
-how long each step took. `jig help` shows each command.
+how long each step took. `jig help`, `jig --help` or `jig -h` shows each command, and `jig version` or
+`jig --version` shows the version of jig, which is `unreleased` but for a release, which sets it from its tag by the
+`jig-version` property of jig's own `Jig`.
+
+Every command takes its options anywhere among its arguments before `--`, so that `jig lint app -D` is
+`jig lint -D app`, and fails for an option it does not take, rather than taking it as a name or a path. An option
+with a value takes it in the same argument or the next, as `-j4`, `-j 4`, `--jobs=4` or `--jobs 4`. What follows
+`--` is never an option: it is the targets of `jig build`, and the arguments of what `jig test` and `jig run` run.
+`--help` or `-h` after a command shows the usage, rather than running it. `jig test`, `jig run`, `jig lint` and
+`jig install` build first, and take the options of `jig build` which are about building: `-j <jobs>`,
+`-k <failures>` and `-q`, as [jig build](commands/build.md) describes them.
 
 | Command | What it does |
 |---|---|

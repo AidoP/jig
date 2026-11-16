@@ -4670,6 +4670,10 @@ log note clippy/
     assert!(!stdout.contains("app.rs"), "{stdout}");
     let (success, stdout, _) = lint(&["--deny-warnings", "app"]);
     assert!(success, "{stdout}");
+    // the options may follow the names, and those of building are taken
+    let (success, stdout, stderr) = lint(&["util", "-D", "-q", "-j", "2"]);
+    assert!(!success, "{stdout}");
+    assert_contains(&stderr, "linting raised warnings, which `-D` denies");
     let (success, _, stderr) = lint(&["nope"]);
     assert!(!success);
     assert_contains(&stderr, "no crate to lint named \"nope\"");
@@ -4885,9 +4889,13 @@ test words
     assert!(passed, "{stdout}");
     assert_contains(&stdout, "    own|--all|two words|\n");
     // an option `jig test` does not have is not taken as the name of a test
-    let (passed, _, stderr) = test(&["--quiet"]);
+    let (passed, _, stderr) = test(&["--bogus"]);
     assert!(!passed);
-    assert_contains(&stderr, "`jig test` does not take \"--quiet\"");
+    assert_contains(&stderr, "`jig test` does not take \"--bogus\"");
+    // while those of `jig build` which are about building are, after the names too, and `-v` is still about the tests
+    let (passed, stdout, _) = test(&["words", "-q", "-k", "0", "-v"]);
+    assert!(passed, "{stdout}");
+    assert_contains(&stdout, "    own|\n");
     let (passed, _, stderr) = test(&["-j", "0"]);
     assert!(!passed);
     assert_contains(&stderr, "\"0\" is not a number of jobs");
@@ -4918,7 +4926,8 @@ fn crate_tests_for_some_targets() {
 
 #[test]
 fn commands() {
-    let project = Project::new("commands", &[("Jig", "log note 'generated'\n")]);
+    let jig = "log note 'generated'\ncustom a\n    output 'a'\n    command 'HELPER' '--rig-test-helper' 'touch' output\n";
+    let project = Project::new("commands", &[("Jig", jig)]);
     let run = |args: &[&str]| {
         let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
         (output.status.success(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
@@ -4927,9 +4936,41 @@ fn commands() {
     let (success, _, stderr) = run(&["generate"]);
     assert!(success, "{stderr}");
     assert_contains(&stderr, "note: generated");
-    let (success, stdout, _) = run(&["help"]);
-    assert!(success);
-    assert_contains(&stdout, "usage: jig [+<toolchain>] [--color <when>] [--timings] <command>");
+    // as `--help` and `-h` do, before a command or after one, in place of what it does
+    for args in [&["help"][..], &["--help"], &["-h"], &["build", "--help"], &["install", "stage", "-h"], &["test", "-h"]] {
+        let (success, stdout, stderr) = run(args);
+        assert!(success, "{args:?}: {stderr}");
+        assert_contains(&stdout, "usage: jig [+<toolchain>] [--color <when>] [--timings] <command>");
+    }
+    assert!(!project.dir.join("stage").exists());
+    // the version, which a build which is not a release does not have
+    for args in [&["version"][..], &["--version"]] {
+        let (success, stdout, _) = run(args);
+        assert!(success && stdout.starts_with("jig ") && stdout.ends_with('\n') && stdout.lines().count() == 1, "{stdout}");
+    }
+    // an option a command does not take fails, rather than being taken as an operand
+    for (args, error) in [
+        (&["install", "--bogus"][..], "`jig install` does not take \"--bogus\""),
+        (&["build", "--bogus"][..], "`jig build` does not take \"--bogus\""),
+        (&["graph", "-v"][..], "`jig graph` does not take \"-v\""),
+        (&["install", "-n"][..], "`jig install` does not take \"-n\""),
+        (&["workers", "--jobs", "2"][..], "`jig workers` does not take \"--jobs\""),
+        (&["cache", "stats", "--max-size", "1G"][..], "`jig cache` does not take \"--max-size\""),
+        (&["install", "a", "b"][..], "unexpected argument \"b\""),
+        (&["build", "-j", "0"][..], "\"0\" is not a number of jobs"),
+        (&["install", "-j", "none"][..], "\"none\" is not a number of jobs"),
+        (&["run", "-k", "x"][..], "\"x\" is not a number of failures"),
+    ] {
+        let (success, _, stderr) = run(args);
+        assert!(!success, "{args:?}");
+        assert_contains(&stderr, error);
+    }
+    assert!(!project.dir.join("--bogus").exists());
+    // the options of `jig build` anywhere before `--`, with `-q` for `--quiet`
+    let (success, stdout, stderr) = run(&["build", "-q", "-k", "0", "-j2"]);
+    assert!(success, "{stderr}");
+    assert!(project.dir.join("build/a").exists());
+    assert!(!stdout.contains("CUSTOM a"), "{stdout}");
     // a mistaken command is shown with the usage
     for (args, error) in [
         (&[][..], "missing required argument `command`"),

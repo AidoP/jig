@@ -31,38 +31,28 @@ pub struct Options {
     pub timeout: Option<Duration>,
     /// The arguments each test is given after its own.
     pub args: Vec<String>,
+    /// How what the tests need is built.
+    pub build: crate::rig_builder::Options,
 }
 
-/// Parse the arguments of `jig test`: its options, the names of tests, and after `--`, the arguments of the tests.
-pub fn parse(args: &[String]) -> Result<(Selection, Options), Error> {
-    let mut selection = Selection::default();
-    let mut options = Options { verbose: false, jobs: 1, timeout: None, args: Vec::new() };
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-v" | "--verbose" => options.verbose = true,
-            "--all" => selection.all = true,
-            "--tag" => selection.tags.push(args.next().ok_or(Error::MissingArg("tag"))?.clone()),
-            "--timeout" => {
-                let value = args.next().ok_or(Error::MissingArg("seconds"))?;
-                let seconds = value.parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0);
-                let timeout = seconds.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
-                options.timeout = Some(timeout.ok_or_else(|| Error::InvalidTimeout(value.clone()))?);
-            },
-            "--" => options.args.extend(args.by_ref().cloned()),
-            // as `jig build` takes it, with the number in the same argument or the next
-            _ if arg.starts_with("-j") => {
-                let value = match &arg[2..] {
-                    "" => args.next().ok_or(Error::MissingArg("jobs"))?,
-                    inline => inline,
-                };
-                let jobs = value.parse::<usize>().ok().filter(|&jobs| jobs > 0);
-                options.jobs = jobs.ok_or_else(|| Error::InvalidJobs(value.to_string()))?;
-            },
-            _ if arg.starts_with('-') => return Err(Error::UnknownOption("test", arg.clone())),
-            _ => selection.names.push(arg.clone()),
-        }
-    }
+/// Returns what the arguments of `jig test` choose, and how: its options, the names of tests, and after `--`, the
+/// arguments of the tests. `-j` is the number of jobs of both the build and the tests, while `-v` shows what the
+/// tests print, rather than the commands of the build.
+pub fn options(args: &crate::Args) -> Result<(Selection, Options), Error> {
+    let selection = Selection { names: args.names(), tags: args.values("tag").map(String::from).collect(), all: args.flag("all") };
+    let timeout = args.value("timeout").map(|value| {
+        let seconds = value.parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+        let timeout = seconds.and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+        timeout.ok_or_else(|| Error::InvalidTimeout(value.into()))
+    });
+    let build = crate::rig_builder::Options { verbose: false, ..args.build()? };
+    let options = Options {
+        verbose: args.flag("verbose"),
+        jobs: build.jobs.unwrap_or(1),
+        timeout: timeout.transpose()?,
+        args: args.passed.iter().map(|arg| arg.to_string_lossy().into_owned()).collect(),
+        build,
+    };
     Ok((selection, options))
 }
 
@@ -138,7 +128,7 @@ pub fn test(selection: &Selection, options: &Options) -> Result<(), Error> {
     let database = project.parse(&bytes)?;
     let targets: Vec<String> = selection.choose(&database)?.iter().map(|test| format!("test/{}", test.name)).collect();
     let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
-    let built = targets.is_empty() || project.builder().build(&Request { targets: &targets, ..Default::default() })?;
+    let built = targets.is_empty() || project.builder().build(&Request { targets: &targets, build: options.build, ..Default::default() })?;
     if !built {
         return Err(Error::TestBuild);
     }
@@ -532,6 +522,7 @@ impl Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     /// Returns the bytes of an ELF executable of 64 or 32 bits, little-endian, with program headers of these kinds.
     fn elf(wide: bool, kinds: &[u32]) -> Vec<u8> {
@@ -573,7 +564,7 @@ mod tests {
 
     #[test]
     fn parses_arguments() {
-        let parse = |args: &[&str]| parse(&args.iter().map(ToString::to_string).collect::<Vec<_>>());
+        let parse = |args: &[&str]| options(&crate::Args::parse("test", args.iter().map(OsString::from))?);
         let ok = |args: &[&str]| parse(args).unwrap_or_else(|error| panic!("{error}"));
         let (selection, options) = ok(&["-v", "-j", "3", "a", "--tag", "slow", "b", "--", "-x", "--all"]);
         assert_eq!((selection.names, selection.tags, selection.all), (vec!["a".into(), "b".into()], vec!["slow".into()], false));
@@ -586,8 +577,14 @@ mod tests {
         // one job at a time, and no timeout, by default
         let (_, options) = ok(&[]);
         assert_eq!((options.verbose, options.jobs, options.timeout), (false, 1, None));
+        // as `jig build` takes them
+        let (_, options) = ok(&["-k", "0", "-q", "-v", "a"]);
+        assert_eq!((options.build.keep_going, options.build.quiet), (Some(0), true));
+        // where `-v` is about the tests
+        assert!(options.verbose && !options.build.verbose);
         // an option it does not have is not the name of a test
-        assert!(matches!(parse(&["--quiet"]), Err(Error::UnknownOption("test", option)) if option == "--quiet"));
+        assert!(matches!(parse(&["--bogus"]), Err(Error::UnknownOption("test", option)) if option == "--bogus"));
+        assert!(matches!(parse(&["-n"]), Err(Error::UnknownOption("test", option)) if option == "-n"));
         assert!(matches!(parse(&["-j0"]), Err(Error::InvalidJobs(_))));
         assert!(matches!(parse(&["-j", "many"]), Err(Error::InvalidJobs(_))));
         assert!(matches!(parse(&["-j"]), Err(Error::MissingArg("jobs"))));

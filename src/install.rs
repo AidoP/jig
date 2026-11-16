@@ -13,10 +13,10 @@ use crate::{Error, database};
 /// What is installed is built first. Each file is then copied into its directory within the prefix, replacing any
 /// file there, and given its permissions, and a summary is shown. With `proxy`, a program is instead installed as a
 /// wrapper which builds it if needed and then runs it, and any other file as a link to it, so that what is installed
-/// follows the build.
-pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
+/// follows the build. What is installed is built as `build` says.
+pub fn install(prefix: Option<PathBuf>, proxy: bool, build: crate::rig_builder::Options) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
-    project.build(&Request { targets: &["install"], ..Default::default() })?;
+    project.build(&Request { targets: &["install"], build, ..Default::default() })?;
     // read after building, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;

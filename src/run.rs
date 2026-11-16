@@ -12,13 +12,13 @@ use crate::database::Program;
 ///
 /// What is built is reported on stderr, so that stdout carries only the program's output. The program runs in the
 /// working directory, as if it had been run directly. If its target has a runner, the runner is run instead, with
-/// the program before the arguments. The program's exit status is returned.
-pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, Error> {
+/// the program before the arguments. The program's exit status is returned. It is built as `build` says.
+pub fn run(name: Option<&str>, args: &[std::ffi::OsString], build: crate::rig_builder::Options) -> Result<ExitCode, Error> {
     let project = Configured::find(Output::Stderr)?;
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     let program = find(&database.programs, name)?;
-    project.build(&Request { targets: &[program.target], output: Output::Stderr, ..Default::default() })?;
+    project.build(&Request { targets: &[program.target], output: Output::Stderr, build, ..Default::default() })?;
     let binary = project.root.join(program.path);
     let mut command = match program.runner.split_first() {
         // a runner which is a path, such as one which is built, is relative to the project root
