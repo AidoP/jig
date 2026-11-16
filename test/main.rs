@@ -3937,6 +3937,85 @@ custom tool
 }
 
 #[test]
+fn custom_command_edges() {
+    // `depfile`, `restat`, `dir`, `description` and `console` say what rig's edge of a command has beside its command
+    let jig = |restat: &str| format!("\
+custom gen
+    input 'a.in'
+    output 'gen.txt'
+    depfile 'gen.d'
+    dir build-dir
+    command 'HELPER' '--rig-test-helper' 'cat' input '../found.in' '>' output '&&' 'echo' 'gen.txt:' '../found.in' '>' depfile
+    description 'GEN gen.txt'
+custom same
+    input 'a.in'
+    output 'same.txt'
+    command 'HELPER' '--rig-test-helper' 'restat' output 'sub/.keep'
+{restat}
+custom after
+    input same
+    output 'after.txt'
+    command 'HELPER' '--rig-test-helper' 'cat' input '>' output
+custom where
+    output 'where.txt'
+    dir 'sub'
+    command 'HELPER' '--rig-test-helper' 'pwd' '>' output
+custom asks
+    output 'asks.txt'
+    command 'HELPER' '--rig-test-helper' 'touch' output
+    console
+");
+    let project = Project::new("custom-edges", &[("Jig", &jig("")), ("a.in", "a\n"), ("found.in", "one\n"), ("sub/.keep", "")]);
+    let output = project.configure().ok();
+    let generated = output.build("gen.txt");
+    assert_contains(generated, "\n    description = GEN gen.txt\n");
+    assert_contains(generated, "\n    depfile = gen.d");
+    // run in the build directory, with the paths of references from there
+    assert_contains(generated, " --rig-test-helper cat ../a.in ../found.in '>' gen.txt '&&' ");
+    assert_contains(output.build("where.txt"), "\n    command = cd ../sub && ");
+    assert_contains(output.build("where.txt"), " pwd '>' ../build/where.txt");
+    assert_contains(output.build("asks.txt"), "\n    pool = console");
+    assert!(!output.build("same.txt").contains("restat = true"), "{}", output.build("same.txt"));
+    let build = || {
+        let output = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        stdout
+    };
+    let stdout = build();
+    assert_contains(&stdout, "GEN gen.txt");
+    assert_eq!(std::fs::read_to_string(project.dir.join("build/gen.txt")).unwrap(), "a\none\n");
+    let sub = project.dir.join("sub").canonicalize().unwrap();
+    assert_eq!(Path::new(std::fs::read_to_string(project.dir.join("build/where.txt")).unwrap().trim()), sub);
+    assert!(project.dir.join("build/asks.txt").is_file());
+    // a file the depfile lists runs the command again when it changes
+    assert!(!build().contains("GEN gen.txt"));
+    std::fs::write(project.dir.join("found.in"), "two\n").unwrap();
+    assert_contains(&build(), "GEN gen.txt");
+    assert_eq!(std::fs::read_to_string(project.dir.join("build/gen.txt")).unwrap(), "a\ntwo\n");
+    // without `restat`, what reads an output which was left as it was is built again, and with it, it is not
+    std::fs::write(project.dir.join("a.in"), "b\n").unwrap();
+    let stdout = build();
+    assert!(stdout.contains("CUSTOM same") && stdout.contains("CUSTOM after"), "{stdout}");
+    std::fs::write(project.dir.join("Jig"), jig("    restat").replace("HELPER", &helper())).unwrap();
+    build();
+    std::fs::write(project.dir.join("a.in"), "c\n").unwrap();
+    let stdout = build();
+    assert!(stdout.contains("CUSTOM same") && !stdout.contains("CUSTOM after"), "{stdout}");
+    // a test is not an edge, so it has none of them, and a depfile or directory is one path
+    let project = Project::new("custom-edges-errors", &[("Jig", "\
+test t
+    command 'true'
+    dir 'sub'
+custom c
+    output 'c'
+    depfile ['a.d', 'b.d']
+    command 'true'
+")]);
+    project.configure().failed().stderr("error[unknown-attribute]").stderr("error[invalid-operand]").stderr("one path");
+}
+
+#[test]
 fn custom_errors() {
     let project = Project::new("custom-errors", &[("Jig", "\
 custom a

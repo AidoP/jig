@@ -163,7 +163,7 @@ impl Project {
             Some(Referent::Custom(name)) => self.custom(name, false),
             _ => None,
         };
-        if let Some(custom) = custom && let CustomKind::Command { outputs, default, install } = &custom.kind {
+        if let Some(custom) = custom && let CustomKind::Command { outputs, default, install, .. } = &custom.kind {
             let value = match attribute {
                 "input" => AttributeValue::Set(paths(&custom.inputs)),
                 "output" => AttributeValue::Set(paths(outputs)),

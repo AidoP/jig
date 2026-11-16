@@ -450,7 +450,7 @@ fn write_graph(
     let mut tests = Vec::new();
     for custom in &project.customs {
         // a test is run by `jig test`, which first builds this alias of the test's inputs and program
-        let CustomKind::Command { outputs, default, .. } = &custom.kind else {
+        let CustomKind::Command { outputs, default, edge, .. } = &custom.kind else {
             let alias = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
             let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
@@ -459,15 +459,19 @@ fn write_graph(
             continue;
         };
         let outputs = at.paths(outputs);
-        // It runs from the project root, given as a path relative to the build directory, so that the action does not
-        // depend on where the project is, which matters for its cache key.
-        let root = at.path(&at.root);
+        // It runs from the project root, or its `dir`, given as a path relative to the build directory, so that the
+        // action does not depend on where the project is, which matters for its cache key.
+        let root = at.path(edge.dir.as_deref().unwrap_or(&at.root));
         let running = &custom.running;
         let mut env = toolchain_env(toolchain);
         env.extend(running.env.iter().cloned());
         let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), env);
+        let depfile = edge.depfile.as_ref().map(|path| at.path(path));
         graph.edge(Edge {
-            description: format!("CUSTOM {}", custom.name),
+            description: edge.description.clone().unwrap_or_else(|| format!("CUSTOM {}", custom.name)),
+            depfile: depfile.as_deref(),
+            restat: edge.restat,
+            console: edge.console,
             outputs: &as_paths(&outputs),
             inputs: &as_paths(&at.paths(custom.inputs.iter().chain(&custom.program))),
             after: &as_paths(&at.paths(&custom.depends)),

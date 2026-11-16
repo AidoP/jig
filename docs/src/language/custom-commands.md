@@ -34,6 +34,22 @@ A `custom` statement is followed by indented attributes:
   names to their values, as for a crate, such as `env [LC_ALL: 'C']`. It can be repeated, and is part of the command,
   so the command runs again when they change. A test takes it too
 - `worker-tag <tags>`: the tags a worker must have for rig to send it the command, when it is cached, as for a crate
+- `depfile <path>`: the depfile the command writes, of the inputs it found, in the form gcc writes, relative to the
+  build directory, as an output is, and kept with the `depfile` property, as the outputs are with `output`. The command
+  runs again when one of the files it lists changes, as a compile of C does when a header changes, and with `cache`,
+  they are part of the key it is cached by, as rustc's dep-info is. rig reads the relative paths of a depfile as
+  relative to the build directory, so a command which writes the paths it is given runs there, with `dir build-dir`
+- `dir <path>`: the directory the command runs in, relative to the file, the project root by default. The paths of
+  references, such as `input` and `output`, and a program which is a path, are given to the command relative to it,
+  while a string is given as it is
+- `description <str>`: what is shown while the command runs, in place of `CUSTOM <name>`, such as
+  `description 'GEN tables.rs'`, while `jig build -v` shows the command
+- `restat <bool>`: stamp the outputs again once the command has run, so that what reads an output which it left as it
+  was, such as a generator which only writes what changed, is not built again. It is `false` by default, and `true`
+  without a value
+- `console <bool>`: the command has the terminal, rather than its output being captured, and runs alone, as the edge
+  which configures the project does, such as for a command which asks for a password. It is not cached. It is `false`
+  by default, and `true` without a value
 
 These five, `env`, `pass-env`, `worker-tag`, `change-detection` and `cache`, are taken alike by every statement which
 runs a command: a crate, a custom command, and the statements of C, while a test takes only `env`, as it is run by
@@ -49,4 +65,17 @@ custom device-tree
     input 'virt.dts'
     output 'virt.dtb'
     command 'dtc' '-O' 'dtb' '-o' output input
+```
+
+A generator which finds what it reads, and writes it to a depfile, runs in the build directory, so that the paths it
+is given, and writes, are relative to it:
+
+```jig
+custom tables
+    input 'tables.in'
+    output 'tables.rs'
+    depfile 'tables.d'
+    dir build-dir
+    command 'python3' '../gen.py' input output depfile
+    description 'GEN tables.rs'
 ```
