@@ -4,14 +4,15 @@ use std::io::Write;
 
 use crate::Error;
 use crate::configured::{Configured, Output, Request};
+use crate::rig_builder::Options;
 
 /// Lint the crates which are edited, or only those named, without evaluating the configuration.
 ///
 /// The lints are brought up to date by building them, which lints every crate it can even if one fails, then the
 /// diagnostics each saved are shown, so that they are shown even when nothing needed linting. It fails if a lint did,
 /// such as for a lint which is denied, or with `deny_warnings`, if there is a warning, which is found in what was saved,
-/// so that the lints are not run again.
-pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
+/// so that the lints are not run again. It builds as `build` says, which goes on after any failure unless `-k` is given.
+pub fn lint(names: &[String], deny_warnings: bool, build: Options) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
     let targets: Vec<_> = if names.is_empty() {
         vec!["lint".to_string()]
@@ -19,7 +20,7 @@ pub fn lint(names: &[String], deny_warnings: bool) -> Result<(), Error> {
         names.iter().map(|name| format!("lint/{name}")).collect()
     };
     let targets: Vec<_> = targets.iter().map(String::as_str).collect();
-    let linted = project.builder().build(&Request { targets: &targets, keep_going: true, ..Default::default() })?;
+    let linted = project.builder().build(&Request { targets: &targets, keep_going: true, build, ..Default::default() })?;
     // read after building, which reconfigures if needed, so that it is current
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;

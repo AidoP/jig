@@ -3,7 +3,8 @@
 `jig install [<prefix>]` builds the outputs of the crates and custom commands with the `install` attribute, as the
 target `install`, then copies each into its `install-dir` within the prefix, replacing any file there, with its
 `install-mode` as its permissions, then prints how many files it installed. The prefix is relative to the working
-directory, and is the `install-prefix` property, relative to the project root, without one.
+directory, and is the `install-prefix` property, relative to the project root, without one. It takes the options of
+`jig build` which are about building, `-j`, `-k` and `-q`, for building what it installs.
 
 With `--proxy`, a program, which is a binary crate, an executable of C, or the output of a custom command with an executable `install-mode`,
 is installed as a wrapper which runs `jig build --proxy <prefix> <wrapper>`, then runs the program with the wrapper's

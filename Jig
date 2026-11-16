@@ -19,6 +19,10 @@ declare targets
     type 'list'
     info 'the targets jig is built for, of which those with their standard library installed are built'
     default unique(host-target, 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl', 'riscv64gc-unknown-linux-musl')
+declare jig-version
+    type 'str'
+    info 'the version `jig --version` shows, which a release sets from its tag, and which is empty otherwise'
+    default ''
 declare release-target
     type 'str'
     info 'the target of the jig which is built by default, installed, and run by the integration tests'
@@ -53,6 +57,8 @@ crate jig 'src/main.rs'
     use rig
     # statically linked for musl, which `riscv64gc-unknown-linux-musl` is not by default
     codegen/target-feature get([{host-target}: []], target, ['+crt-static'])
+    # `jig --version` shows `unreleased` without one
+    env [JIG_VERSION: jig-version]
     # where the tests of the target can run
     test {target}.test
     install target == release-target

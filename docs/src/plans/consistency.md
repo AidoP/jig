@@ -2,7 +2,7 @@
 
 A plan for the places where jig's commands, statements and settings disagree with each other, and for what a project
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
-each statement takes, and of the settings, in November 2026. **Phase 1a is done**, and the rest is not started.
+each statement takes, and of the settings, in November 2026. **Phases 1a and 2 are done**, and the rest is not started.
 
 The phases are ordered by how much each is worth against what it costs, and each stands on its own. A phase which
 changes what a project writes says how what is written today keeps working.
@@ -56,7 +56,7 @@ sending a test to a worker.
 Open questions: whether a skipped test is shown as `ok (cached)`, as a cached build edge is counted, and how
 `--timings` counts it.
 
-## Phase 2: the command line
+## Phase 2: the command line (done)
 
 Each command parses its own arguments, and they have drifted apart.
 
@@ -70,6 +70,19 @@ Each command parses its own arguments, and they have drifted apart.
 - `-q` for `--quiet`, as `-v` is for `--verbose`.
 - `test`, `run`, `lint` and `install` build first, and take the options of `jig build` which are about building:
   `-j`, `-k` and `--quiet`. `jig test -j` is then the jobs of both, and `-v` keeps its meaning for each command.
+
+How it was done: `Args::parse` in `src/main.rs` parses every command by its `Spec`, which lists its options, whether
+it builds first, how many operands it takes, and whether it passes arguments on. Beside the plan:
+
+- `jig run` takes its options before the name of the program, and what follows the name is the program's, as it was,
+  so that `jig run app -x` still gives `-x` to the program.
+- The options with a short name have a long one too: `--jobs`, `--keep-going`, `--dry-run`, `--quiet`, and the
+  worker's `--jobs` has `-j`.
+- `-j 0` is an error for every command, as it was for `jig test`, where `jig build` took it as one job.
+- The version is the `JIG_VERSION` jig is compiled with, which jig's own `Jig` sets from a `jig-version` property,
+  empty by default, which the release workflow sets from the tag. Any other build shows `jig unreleased`, as does
+  `bootstrap.sh`, which does not set it.
+- `jig build --proxy <prefix> <wrapper>`, which the installed wrappers run, is still parsed apart, as it is internal.
 
 ## Phase 3: attributes which some statements lack
 

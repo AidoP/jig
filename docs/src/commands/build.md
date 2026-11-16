@@ -8,8 +8,11 @@ configured with if its build directory has been removed or `.jig` is from anothe
 targets to build, which are relative to the build directory, or the names `custom/<name>`, `check/<label>`, `test`,
 `test/<name>`, `doc`, `doc/<name>`, `lint` and `lint/<name>`. Without targets, it builds the crates and custom commands
 with `default`, or if none has it, every crate, test harness, documentation and custom command, but not the checks,
-which are for rust-analyzer, nor the lints. It takes options before them: `-j <jobs>`, `-k <failures>`, `-n` for a
-dry run, which shows why each edge would run, `-v` to show commands rather than descriptions, and `--quiet`.
+which are for rust-analyzer, nor the lints. It takes options before them or among them: `-j <jobs>` or
+`--jobs <jobs>`, the most commands which run at once, which is above zero, `-k <failures>` or
+`--keep-going <failures>`, the failures it stops after, `0` for none, `-n` or `--dry-run`, which shows why each edge
+would run, `-v` or `--verbose` to show commands rather than descriptions, and `-q` or `--quiet` to show only what the
+commands print. What follows `--` is a target, though it starts with `-`.
 rustc and clippy are run in colour, as their output is captured, and the colour is left out where the build's output
 is not a terminal, so that what is built does not depend on where its output goes. `jig --color <when>`, before the
 command, chooses otherwise, as `auto`, `always` or `never`, for the build, `jig lint` and jig's own diagnostics, such as

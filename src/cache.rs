@@ -303,19 +303,9 @@ fn command_of(remote: &str, args: &[&str]) -> Option<Vec<String>> {
 ///   and has the token, collecting it after each client.
 ///
 /// Either takes pushes with `--push`.
-pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
-    let (mut stdio, mut push, mut listen, mut token_file) = (false, false, None, None);
-    let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
-    while let Some(arg) = args.next() {
-        let mut value = |name: &'static str| args.next().ok_or(Error::MissingArg(name));
-        match arg.as_str() {
-            "--stdio" => stdio = true,
-            "--push" => push = true,
-            "--listen" => listen = Some(value("--listen <address>")?),
-            "--token-file" => token_file = Some(PathBuf::from(value("--token-file <path>")?)),
-            _ => return Err(Error::ExtraArg(arg)),
-        }
-    }
+pub fn serve(args: &crate::Args, settings: &Settings) -> Result<(), Error> {
+    let (stdio, push, listen) = (args.flag("stdio"), args.flag("push"), args.value("listen"));
+    let token_file = args.value("token-file").map(PathBuf::from);
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     match (stdio, listen) {
         (true, None) => {
@@ -326,7 +316,7 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
         (false, Some(address)) => {
             // TCP authenticates no one, so a client must have the token
             let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
-            let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
+            let listener = std::net::TcpListener::bind(address).map_err(Error::Serve)?;
             let bound = listener.local_addr().map_err(Error::Serve)?;
             eprintln!("serving {} on {bound}", cache.dir().display());
             let after = || settings.collect_if_due(&cache);
@@ -348,25 +338,10 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
 /// `--jobs <n>` sets how many actions run at once, which defaults to the number of threads the machine has.
 /// `--tag <tag>` adds a tag for the worker to report. With `--install`, the worker uses rustup to install a
 /// toolchain which an action needs and it does not have.
-pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
-    let (mut stdio, mut listen, mut token_file, mut jobs) = (false, None, None, None);
-    let (mut tags, mut install) = (Vec::new(), false);
-    let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
-    while let Some(arg) = args.next() {
-        let mut value = |name: &'static str| args.next().ok_or(Error::MissingArg(name));
-        match arg.as_str() {
-            "--stdio" => stdio = true,
-            "--listen" => listen = Some(value("--listen <address>")?),
-            "--token-file" => token_file = Some(PathBuf::from(value("--token-file <path>")?)),
-            "--tag" => tags.push(value("--tag <tag>")?),
-            "--install" => install = true,
-            "--jobs" => {
-                let count = value("--jobs <n>")?;
-                jobs = Some(count.parse::<usize>().ok().filter(|&jobs| jobs > 0).ok_or(Error::InvalidJobs(count))?);
-            },
-            _ => return Err(Error::ExtraArg(arg)),
-        }
-    }
+pub fn worker(args: &crate::Args, settings: &Settings) -> Result<(), Error> {
+    let (stdio, listen, install, jobs) = (args.flag("stdio"), args.value("listen"), args.flag("install"), args.jobs()?);
+    let token_file = args.value("token-file").map(PathBuf::from);
+    let tags: Vec<String> = args.values("tag").map(String::from).collect();
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let jobs = jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, std::num::NonZero::get));
     let known = cache.dir().join("toolchains");
@@ -389,7 +364,7 @@ fn serve_worker(
     cache: &rig::cache::Cache,
     executor: &rig::worker::Executor,
     stdio: bool,
-    listen: Option<String>,
+    listen: Option<&str>,
     token_file: Option<PathBuf>,
     settings: &Settings,
 ) -> Result<(), Error> {
@@ -403,7 +378,7 @@ fn serve_worker(
         (false, Some(address)) => {
             // TCP authenticates no one, and a worker runs what it is sent, so a client must have the token
             let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
-            let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
+            let listener = std::net::TcpListener::bind(address).map_err(Error::Serve)?;
             let bound = listener.local_addr().map_err(Error::Serve)?;
             eprintln!("running actions with {} toolchains on {bound}", executor.capabilities().toolchains.len());
             let token = Some(token.as_slice());
@@ -418,10 +393,7 @@ fn serve_worker(
 
 /// The `jig workers` command, which shows each worker of the `workers` property with its host, jobs, tags and
 /// toolchains, or why it cannot be reached.
-pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
-    if let Some(extra) = args.next() {
-        return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
-    }
+pub fn workers(settings: &Settings) -> Result<(), Error> {
     let workers = settings.workers()?;
     if workers.is_empty() {
         println!("no workers, as the `workers` property and `JIG_WORKERS` give none");
@@ -499,22 +471,13 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// `jig cache stats`, `jig cache gc [--max-size <size>]` or `jig cache clear`.
-pub fn command(mut args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
-    let command = args.next().ok_or(Error::MissingArg("cache command"))?;
-    let command = command.to_string_lossy().into_owned();
-    let mut max = None;
-    if command == "gc" {
-        while let Some(arg) = args.next() {
-            let arg = arg.to_string_lossy().into_owned();
-            let size = match arg.strip_prefix("--max-size=") {
-                Some(size) => size.to_string(),
-                None if arg == "--max-size" => args.next().ok_or(Error::MissingArg("size"))?.to_string_lossy().into_owned(),
-                None => return Err(Error::ExtraArg(arg)),
-            };
-            max = Some(parse_size(&size).ok_or(Error::InvalidSize(size))?);
-        }
-    } else if let Some(extra) = args.next() {
-        return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
+pub fn command(args: &crate::Args, settings: &Settings) -> Result<(), Error> {
+    let command = args.names().pop().ok_or(Error::MissingArg("cache command"))?;
+    let max = args.value("max-size").map(|size| parse_size(size).ok_or_else(|| Error::InvalidSize(size.into())));
+    let max = max.transpose()?;
+    // only `gc` takes a size
+    if max.is_some() && command != "gc" {
+        return Err(Error::UnknownOption("cache", "--max-size".into()));
     }
     let cache = settings.open(false)?.ok_or(Error::CacheOff)?;
     let stats = |stats: rig::cache::Stats| {

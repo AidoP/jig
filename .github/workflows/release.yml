@@ -43,11 +43,13 @@ jobs:
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Configure the release
         # `Jig` uses `Jig.local` if it exists, which makes the target the one which is built by default, installed and
-        # run by the integration tests, where a musl target is statically linked, so that it runs on any Linux
+        # run by the integration tests, where a musl target is statically linked, so that it runs on any Linux, and
+        # gives jig its version, the tag without its `v`
         run: |
           cat > Jig.local <<EOF
           set release-target '${{ matrix.target }}'
           set codegen/strip 'symbols'
+          set jig-version '${GITHUB_REF_NAME#v}'
           EOF
       - name: Bootstrap
         run: sh bootstrap.sh

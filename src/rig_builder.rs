@@ -2,10 +2,10 @@
 //! in `.rig` beside it.
 //!
 //! `jig build` passes on its options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge
-//! would run, `-v` to show commands rather than descriptions, and `--quiet`.
+//! would run, `-v` to show commands rather than descriptions, and `-q` or `--quiet`, of which the commands which
+//! build first take `-j`, `-k` and `-q`.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::{Error, rig_graph};
@@ -24,8 +24,8 @@ pub enum Output {
 pub struct Request<'a> {
     /// The targets to build, or the defaults if there are none.
     pub targets: &'a [&'a str],
-    /// Arguments for the build tool, as `jig build` is given them, before the targets.
-    pub args: &'a [OsString],
+    /// How to build, as the options of the command give it.
+    pub build: Options,
     /// Show only what the commands print, rather than the progress of the build.
     pub quiet: bool,
     /// Build what can be built after a command fails, rather than stopping.
@@ -44,40 +44,19 @@ pub struct Rig<'a> {
     pub cache: &'a crate::cache::Settings,
 }
 
-/// How `jig build` asks for a build, from its arguments.
-#[derive(Default)]
-struct Args {
-    jobs: Option<usize>,
-    keep_going: Option<usize>,
-    dry_run: bool,
-    verbose: bool,
-    quiet: bool,
-    targets: Vec<String>,
-}
-
-impl Args {
-    /// Parse the arguments `jig build` passes on, which are rig's options, and targets.
-    fn parse(args: &[OsString]) -> Result<Self, Error> {
-        let mut parsed = Self::default();
-        let mut args = args.iter().map(|arg| arg.to_string_lossy().into_owned());
-        while let Some(arg) = args.next() {
-            let mut number = |option: &str, inline: &str| -> Result<usize, Error> {
-                let value = if inline.is_empty() { args.next().unwrap_or_default() } else { inline.to_string() };
-                value.parse().map_err(|_| Error::RigArgument(format!("{option} {value}")))
-            };
-            match arg.as_str() {
-                "-n" => parsed.dry_run = true,
-                "-v" | "--verbose" => parsed.verbose = true,
-                "--quiet" => parsed.quiet = true,
-                "--" => parsed.targets.extend(args.by_ref()),
-                _ if arg.starts_with("-j") => parsed.jobs = Some(number("-j", &arg[2..])?),
-                _ if arg.starts_with("-k") => parsed.keep_going = Some(number("-k", &arg[2..])?),
-                _ if arg.starts_with('-') => return Err(Error::RigArgument(arg)),
-                _ => parsed.targets.push(arg),
-            }
-        }
-        Ok(parsed)
-    }
+/// How a command asks for a build, from its options, which [`crate::Args::build`] reads.
+#[derive(Clone, Copy, Default)]
+pub struct Options {
+    /// `-j`: the most commands which run at once.
+    pub jobs: Option<usize>,
+    /// `-k`: the number of failures the build stops after, `0` for none.
+    pub keep_going: Option<usize>,
+    /// `-n`: show what would run, and why, rather than building.
+    pub dry_run: bool,
+    /// `-v`: show the commands rather than their descriptions.
+    pub verbose: bool,
+    /// `-q`: show only what the commands print.
+    pub quiet: bool,
 }
 
 /// The graph and state loaded while bringing the graph up to date, kept for the build which follows in the same
@@ -300,22 +279,17 @@ impl Rig<'_> {
         crate::timings::step("build", || self.build_untimed(request))
     }
     fn build_untimed(&self, request: &Request) -> Result<bool, Error> {
-        let args = Args::parse(request.args)?;
+        let build = request.build;
         let mut options = self.options()?;
-        if let Some(jobs) = args.jobs {
+        if let Some(jobs) = build.jobs {
             options.jobs = jobs.max(1);
         }
-        options.keep_going = args.keep_going.unwrap_or(usize::from(!request.keep_going));
-        // in the form the graph has them, with `/`, which a path written on Windows may not use
-        let given = args.targets.iter().map(|target| crate::rig_graph::path_string(Path::new(target)));
-        let given: Vec<String> = given.collect();
-        let mut targets: Vec<&str> = given.iter().map(String::as_str).collect();
-        targets.extend_from_slice(request.targets);
-        if args.dry_run {
-            return self.dry_run(&targets, request.output);
+        options.keep_going = build.keep_going.unwrap_or(usize::from(!request.keep_going));
+        if build.dry_run {
+            return self.dry_run(request.targets, request.output);
         }
-        let console = Console { quiet: request.quiet || args.quiet, verbose: args.verbose };
-        self.run(&targets, &options, console, request.output)
+        let console = Console { quiet: request.quiet || build.quiet, verbose: build.verbose };
+        self.run(request.targets, &options, console, request.output)
     }
     /// Generate the graph again if it is out of date. What that shows is written to `output`, unless `quiet`.
     /// Nothing is shown if the graph was up to date.
@@ -495,7 +469,7 @@ fn record_generator_in(
         Some(depfile) => {
             let path: PathBuf = build_dir.join(depfile);
             let text = std::fs::read_to_string(&path).map_err(|error| Error::Read(path.clone(), error))?;
-            rig::depfile::parse(&text).map_err(|error| Error::RigArgument(format!("{path:?}: {error}")))?
+            rig::depfile::parse(&text).map_err(|error| Error::Depfile(path, error.clone()))?
         },
         None => rig::depfile::Discovered::default(),
     };
@@ -507,20 +481,6 @@ fn record_generator_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn parse(args: &[&str]) -> Result<Args, Error> {
-        Args::parse(&args.iter().map(OsString::from).collect::<Vec<_>>())
-    }
-
-    #[test]
-    fn parses_options() {
-        let args = parse(&["-j", "4", "-k0", "-v", "a", "--quiet", "-n", "--", "-b"]).unwrap_or_else(|_| panic!());
-        assert_eq!((args.jobs, args.keep_going), (Some(4), Some(0)));
-        assert!(args.verbose && args.quiet && args.dry_run);
-        assert_eq!(args.targets, ["a", "-b"]);
-        assert!(matches!(parse(&["-t", "deps"]), Err(Error::RigArgument(arg)) if arg == "-t"));
-        assert!(matches!(parse(&["-j", "x"]), Err(Error::RigArgument(arg)) if arg == "-j x"));
-    }
 
     #[test]
     fn reads_how_the_graph_is_generated() {

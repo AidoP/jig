@@ -41,17 +41,9 @@ use crate::rust_analyzer::string;
 
 /// Show rig's graph of the project which contains the working directory, once it is up to date, or only the edges
 /// which produce the outputs given, as text, or with `--json`, as JSON.
-pub fn show(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), Error> {
-    let mut json = false;
-    let mut outputs = Vec::new();
-    for arg in args {
-        match arg.to_string_lossy().as_ref() {
-            "--json" => json = true,
-            option if option.starts_with('-') => return Err(Error::RigArgument(option.into())),
-            // as the graph has them, with `/`, which a path on Windows may be written without
-            output => outputs.push(crate::rig_graph::path_string(std::path::Path::new(output))),
-        }
-    }
+pub fn show(json: bool, outputs: &[String]) -> Result<(), Error> {
+    // as the graph has them, with `/`, which a path on Windows may be written without
+    let outputs: Vec<String> = outputs.iter().map(|output| crate::rig_graph::path_string(std::path::Path::new(output))).collect();
     let project = Configured::find(Output::Stderr)?;
     let graph = rig::Graph::load(&project.build_dir.join(crate::rig_graph::FILE)).map_err(Error::Rig)?;
     let mut ids = Vec::new();
