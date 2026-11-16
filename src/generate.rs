@@ -183,6 +183,10 @@ pub struct Unit {
     pub pass_env: Vec<String>,
     /// The tags a worker must have for rig to send it the crate's commands.
     pub worker_tags: Vec<String>,
+    /// Whether rig stamps the crate's files by their contents, by its `change-detection` or the property's.
+    pub hashed: bool,
+    /// Whether rig caches what is built of the crate, when it caches.
+    pub cached: bool,
     /// The directory of the outputs for the target.
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
@@ -352,6 +356,8 @@ fn write_dependencies(
 /// Returns the crates as units for rust-analyzer, in the same order.
 fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -> Vec<Unit> {
     let host = project.host();
+    // a value which is neither is reported where the property was set
+    let hashed = project.change_detection() == "hash";
     let mut units = Vec::new();
     for (c, deps) in crates.iter().zip(externs(crates)) {
         // crates from the toolchain, such as `core`, are not edited
@@ -374,6 +380,8 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             env: c.env.clone(),
             pass_env: c.pass_env.clone(),
             worker_tags: c.worker_tags.clone(),
+            hashed: c.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
+            cached: c.cached,
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
             default: c.default,
@@ -454,16 +462,20 @@ fn write_graph(
         // It runs from the project root, given as a path relative to the build directory, so that the action does not
         // depend on where the project is, which matters for its cache key.
         let root = at.path(&at.root);
-        let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), toolchain_env(toolchain));
+        let running = &custom.running;
+        let mut env = toolchain_env(toolchain);
+        env.extend(running.env.iter().cloned());
+        let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), env);
         graph.edge(Edge {
             description: format!("CUSTOM {}", custom.name),
             outputs: &as_paths(&outputs),
             inputs: &as_paths(&at.paths(custom.inputs.iter().chain(&custom.program))),
             after: &as_paths(&at.paths(&custom.depends)),
             exec,
-            hashed: custom.change_detection.as_deref().map_or(hashed, |detection| detection == "hash"),
+            hashed: running.hashed(hashed),
             cache: custom.cache.as_deref(),
-            pass_env: &custom.pass_env,
+            pass_env: &running.pass_env,
+            placement: rig::Placement { tags: running.worker_tags.clone(), ..Default::default() },
             ..Default::default()
         })?;
         // an alias, so that the outputs can be built by the command's name
@@ -491,6 +503,8 @@ fn write_graph(
     // the native libraries each crate links by its own `use`s, found once, as every crate which links it needs them
     let own_libraries: Vec<Vec<&Native>> = crates.iter().map(|c| project.link_libraries(&c.uses, &c.target)).collect();
     for (index, (c, unit)) in crates.iter().zip(units).enumerate() {
+        // as the crate's own `change-detection` and `cache` say
+        let (hashed, cache) = (unit.hashed, cache.filter(|_| unit.cached));
         // Returns the file of each dependency to pass with `--extern`: its copy which unwinds, if `unwinds` and it has
         // one; its metadata, if `metadata` and it is a library, so that this crate can start as soon as the metadata is
         // written; and otherwise its output.
@@ -690,6 +704,7 @@ fn write_graph(
     // Each check is an ordinary edge which saves its diagnostics to a file. rust-analyzer only shows the diagnostics
     // of the latest flycheck, so when a check is up to date, the flycheck replays the saved ones.
     for unit in units {
+        let (hashed, cache) = (unit.hashed, cache.filter(|_| unit.cached));
         // rustc runs a procedural macro even when checking, so its real output is passed rather than its metadata
         let mut deps = Vec::new();
         for &index in &unit.deps {
@@ -987,14 +1002,14 @@ fn native_edges(
             inputs: &[&input],
             after: &as_paths(&depends),
             depfile: Some(&depfile),
-            exec: program_in_build_dir(&program(compiler), args, Vec::new()),
-            // stamped by contents, so that a header which is touched but not changed rebuilds nothing
-            hashed: true,
+            exec: program_in_build_dir(&program(compiler), args, library.running.env.clone()),
+            // stamped by contents by default, so that a header which is touched but not changed rebuilds nothing
+            hashed: library.running.hashed(true),
             // Cached by the identity of the compiler, as rustc's edges are by the toolchain's. That is sound because
-            // the
-            // depfile lists every header which was read.
+            // the depfile lists every header which was read.
             cache: cache.as_deref(),
-            pass_env: &library.pass_env,
+            pass_env: &library.running.pass_env,
+            placement: native_placement(library),
             ..Default::default()
         })?;
         objects.push(object);
@@ -1002,8 +1017,8 @@ fn native_edges(
     if library.kind.is_linked() {
         return link_native(graph, project, crates, library, &objects, at).map(|output| vec![output]);
     }
-    // a static library linked as its objects is not archived
-    if library.link_objects {
+    // a static library linked as its objects is not archived, unless it is installed
+    if library.link_objects && !library.install.enabled {
         return Ok(objects);
     }
     let archive = at.path(&library.output());
@@ -1014,9 +1029,10 @@ fn native_edges(
         description: describe("AR", &archive),
         outputs: &[&archive],
         inputs: &as_paths(&objects),
-        exec: program_in_build_dir(&program(&library.archiver), args, archive_env()),
-        hashed: true,
-        pass_env: &library.pass_env,
+        exec: program_in_build_dir(&program(&library.archiver), args, archive_env(&library.running.env)),
+        hashed: library.running.hashed(true),
+        pass_env: &library.running.pass_env,
+        placement: native_placement(library),
         ..Default::default()
     })?;
     Ok(vec![archive])
@@ -1132,11 +1148,12 @@ fn link_native(
         outputs: &as_paths(&outputs),
         inputs: &inputs,
         after: &as_paths(&at.paths(&native.depends)),
-        exec: program_in_build_dir(&program, args, Vec::new()),
-        hashed: true,
+        exec: program_in_build_dir(&program, args, native.running.env.clone()),
+        hashed: native.running.hashed(true),
         // cached by the identity of the compiler, which does the linking as it did the compiling
         cache: native.cache.as_deref(),
-        pass_env: &native.pass_env,
+        pass_env: &native.running.pass_env,
+        placement: native_placement(native),
         ..Default::default()
     })?;
     Ok(output)
@@ -1148,16 +1165,26 @@ fn link_native(
 /// same when `ZERO_AR_DATE` is set, which [`archive_env`] does.
 const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
 
-/// Returns the environment of the archiver, which on Apple's hosts makes `ar` deterministic.
-fn archive_env() -> Vec<(String, String)> {
-    if cfg!(target_vendor = "apple") { vec![("ZERO_AR_DATE".into(), "1".into())] } else { Vec::new() }
+/// Returns the environment of the archiver, which on Apple's hosts makes `ar` deterministic, followed by the
+/// library's own.
+fn archive_env(own: &[(String, String)]) -> Vec<(String, String)> {
+    let apple = cfg!(target_vendor = "apple").then(|| ("ZERO_AR_DATE".to_string(), "1".to_string()));
+    apple.into_iter().chain(own.iter().cloned()).collect()
+}
+
+/// Returns which workers rig may send the commands of a library or executable of C to: those with its `worker-tag`s,
+/// and its host, as the compiler is found on it.
+fn native_placement(native: &Native) -> rig::Placement {
+    rig::Placement { tags: native.running.worker_tags.clone(), ..Default::default() }
 }
 
 /// Remove the archive of each static library whose list of objects has changed since it was archived. The list is
 /// recorded beside the archive, in `lib<name>.a.members`. `ar` adds to an archive which already exists, so without
 /// this, an archive would keep the object of a source which was removed.
 fn forget_stale_archives(project: &Project) -> Result<(), Error> {
-    let archived = |native: &&Native| native.kind == NativeKind::StaticLibrary && !native.link_objects;
+    let archived = |native: &&Native| {
+        native.kind == NativeKind::StaticLibrary && (!native.link_objects || native.install.enabled)
+    };
     for library in project.natives().into_iter().filter(archived) {
         let archive = library.output();
         let mut record = archive.clone().into_os_string();
@@ -1215,6 +1242,7 @@ struct TestCommand<'a> {
     tags: &'a [String],
     on_workers: &'a str,
     inputs: Vec<String>,
+    env: &'a [(String, String)],
 }
 
 fn write_database(
@@ -1257,7 +1285,8 @@ fn write_database(
                 };
                 paths.map(|path| relative(path).display().to_string()).collect()
             };
-            commands.push(TestCommand { name, command, libtest, tags, on_workers, inputs });
+            let env = &custom.running.env;
+            commands.push(TestCommand { name, command, libtest, tags, on_workers, inputs, env });
         }
     }
 
@@ -1338,7 +1367,8 @@ fn write_database(
         let tags = test.tags.iter().map(String::as_str).collect();
         let inputs = test.inputs.iter().map(String::as_str).collect();
         let (name, libtest, on_workers) = (test.name, test.libtest, test.on_workers);
-        database.tests.push(database::Test { name, command, libtest, tags, on_workers, inputs });
+        let env = test.env.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+        database.tests.push(database::Test { name, command, libtest, tags, on_workers, inputs, env });
     }
     for (name, path, target, runner, default) in &programs {
         let runner = runner.iter().map(String::as_str).collect();

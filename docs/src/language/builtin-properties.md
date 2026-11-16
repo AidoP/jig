@@ -20,7 +20,9 @@
   size, or `'hash'`, by a BLAKE3 hash of its contents too. With `'hash'`, a file which is written again unchanged, or
   changed and changed back, rebuilds nothing, and what depends on an output which is written unchanged is not rebuilt.
   A file is only read again when its time or size has changed, or when it is a source which was modified within a tick
-  of the file system's clock of being hashed, as it may have changed again without its time showing it
+  of the file system's clock of being hashed, as it may have changed again without its time showing it. Any other
+  value is the error `invalid-operand` where it is set. A crate or custom command's own `change-detection` attribute
+  replaces it, and the statements of C hash their files unless theirs says otherwise
 - `cache/dir`, `cache/size`, `cache/remote` and `cache/push`: rig's cache, as [caching](../caching.md) describes, usually set in the user's
   configuration: its directory, `$XDG_CACHE_HOME/jig`, `%LOCALAPPDATA%\jig\cache` on Windows, or
   `~/.cache/jig` by default, or `'off'`; the size it is

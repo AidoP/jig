@@ -2,7 +2,7 @@
 
 A plan for the places where jig's commands, statements and settings disagree with each other, and for what a project
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
-each statement takes, and of the settings, in November 2026. **Phases 1a and 2 are done**, and the rest is not started.
+each statement takes, and of the settings, in November 2026. **Phases 1a, 2 and 3 are done**, and the rest is not started.
 
 The phases are ordered by how much each is worth against what it costs, and each stands on its own. A phase which
 changes what a project writes says how what is written today keeps working.
@@ -84,7 +84,7 @@ it builds first, how many operands it takes, and whether it passes arguments on.
   `bootstrap.sh`, which does not set it.
 - `jig build --proxy <prefix> <wrapper>`, which the installed wrappers run, is still parsed apart, as it is internal.
 
-## Phase 3: attributes which some statements lack
+## Phase 3: attributes which some statements lack (done)
 
 | Attribute | Has it | Lacks it |
 |---|---|---|
@@ -102,6 +102,19 @@ it builds first, how many operands it takes, and whether it passes arguments on.
   inputs do not say.
 - A `change-detection` property which is not `'timestamp'` or `'hash'` is a diagnostic where it is set, as the
   attribute's is, rather than an error once the graph is generated.
+
+How it was done: `Project::running_attribute`, in `src/project/running.rs`, takes the five attributes into a
+`Running`, which crates, custom commands, tests and the statements of C call. Beside the plan:
+
+- `pass-env` is left out of a test, which takes only `env`: a test runs here with everything `jig test` inherits,
+  and is not cached, so which variables it reads means nothing until tests are edges, in 1c, which should add it.
+- The statements of C keep hashing their files by default, whatever the `change-detection` property, as they did,
+  and their own `change-detection` replaces that. A cached edge is hashed whatever it says, as before.
+- A static library linked as its objects is archived when it is installed, as there is otherwise no archive.
+- The headers are those with the extension `.h`, `.hh`, `.hpp`, `.hxx` or `.inc`, found when the project is
+  configured, which depends on their directories, so that one which is added configures it again. They are installed
+  in `include` whatever `install-dir` says, which is the archive's, and only with `install`.
+- The attributes are not yet readable by reference, as `app.pass-env` is for a crate, for the other statements.
 
 ## Phase 4: custom commands
 

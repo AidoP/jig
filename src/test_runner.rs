@@ -223,7 +223,7 @@ fn run_here(
     crate::platform::add_library_path(&mut command, &project.root, library_path);
     // with the toolchain the project is configured with, as its commands are
     crate::toolchain::apply(&mut command, project.toolchain.as_deref());
-    command.args(&test.command[1..]).args(&options.args);
+    command.args(&test.command[1..]).args(&options.args).envs(test.env.iter().copied());
     // a test harness colours its results as jig does, though its output is captured
     if test.libtest {
         command.arg(if pretty { "--color=always" } else { "--color=never" });
@@ -399,7 +399,7 @@ impl Workers {
             install: String::new(),
             target: String::new(),
             action,
-            env: Vec::new(),
+            env: test.env.iter().map(|&(name, value)| (name.into(), value.into())).collect(),
             locating: ["PATH", "HOME", "TMPDIR"].map(String::from).to_vec(),
             inputs,
             outputs: Vec::new(),

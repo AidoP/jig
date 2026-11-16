@@ -24,6 +24,10 @@ A `crate` statement may be followed by indented attributes:
   whose `env!` reads any other variable from the environment fails to compile, rather than being cached without it
 - `worker-tag <tags>`: the tags a worker must have, as `jig worker --tag` gives them, for rig to send it the crate's
   commands, as a tag or a list of them, such as `worker-tag 'fpga'`. It can be repeated
+- `change-detection <str>`: how rig finds that the crate's files have changed, `'timestamp'` or `'hash'`, in place of
+  the `change-detection` property, as for a [custom command](custom-commands.md)
+- `cache <bool>`: whether rig keeps what is built of the crate in its cache, when it is on, which it does by default,
+  so that `cache false` leaves out a crate whose output depends on what its inputs do not say
 - `depends <path>`: a file which is built before the crate, its test harness and its test, but which is not an input,
   so the crate is not rebuilt when it changes, such as a program its tests run. It is a path relative to the file, a
   reference, or a list of them, and can be repeated

@@ -4336,13 +4336,131 @@ custom after
     // a command's own `change-detection` replaces the property, here for the command which reads the file
     assert_eq!(ran("", "    change-detection 'hash'"), (true, false));
     assert_eq!(ran("set change-detection 'hash'", "    change-detection 'timestamp'"), (true, true));
+    // a value of the property which is neither is reported where it is set
     let project = Project::new("invalid-change-detection", &[("Jig", "set change-detection 'sometimes'\n")]);
-    project.configure().failed().stderr("`change-detection` is \"sometimes\", rather than `'timestamp'` or `'hash'`");
+    project.configure().failed().stderr("error[invalid-operand]").stderr("`'timestamp'` or `'hash'`").stderr("Jig:1:");
     let project = Project::new("invalid-change-detection-attribute", &[(
         "Jig",
         "custom c\n    output 'c'\n    command 'true'\n    change-detection 'never'\n",
     )]);
     project.configure().failed().stderr("`'timestamp'` or `'hash'`");
+}
+
+#[test]
+fn command_attributes() {
+    // `env`, `pass-env`, `worker-tag`, `change-detection` and `cache` mean the same for every statement which runs a
+    // command
+    let jig = format!("{FAKE_C_TOOLS}\
+custom gen
+    output 'gen.txt'
+    command 'HELPER' '--rig-test-helper' 'getenv' 'GREETING' '>' output
+    env [GREETING: 'hi']
+    worker-tag 'fast'
+static-library uart
+    source 'uart.c'
+    env [LC_ALL: 'C']
+    pass-env 'CFLAGS'
+    worker-tag ['fpga', 'big']
+    change-detection 'timestamp'
+crate app 'app.rs'
+    crate-type 'bin'
+    change-detection 'hash'
+    cache false
+crate lib 'lib.rs'
+test greets
+    command 'HELPER' '--rig-test-helper' 'getenv' 'WHO'
+    env [WHO: 'me']
+");
+    let project = Project::new("command-attributes", &[("Jig", &jig), ("uart.c", ""), ("app.rs", "fn main() {}\n"), ("lib.rs", "")]);
+    let host = project.host();
+    let cache = project.dir.join("cache").display().to_string();
+    let output = project.configure_with(&[("JIG_CACHE", &cache)]).ok();
+    let generated = output.build("gen.txt");
+    assert_contains(generated, " GREETING=hi ");
+    assert_contains(generated, "\n    tags = fast");
+    for edge in [format!("{host}/c/uart/uart.c.o"), format!("{host}/c/uart/libuart.a")] {
+        let edge = output.build(&edge);
+        assert_contains(edge, " LC_ALL=C ");
+        assert_contains(edge, "\n    tags = fpga big");
+        assert_contains(edge, "\n    pass-env = CFLAGS");
+    }
+    // the archive is hashed unless `change-detection` says otherwise, while a compile, which is cached, is hashed
+    // regardless, as any cached edge is
+    let archive = output.build(&format!("{host}/c/uart/libuart.a"));
+    assert!(!archive.contains("hashed = true"), "{archive}");
+    assert_contains(output.build(&format!("{host}/c/uart/uart.c.o")), "\n    cache = ");
+    // a crate's own `change-detection` and `cache` replace the property and the default
+    let app = output.build(&format!("{host}/app{EXE}"));
+    assert_contains(app, "\n    hashed = true");
+    assert!(!app.contains("cache = "), "{app}");
+    let lib = output.build(&format!("{host}/liblib.rlib"));
+    assert_contains(lib, "\n    cache = ");
+    // a test runs with its `env`
+    let test = jig_command().args(["test", "-v", "greets"]).env("JIG_CACHE", &cache).current_dir(&project.dir).output().unwrap();
+    let stdout = String::from_utf8(test.stdout).unwrap();
+    assert!(test.status.success(), "{stdout}");
+    assert_contains(&stdout, "    me\n");
+    // while what is about rig's edges is not a test's
+    for attribute in ["worker-tag 'a'", "cache", "change-detection 'hash'", "pass-env 'A'"] {
+        let jig = format!("test t\n    command 'true'\n    {attribute}\n");
+        let project = Project::new("command-attributes-test", &[("Jig", &jig)]);
+        project.configure().failed().stderr("error[unknown-attribute]");
+    }
+    // and a value which is not one is reported for any statement
+    let project = Project::new("command-attributes-errors", &[("Jig", &format!("{FAKE_C_TOOLS}\
+static-library uart
+    source 'uart.c'
+    cache 'often'
+    change-detection 'never'
+crate app 'app.rs'
+    env 'A'
+    worker-tag ''
+"))]);
+    let output = project.configure().failed();
+    output.stderr("Jig:5:").stderr("Jig:6:").stderr("Jig:8:").stderr("Jig:9:");
+}
+
+#[test]
+fn static_library_install() {
+    // a static library installs its archive in `lib`, and with `install-headers`, the headers of its public include
+    // directories in `include`, under their paths there, once though it is for several targets
+    let jig = |headers: &str| format!("{FAKE_C_TOOLS}\
+set install-prefix 'stage'
+static-library uart
+    source 'uart.c'
+    public-include 'include'
+    link 'objects'
+    install
+{headers}");
+    let project = Project::new("static-library-install", &[
+        ("Jig", &jig("    install-headers\n")),
+        ("uart.c", ""),
+        ("include/uart.h", "#define ONE 1\n"),
+        ("include/sub/regs.hpp", ""),
+        ("include/README", ""),
+    ]);
+    project.configure().ok();
+    let install = || {
+        let output = jig_command().arg("install").current_dir(&project.dir).output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+        stdout
+    };
+    let stage = project.dir.join("stage");
+    let stdout = install();
+    assert_contains(&stdout, "installed 3 files in ");
+    // archived, though it is linked as its objects
+    assert!(stage.join("lib/libuart.a").is_file());
+    assert_eq!(std::fs::read_to_string(stage.join("include/uart.h")).unwrap(), "#define ONE 1\n");
+    assert!(stage.join("include/sub/regs.hpp").is_file());
+    assert!(!stage.join("include/README").exists());
+    // a header which is added is installed, as the project is configured again
+    std::fs::write(project.dir.join("include/sub/new.h"), "").unwrap();
+    assert_contains(&install(), "installed 4 files in ");
+    assert!(stage.join("include/sub/new.h").is_file());
+    // without `install-headers`, only the archive
+    std::fs::write(project.dir.join("Jig"), jig("").replace("HELPER", &helper())).unwrap();
+    assert_contains(&install(), "installed 1 file in ");
 }
 
 #[test]

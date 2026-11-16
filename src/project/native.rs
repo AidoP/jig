@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
+use super::running::{ATTRIBUTES, Running};
 use super::rust;
 use super::statements::Name;
 use super::syntax::{Parser, Span};
@@ -34,6 +35,12 @@ impl Language {
             "cc" | "cpp" | "cxx" => Some(Self::Cxx),
             _ => None,
         }
+    }
+    /// Whether a file is a header of C or C++, by its extension.
+    pub fn is_header(path: &Path) -> bool {
+        path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+            matches!(extension, "h" | "hh" | "hpp" | "hxx" | "inc")
+        })
     }
 }
 
@@ -96,8 +103,10 @@ pub struct Native {
     pub link_objects: bool,
     /// What is built before the library's sources are compiled, but is not an input.
     pub depends: Vec<PathBuf>,
-    /// The environment variables the compiler and archiver inherit, whose values are inputs.
-    pub pass_env: Vec<String>,
+    /// The attributes of the commands which compile, archive and link it: their environment, what they inherit, the
+    /// tags of the workers they may be sent to, how their files are stamped, by contents unless `change-detection`
+    /// says, and whether they are cached, as they are unless `cache false`.
+    pub running: Running,
     /// Whether the library is built by `jig build` without targets.
     pub default: bool,
     /// The compiler, and its first arguments.
@@ -126,8 +135,11 @@ pub struct Native {
     /// The directories where an executable or shared library looks, as it runs, for the shared libraries it uses,
     /// passed as `-Wl,-rpath,<dir>`.
     pub rpath: Vec<String>,
-    /// Where `jig install` installs an executable, if it does.
+    /// Where `jig install` installs it, if it does.
     pub install: Install,
+    /// The headers of a static library's public include directories, each with its directory, which `jig install`
+    /// installs in `include`, under the path it has in the directory, with `install-headers`.
+    pub headers: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Native {
@@ -366,8 +378,9 @@ impl Project {
         }
     }
     /// Take a `static-library`, `shared-library` or `executable` statement. All take the `source`, `target`,
-    /// `include`, `public-include`, `define`, `flags`, `use`, `depends`, `pass-env` and `default` attributes. A static
-    /// library also takes `whole-archive`, and an executable `link-flags`, `link-script` and the install attributes.
+    /// `include`, `public-include`, `define`, `flags`, `use`, `depends`, `default`, the install attributes, and those
+    /// of a command which runs, `env`, `pass-env`, `worker-tag`, `change-detection` and `cache`. A static library also
+    /// takes `link`, `whole-archive` and `install-headers`, and the others `link-flags`, `link-script` and `rpath`.
     pub(super) fn parse_native(&mut self, parser: &mut Parser, kind: NativeKind) {
         if !self.parse_space(parser) {
             parser.skip_statement();
@@ -401,12 +414,17 @@ impl Project {
         let mut whole_archive = false;
         let mut link_objects = false;
         let mut default = false;
-        let mut pass_env = Vec::new();
+        let mut running = Running::default();
         let mut link_flags = Vec::new();
         let mut link_script = None;
         let mut rpath = Vec::new();
-        // a shared library is installed as executable, as a procedural macro is
-        let mut install = if kind == NativeKind::Executable { Install::executable() } else { Install::library(0o755) };
+        // a shared library is installed as executable, as a procedural macro is, and an archive is not
+        let mut install = match kind {
+            NativeKind::Executable => Install::executable(),
+            NativeKind::SharedLibrary => Install::library(0o755),
+            NativeKind::StaticLibrary => Install::library(0o644),
+        };
+        let mut install_headers = false;
         let mut targets: Option<(Vec<String>, Span)> = None;
         while parser.indent().is_some() {
             let Some((attribute, attribute_span)) = self.parse_ident(parser) else {
@@ -465,6 +483,17 @@ impl Project {
                         attribute => self.install_attribute(&mut install, attribute, operand),
                     }
                 },
+                "install" | "install-dir" | "install-mode" | "install-headers" if kind == NativeKind::StaticLibrary => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        continue;
+                    };
+                    if attribute == "install-headers" {
+                        install_headers = self.flag(&operand).unwrap_or(install_headers);
+                    } else {
+                        self.install_attribute(&mut install, attribute, operand);
+                    }
+                },
                 // whether a static library is linked from its archive, or as its objects
                 "link" if kind == NativeKind::StaticLibrary => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -485,6 +514,13 @@ impl Project {
                     });
                     continue;
                 },
+                name if ATTRIBUTES.contains(&name) => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        continue;
+                    };
+                    self.running_attribute(&mut running, name, &operand);
+                },
                 _ => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
                         parser.skip_line();
@@ -495,7 +531,6 @@ impl Project {
                         flags: &mut flags,
                         whole_archive: &mut whole_archive,
                         default: &mut default,
-                        pass_env: &mut pass_env,
                         targets: &mut targets,
                     });
                 },
@@ -519,6 +554,9 @@ impl Project {
                 severity: Severity::Note,
             });
         }
+        // the headers which are installed with the archive, found now, so that the project is configured again when
+        // one is added
+        let headers = if install.enabled && install_headers { self.headers(&public_include) } else { Vec::new() };
         let (targets, target_span) = targets.unwrap_or_else(|| {
             let target = self.property("target", span).map(|target| target.data.coerce_string());
             (vec![target.unwrap_or_default()], span)
@@ -588,7 +626,7 @@ impl Project {
                 whole_archive,
                 link_objects,
                 depends: depends.clone(),
-                pass_env: pass_env.clone(),
+                running: running.clone(),
                 default,
                 compiler,
                 cache: None,
@@ -603,6 +641,7 @@ impl Project {
                 link_script: link_script.clone(),
                 rpath: rpath.clone(),
                 install: install.clone(),
+                headers: headers.clone(),
             };
             let key = (name.clone(), target.clone());
             if self.crates.contains_key(&key) {
@@ -632,6 +671,33 @@ impl Project {
             }
         }
     }
+    /// Returns the headers in directories and those within them, each with its directory, in order, which the
+    /// configuration depends on the directories of, so that it is configured again when a header is added.
+    fn headers(&mut self, dirs: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+        let mut headers = Vec::new();
+        for dir in dirs {
+            let mut pending = vec![dir.clone()];
+            while let Some(current) = pending.pop() {
+                self.depend_on_path(&current);
+                let Ok(entries) = std::fs::read_dir(&current) else {
+                    continue;
+                };
+                let mut found = Vec::new();
+                for entry in entries.flatten() {
+                    let path = current.join(entry.file_name());
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        pending.push(path);
+                    } else if Language::is_header(&path) {
+                        found.push((path, dir.clone()));
+                    }
+                }
+                headers.extend(found);
+            }
+        }
+        headers.sort();
+        headers.dedup();
+        headers
+    }
     /// Take an attribute of a `static-library` or `executable` statement whose value is one expression.
     fn native_attribute(&mut self, kind: NativeKind, attribute: &str, span: Span, operand: Operand, into: &mut NativeAttributes) {
         match attribute {
@@ -648,11 +714,6 @@ impl Project {
             "whole-archive" | "default" => {
                 if let Some(value) = self.flag(&operand) {
                     *if attribute == "default" { &mut *into.default } else { &mut *into.whole_archive } = value;
-                }
-            },
-            "pass-env" => {
-                if let Some(names) = self.variable_names(&operand) {
-                    into.pass_env.extend(names);
                 }
             },
             "target" => match operand.data {
@@ -713,6 +774,10 @@ impl Project {
                 identities.insert(compiler, identity.clone());
                 identity
             };
+            // one with `cache false` has no identity, so that it is not cached
+            if self.natives[&key].running.cache == Some(false) {
+                continue;
+            }
             let (compiler, cxx) = (self.natives[&key].compiler.clone(), self.natives[&key].cxx.clone());
             let c_compiler = identify(self, compiler);
             let cxx_compiler = identify(self, cxx);
@@ -905,7 +970,6 @@ struct NativeAttributes<'a> {
     flags: &'a mut Vec<String>,
     whole_archive: &'a mut bool,
     default: &'a mut bool,
-    pass_env: &'a mut Vec<String>,
     targets: &'a mut Option<(Vec<String>, Span)>,
 }
 

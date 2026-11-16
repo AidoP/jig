@@ -32,6 +32,19 @@ compiler, archived, and linked into the crates which `use` it. It is followed by
   of a kernel, which only its linker script names. It is `false` by default, and `true` without a value
 - `depends <path> ...`, `pass-env <names>` and `default <bool>`: as for a [custom command](custom-commands.md), where
   `default` builds the archive when `jig build` is run without targets
+- `env <variables>` and `worker-tag <tags>`: as for a custom command, for the compiles and the archive
+- `change-detection <str>`: as for a custom command, where the files of the compiles and the archive are stamped by
+  their contents by default, whatever the `change-detection` property, so that a header which is touched but not
+  changed rebuilds nothing, which `'timestamp'` changes
+- `cache <bool>`: the compiles are cached by default, when rig caches, by the identity of the compiler, which
+  `cache false` turns off
+- `install <bool>`, `install-dir <str>` and `install-mode <mode>`: install the archive with
+  [`jig install`](../commands/install.md), in `lib` with the mode `0o644` by default. A library linked as its objects
+  is archived too when it is installed
+- `install-headers <bool>`: with `install`, also install the headers in its `public-include` directories, those whose
+  extension is `.h`, `.hh`, `.hpp`, `.hxx` or `.inc`, in `include` within the prefix, each under the path it has in
+  its directory, as `include/sub/a.h` for `<dir>/sub/a.h`. The project is configured again when a header is added to
+  one of the directories. It is `false` by default, and `true` without a value
 
 A library is a read-only property, `<target>/<name>`, as a crate is, whose value is a reference to its archive, and a
 crate and a library cannot have the same name for a target. A name may be any that a crate may have, including `c` or

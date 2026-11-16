@@ -36,8 +36,9 @@
 - `target <name>`: a custom target, which crates can be compiled for. See [targets](targets.md)
 - `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input`, `depends` and `command`
   attributes, but no `output` or `default`, and a `tag` attribute, a tag or a list of them, by which `jig test` chooses
-  it, as [`jig test`](../commands/test.md) describes. Its inputs and dependencies are built with `jig build test/<name>`, or those of every test with
-  `jig build test`
+  it, as [`jig test`](../commands/test.md) describes, and an `env` attribute, as a custom command's, the variables
+  its command runs with, beside those it inherits. Its inputs and dependencies are built with
+  `jig build test/<name>`, or those of every test with `jig build test`
 
 <!-- jig-test
 files: local.jig
