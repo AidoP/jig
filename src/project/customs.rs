@@ -52,6 +52,8 @@ pub enum CustomKind {
         default: bool,
         /// Where `jig install` installs the outputs, if it does.
         install: Install,
+        /// What rig runs it with beside its command.
+        edge: CommandEdge,
     },
     /// A test, which has no outputs and is run by `jig test` rather than by rig.
     Test {
@@ -63,6 +65,21 @@ pub enum CustomKind {
         /// able to run.
         on_workers: Option<String>,
     },
+}
+
+/// What a custom command's edge has beside its command, from `depfile`, `restat`, `dir`, `description` and `console`.
+#[derive(Clone, Default)]
+pub struct CommandEdge {
+    /// The depfile the command writes, of the inputs it found, relative to the project root.
+    pub depfile: Option<PathBuf>,
+    /// Whether the outputs are stamped again once it has run, so that what reads one it left alone is not built again.
+    pub restat: bool,
+    /// The directory it runs in, relative to the project root, which is the root by default.
+    pub dir: Option<PathBuf>,
+    /// What is shown while it runs, in place of `CUSTOM <name>`.
+    pub description: Option<String>,
+    /// Whether it has the terminal, and runs alone.
+    pub console: bool,
 }
 
 impl Custom {
@@ -134,7 +151,9 @@ impl Project {
             outputs.push(normalize(&self.build_dir().join(&name)));
             self.set_local("output", path_refs(&outputs), parser.file);
         }
-        let mut command: Option<Runner> = None;
+        // the operands of the command, which are made its arguments once its `dir` is known
+        let mut command: Option<Vec<Operand>> = None;
+        let mut edge = CommandEdge::default();
         let mut default = false;
         let mut tags = Vec::new();
         let mut running = Running::default();
@@ -202,6 +221,46 @@ impl Project {
                         self.install_attribute(&mut install, attribute, operand);
                     }
                 },
+                "depfile" | "dir" if !test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    // the depfile is written in the build directory, as an output is, and the directory is relative to
+                    // the file
+                    let base = if attribute == "depfile" {
+                        self.build_dir()
+                    } else {
+                        self.file(parser.file).path.parent().unwrap().into()
+                    };
+                    let Operand { data, span, coerce, origin } = &operand;
+                    let copy = Operand { data: data.clone(), span: *span, coerce: *coerce, origin: *origin };
+                    match self.operand_paths(copy, &base).as_deref() {
+                        Some([path]) if attribute == "depfile" => {
+                            self.set_local("depfile", path_refs(std::slice::from_ref(path)), parser.file);
+                            edge.depfile = Some(path.clone());
+                        },
+                        Some([path]) => edge.dir = Some(path.clone()),
+                        Some(_) => {
+                            self.invalid_operand(&operand, "one path", false);
+                            failed = true;
+                        },
+                        None => failed = true,
+                    }
+                },
+                "restat" | "console" | "description" if !test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    match attribute {
+                        "description" => edge.description = self.str_operand(operand).or(edge.description.take()),
+                        "restat" => edge.restat = self.flag(&operand).unwrap_or(edge.restat),
+                        _ => edge.console = self.flag(&operand).unwrap_or(edge.console),
+                    }
+                },
                 "command" => {
                     let Some(arguments) = self.parse_command(parser) else {
                         parser.skip_line();
@@ -230,7 +289,7 @@ impl Project {
                 parser.skip_line();
             }
         }
-        for local in ["input", "output"] {
+        for local in ["input", "output", "depfile"] {
             self.files[parser.file].locals.remove(local);
         }
         let missing = if outputs.is_empty() && !test {
@@ -251,13 +310,17 @@ impl Project {
             });
             return;
         }
-        let runner = command.unwrap_or_default();
+        // the paths of references are given to the command from the directory it runs in
+        let runner = command.and_then(|operands| self.operands_command(&operands, parser.file, edge.dir.as_deref()));
+        let Some(runner) = runner else {
+            return;
+        };
         // declare the outputs as a property named after the command, now that the name is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test {
             CustomKind::Test { runner: None, harness: false, on_workers: None }
         } else {
-            CustomKind::Command { outputs, default, install }
+            CustomKind::Command { outputs, default, install, edge }
         };
         let custom = Custom {
             name,
@@ -463,7 +526,7 @@ impl Project {
     ///
     /// Any value is an argument, converted to a string as in a string template. Each item of a list is a separate
     /// argument.
-    fn parse_command(&mut self, parser: &mut Parser) -> Option<Runner> {
+    fn parse_command(&mut self, parser: &mut Parser) -> Option<Vec<Operand>> {
         let mut operands = Vec::new();
         while parser.peek() == Some(' ') || operands.iter().all(|operand: &Operand| operand.data.spread().is_empty()) {
             if !self.parse_space(parser) {
@@ -471,14 +534,15 @@ impl Project {
             }
             operands.push(self.parse_expression(parser)?);
         }
-        self.operands_command(&operands, parser.file)
+        Some(operands)
     }
     /// Returns the command whose arguments are the values of the operands, with each item of a list a separate
     /// argument. The program is resolved as by [`Self::resolve_command`]. If it is a reference, such as to a crate
     /// or a custom command, the referenced path is run, and the command depends on it.
     ///
-    /// The operands must give at least one argument, and no argument may have a newline.
-    pub(super) fn operands_command(&mut self, operands: &[Operand], file: usize) -> Option<Runner> {
+    /// The operands must give at least one argument, and no argument may have a newline. With `dir`, the directory the
+    /// command runs in, the paths of references, and a program which is a path, are given relative to it.
+    pub(super) fn operands_command(&mut self, operands: &[Operand], file: usize, dir: Option<&Path>) -> Option<Runner> {
         let operands: Vec<Operand> = operands
             .iter()
             .map(|operand| {
@@ -492,9 +556,11 @@ impl Project {
             if arguments.is_empty() && let Some(reference) = leading_reference(&operand.data) {
                 program = reference.paths.first().cloned();
             }
-            for argument in operand.data.spread() {
-                arguments.push(argument);
-            }
+            let data = match dir {
+                Some(dir) => from_dir(&operand.data, dir),
+                None => operand.data.clone(),
+            };
+            arguments.extend(data.spread());
         }
         if arguments.is_empty() {
             let operand = operands.last()?;
@@ -502,10 +568,18 @@ impl Project {
             return None;
         }
         let Some(program) = program else {
-            return Some(self.resolve_command(arguments, file));
+            let mut runner = self.resolve_command(arguments, file);
+            if let (Some(dir), Some(program)) = (dir, &runner.program) {
+                runner.command[0] = program_from(dir, program);
+            }
+            return Some(runner);
         };
-        // a referenced program is given as a path from the project root, so that it is not searched for in `PATH`
-        arguments[0] = Path::new(".").join(&program).display().to_string();
+        // a referenced program is given as a path from the project root, or `dir`, so that it is not searched for in
+        // `PATH`
+        arguments[0] = match dir {
+            Some(dir) => program_from(dir, &program),
+            None => Path::new(".").join(&program).display().to_string(),
+        };
         Some(Runner { command: arguments, program: Some(program) })
     }
     /// Report each output of a custom command or generated file which overlaps another output: it is the same as,
@@ -582,6 +656,42 @@ struct Output {
 }
 
 /// Returns paths as a list of references to them, which are not resolved a second time where they are used.
+/// Returns a value with the paths of its references relative to `dir`, a directory relative to the project root,
+/// which a command runs in.
+fn from_dir(data: &Data, dir: &Path) -> Data {
+    match data {
+        Data::Ref(reference) => {
+            let paths = reference.paths.iter().map(|path| relative_from(dir, path)).collect();
+            Data::Ref(Ref { referent: reference.referent.clone(), paths })
+        },
+        Data::List(items) => Data::List(items.iter().map(|item| from_dir(item, dir)).collect()),
+        data => data.clone(),
+    }
+}
+
+/// Returns a path relative to the project root, or absolute, as it is from `dir`, which is relative to the root or
+/// absolute. A path which is absolute stays so, as does any path from a directory outside the root.
+fn relative_from(dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if dir.is_absolute() {
+        return std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    }
+    let (dir, path): (Vec<_>, Vec<_>) = (dir.components().collect(), path.components().collect());
+    let common = dir.iter().zip(&path).take_while(|(a, b)| a == b).count();
+    let mut relative: PathBuf = dir[common..].iter().map(|_| "..").collect();
+    relative.extend(&path[common..]);
+    if relative.as_os_str().is_empty() { PathBuf::from(".") } else { relative }
+}
+
+/// Returns a program which is a path relative to the project root as a command run from `dir` names it, with `./`
+/// for one in `dir` itself, so that it is not searched for in `PATH`.
+fn program_from(dir: &Path, program: &Path) -> String {
+    let path = relative_from(dir, program);
+    if path.is_relative() && !path.starts_with("..") { Path::new(".").join(path) } else { path }.display().to_string()
+}
+
 fn path_refs(paths: &[PathBuf]) -> Data {
     let mut items = Vec::new();
     for path in paths {

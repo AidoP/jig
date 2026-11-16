@@ -2,7 +2,7 @@
 
 A plan for the places where jig's commands, statements and settings disagree with each other, and for what a project
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
-each statement takes, and of the settings, in November 2026. **Phases 1a, 2 and 3 are done**, and the rest is not started.
+each statement takes, and of the settings, in November 2026. **Phases 1a, 2, 3 and 4 are done**, and the rest is not started.
 
 The phases are ordered by how much each is worth against what it costs, and each stands on its own. A phase which
 changes what a project writes says how what is written today keeps working.
@@ -116,7 +116,7 @@ How it was done: `Project::running_attribute`, in `src/project/running.rs`, take
   in `include` whatever `install-dir` says, which is the archive's, and only with `install`.
 - The attributes are not yet readable by reference, as `app.pass-env` is for a crate, for the other statements.
 
-## Phase 4: custom commands
+## Phase 4: custom commands (done)
 
 rig runs a custom command as it runs rustc, but a `custom` statement cannot say most of what an edge can.
 
@@ -128,6 +128,20 @@ rig runs a custom command as it runs rustc, but a `custom` statement cannot say 
 - `dir <path>`: the directory the command runs in, the project root by default, as today.
 - `description <str>`: what is shown while it runs, in place of `CUSTOM <name>`.
 - `console`: the command has the terminal, and runs alone, as the edge which configures the project does.
+
+How it was done: a custom command's `CommandEdge`, in `src/project/customs.rs`, holds them, and its edge in
+`src/generate.rs` is given them. Beside the plan:
+
+- The paths of a `depfile` are read by rig relative to the build directory, as every depfile is, while a command runs
+  in the project root, so a generator which writes the paths it is given runs in the build directory, with
+  `dir build-dir`, which the book shows. Reading them relative to the directory the command ran in would be simpler
+  to use, but the edge which configures the project, which runs in the root with an absolute directory, and whose
+  depfile jig writes relative to the build directory, would have to change with it, and jig's in-process
+  regeneration reads that directory, so it is left for a decision.
+- With `dir`, the paths of references and a program which is a path are given relative to the directory, while a
+  string is given as it is, as jig cannot tell a path in a string from any other word.
+- The depfile is kept with a `depfile` property while the attributes are evaluated, as the outputs are with `output`.
+- `console` is not cached, as rig caches no edge with the terminal, and a test takes none of them.
 
 ## Phase 5: settings
 

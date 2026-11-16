@@ -36,6 +36,9 @@ pub struct Edge<'a> {
     pub generator: bool,
     /// Whether rig stamps the edge's files by their contents.
     pub hashed: bool,
+    /// Whether rig stamps the outputs again once the edge has run, so that what reads one it left alone is not built
+    /// again.
+    pub restat: bool,
     /// What identifies the edge's toolchain, if rig keeps its results in the cache.
     pub cache: Option<&'a str>,
     /// The environment variables the edge's program reads from those it inherits, which rig tracks, and passes on when
@@ -91,7 +94,7 @@ impl RigGraph {
             depfile: edge.depfile.map(path_string),
             pool: if edge.console { rig::Pool::Console } else { rig::Pool::Default },
             generator: edge.generator,
-            restat: false,
+            restat: edge.restat,
             hashed: edge.hashed,
             cache: edge.cache.map(String::from),
             pass_env: edge.pass_env.to_vec(),

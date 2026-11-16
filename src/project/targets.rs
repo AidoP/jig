@@ -217,7 +217,7 @@ impl Project {
                         self.invalid_operand(&operand, "str, reference, or a list of them", false);
                         continue;
                     }
-                    if let Some(command) = self.operands_command(&[operand], parser.file) {
+                    if let Some(command) = self.operands_command(&[operand], parser.file, None) {
                         self.runners.push(command);
                         runner = Some(self.runners.len() - 1);
                     }
