@@ -3985,7 +3985,8 @@ custom asks
     let stdout = build();
     assert_contains(&stdout, "GEN gen.txt");
     assert_eq!(std::fs::read_to_string(project.dir.join("build/gen.txt")).unwrap(), "a\none\n");
-    let sub = project.dir.join("sub").canonicalize().unwrap();
+    // the project directory is canonical already, without the `\\?\` which `canonicalize` gives on Windows
+    let sub = project.dir.join("sub");
     assert_eq!(Path::new(std::fs::read_to_string(project.dir.join("build/where.txt")).unwrap().trim()), sub);
     assert!(project.dir.join("build/asks.txt").is_file());
     // a file the depfile lists runs the command again when it changes
