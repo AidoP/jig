@@ -457,14 +457,15 @@ pub enum Message {
         requirement: bool,
         reason: String,
     },
-    /// A program which a wrapper installed by `jig install --proxy` builds, as it or the configuration is out of date,
-    /// before running it. It is reported by `jig build --proxy`, with the severity recorded when configuring.
-    /// A `jig` was run which did not configure the project, while the one which did regenerates rig's graph. It is
+    /// The `jig` being run is not the one which configured the project, and which regenerates rig's graph. It is
     /// reported by the commands which build the project, with the severity recorded when configuring.
     OtherJig {
         running: String,
         configured: String,
     },
+    /// A wrapper installed by `jig install --proxy` is building its program before running it, as the program or the
+    /// configuration is out of date. It is reported by `jig build --proxy`, with the severity recorded when
+    /// configuring.
     ProxyBuild {
         program: String,
         /// Whether the configuration is out of date, which is regenerated first.

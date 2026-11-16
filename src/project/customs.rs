@@ -11,7 +11,7 @@ use super::syntax::{Parser, Span};
 use super::value::{Data, Operand, Ref, Referent};
 use super::{Project, has_line_break, normalize};
 
-/// A command, with its program if that is a path, which it depends on.
+/// A command, and its program if the program is a path, in which case the command depends on it.
 #[derive(Clone, Default)]
 pub struct Runner {
     pub command: Vec<String>,
@@ -23,22 +23,23 @@ pub struct Custom {
     pub name: String,
     pub name_span: Span,
     pub inputs: Vec<PathBuf>,
-    /// What is built before the command or test, but is not an input, so it is not rebuilt when they change.
+    /// What is built before the command or test runs, without being an input: a change to it does not run them again.
     pub depends: Vec<PathBuf>,
-    /// The program and its arguments, where a program with a `/` is relative to the project root.
+    /// The program and its arguments. A program with a `/` is a path relative to the project root.
     pub command: Vec<String>,
     /// The program, if it is a path, which the outputs depend on.
     pub program: Option<PathBuf>,
     pub kind: CustomKind,
-    /// The tags of a test, by which `jig test` chooses it, which only run without being asked for if one of them is in
-    /// `test-tags`.
+    /// The tags of a test, by which `jig test` chooses it. A test with tags only runs without being asked for if one
+    /// of its tags is in `test-tags`.
     pub tags: Vec<String>,
-    /// How rig finds that the files of a command have changed, in place of `change-detection`, if it is given.
+    /// How rig detects that the command's files have changed, if this is given, in place of `change-detection`.
     pub change_detection: Option<String>,
     /// Whether the command has the `cache` attribute.
     pub cached: bool,
-    /// What identifies the command in rig's cache, if it is cached and rig caches: the toolchain, and the program, if it
-    /// is found in `PATH`, as [`Project::identify_cached_customs`] finds it once the configuration is evaluated.
+    /// The identity of the command in rig's cache, if it has the `cache` attribute and rig caches. It covers the
+    /// toolchain, and the program if it is found in `PATH`. [`Project::identify_cached_customs`] sets it once the
+    /// configuration is evaluated.
     pub cache: Option<String>,
     /// The environment variables the command reads from those it inherits, whose values are its inputs.
     pub pass_env: Vec<String>,
@@ -56,11 +57,12 @@ pub enum CustomKind {
     },
     /// A test, which has no outputs and is run by `jig test` rather than by rig.
     Test {
-        /// The index of the runner of the test's target, which runs its command, as with the test harness of a crate.
+        /// The index of the runner of the test's target, which runs the test's command, as for a crate's test harness.
         runner: Option<usize>,
         /// Whether the command is the test harness of a crate, built by libtest.
         harness: bool,
-        /// The target of a crate's test harness which runs on a worker which runs the target, rather than here.
+        /// For a crate's test harness which runs on a worker, rather than here: its target, which the worker must be
+        /// able to run.
         on_workers: Option<String>,
     },
 }
@@ -85,12 +87,12 @@ impl Custom {
         command.extend(self.command.iter().cloned());
         command
     }
-    /// Whether the test is the test harness of a crate which is run directly, so that it takes libtest's arguments,
-    /// while a runner takes the harness as its last argument.
+    /// Whether the test is a crate's test harness which is run directly, and so takes libtest's arguments. With a
+    /// runner, the runner is what is run, and the harness is its last argument.
     pub fn is_libtest(&self) -> bool {
         matches!(self.kind, CustomKind::Test { runner: None, harness: true, .. })
     }
-    /// The target of a test which runs on a worker which runs it, rather than here, if it does.
+    /// The target of a test which runs on a worker rather than here, if it does.
     pub fn on_workers(&self) -> Option<&str> {
         match &self.kind {
             CustomKind::Test { on_workers, .. } => on_workers.as_deref(),
@@ -108,12 +110,12 @@ impl Custom {
 }
 
 impl Project {
-    /// Take a custom build command, with `input`, `output`, `depends`, `command`, `default` and install attributes, or
-    /// a test, which has `input`, `depends`, `command` and `tag` attributes.
+    /// Take a `custom` statement, with `input`, `output`, `depends`, `command`, `default` and install attributes, or a
+    /// `test` statement, with `input`, `depends`, `command` and `tag` attributes.
     ///
-    /// The output of a command is named after it in the build directory, unless an `output` attribute replaces it.
-    /// While its attributes are evaluated, the paths of the inputs and outputs are the values of the `input` and
-    /// `output` properties, as lists of references, so that they are not resolved again.
+    /// A command's output is a file named after it in the build directory, unless an `output` attribute replaces it.
+    /// While the attributes are evaluated, the `input` and `output` properties hold the paths of the inputs and
+    /// outputs as lists of references, so that using them does not resolve the paths a second time.
     pub(super) fn parse_custom(&mut self, parser: &mut Parser, test: bool) {
         let item = if test { Item::Test } else { Item::CustomCommand };
         if !self.parse_space(parser) {
@@ -141,7 +143,7 @@ impl Project {
         let mut cache = false;
         let mut pass_env = Vec::new();
         let mut install = Install::data();
-        // an attribute which failed has been reported, so it is not also reported as missing
+        // an attribute which failed has already been reported, so it is not reported as missing too
         let mut failed = false;
         while parser.indent().is_some() {
             let Some((attribute, attribute_span)) = self.parse_ident(parser) else {
@@ -156,7 +158,8 @@ impl Project {
                         failed = true;
                         continue;
                     };
-                    // the inputs are added to, while the outputs, which have a default, are replaced
+                    // each `input` adds to the inputs, while an `output` replaces the outputs, which start as the
+                    // default
                     let paths = if output { &mut outputs } else { &mut inputs };
                     if output {
                         paths.clear();
@@ -267,7 +270,7 @@ impl Project {
             return;
         }
         let runner = command.unwrap_or_default();
-        // the outputs are declared as a property named after the command, once it is known to be unique
+        // declare the outputs as a property named after the command, now that the name is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test {
             CustomKind::Test { runner: None, harness: false, on_workers: None }
@@ -293,8 +296,9 @@ impl Project {
             self.declare_reference(declared, span, Item::CustomCommand, reference);
         }
     }
-    /// Find what identifies each command with the `cache` attribute in rig's cache, if rig caches, as the project's
-    /// `cache` identifies its toolchain once the configuration is evaluated, as [`Self::custom_identity`] finds it.
+    /// Set the identity in rig's cache of each command with the `cache` attribute, if rig caches, once the
+    /// configuration is evaluated and the project's `cache` identifies its toolchain. [`Self::custom_identity`]
+    /// computes each.
     pub fn identify_cached_customs(&mut self) {
         for index in 0..self.customs.len() {
             if self.customs[index].cached {
@@ -303,10 +307,11 @@ impl Project {
             }
         }
     }
-    /// Returns what identifies a command with the `cache` attribute in rig's cache, if rig caches: a hash of the
-    /// toolchain's identity, which the command is run with, and of the contents of its program, if it is found in `PATH`,
-    /// which the configuration then depends on, so that a program which changes is identified again. A program which is
-    /// a path is an input of the command instead, and one which is not found is identified as missing.
+    /// Returns the identity in rig's cache of a command with the `cache` attribute, if rig caches. It is a hash of
+    /// the identity of the toolchain the command runs with, and of the contents of its program if that is found in
+    /// `PATH`. The configuration is then made to depend on the program, so that the identity is found again when
+    /// the program changes. A program given as a path is not hashed, as it is an input of the command. A program
+    /// which is not found is identified as missing.
     fn custom_identity(&mut self, runner: &Runner) -> Option<String> {
         let toolchain = self.cache.clone()?;
         let mut key = rig::cache::Key::new("jig custom");
@@ -321,8 +326,8 @@ impl Project {
         }
         Some(rig::cache::hex(&key.finish()))
     }
-    /// Returns the tags of a `tag` attribute, which is a tag or a list of them, each of which is not empty and has no
-    /// whitespace, reporting one which is not.
+    /// Returns the tags of a `tag` attribute, which is a tag or a list of tags. A tag which is empty or has
+    /// whitespace is reported.
     pub(super) fn tags(&mut self, operand: &Operand) -> Option<Vec<String>> {
         let tags = match &operand.data {
             Data::Str(tag) => vec![tag.clone()],
@@ -337,8 +342,8 @@ impl Project {
         }
         Some(tags)
     }
-    /// Returns a command whose program, as in `run`, is a path relative to a file if it has a `/`, and which it then
-    /// depends on, while otherwise it is searched for in `PATH`.
+    /// Returns a command with its program resolved, as for `run`. A program with a `/` is a path relative to the
+    /// file, and the command depends on it. Any other is a name to search for in `PATH`.
     pub(super) fn resolve_command(&self, mut command: Vec<String>, file: usize) -> Runner {
         let mut program = None;
         if command[0].contains('/') {
@@ -391,11 +396,11 @@ impl Project {
             indices.insert(custom.name.clone(), index);
         }
     }
-    /// Take the paths of an `input` or `output` attribute, which are expressions separated by spaces, each a path or a
-    /// list of them.
+    /// Take the paths of an `input` or `output` attribute: expressions separated by spaces, each a path or a list of
+    /// paths.
     ///
-    /// An input is relative to the file, and an output to the build directory, while the paths of a reference are
-    /// already resolved.
+    /// An input is relative to the file, and an output to the build directory. The paths of a reference are already
+    /// resolved.
     pub(super) fn parse_custom_paths(&mut self, parser: &mut Parser, output: bool) -> Option<Vec<PathBuf>> {
         let mut paths = Vec::new();
         let build_dir = self.build_dir();
@@ -411,8 +416,8 @@ impl Project {
             }
         }
     }
-    /// Returns the paths of a value, which is a path relative to `base`, a reference, whose paths are already
-    /// resolved, or a list of them.
+    /// Returns the paths of a value: a path relative to `base`, a reference, whose paths are already resolved, or a
+    /// list of either.
     pub(super) fn operand_paths(&mut self, operand: Operand, base: &Path) -> Option<Vec<PathBuf>> {
         let operand = self.computed_reference(operand);
         let span = operand.span;
@@ -433,7 +438,7 @@ impl Project {
         }
         Some(paths)
     }
-    /// Returns a path relative to `base`, reporting one which is empty, which would be `base` itself.
+    /// Returns a path relative to `base`. An empty path is reported, as it would be `base` itself.
     fn relative_path(&mut self, base: &Path, path: &str, span: Span) -> Option<PathBuf> {
         if path.is_empty() {
             self.diagnostics.push(Diagnostic { span: Some(span), message: Message::EmptyPath, severity: Severity::Error });
@@ -441,7 +446,7 @@ impl Project {
         }
         Some(normalize(&base.join(path)))
     }
-    /// Report a path which a depfile cannot have, as it has a newline, returning [`None`] if it is one.
+    /// Returns the path, or reports it and returns [`None`] if it has a newline, which a depfile cannot hold.
     pub(super) fn check_path(&mut self, path: &Path, span: Span) -> Option<()> {
         if !has_line_break(&path.to_string_lossy()) {
             return Some(());
@@ -453,8 +458,8 @@ impl Project {
         });
         None
     }
-    /// Returns the path of a value which is one file, a path relative to `base` or a reference to a crate or custom
-    /// command with one output.
+    /// Returns the path of a value which stands for one file: a path relative to `base`, or a reference to a crate or
+    /// custom command with exactly one output.
     pub(super) fn operand_path(&mut self, operand: Operand, base: &Path) -> Option<PathBuf> {
         let operand = self.computed_reference(operand);
         let span = operand.span;
@@ -472,10 +477,11 @@ impl Project {
         self.check_path(&path, span)?;
         Some(path)
     }
-    /// Take the arguments of a `command` attribute, which are expressions separated by spaces, returning the command
-    /// with its program resolved as by [`Self::resolve_command`], unless it is a reference, whose path is resolved.
+    /// Take the arguments of a `command` attribute, which are expressions separated by spaces, and return the
+    /// command. Its program is resolved as by [`Self::resolve_command`], unless it is a reference, which already
+    /// has a resolved path.
     ///
-    /// Any value is an argument, converted to a string as in a string template, while each item of a list is a separate
+    /// Any value is an argument, converted to a string as in a string template. Each item of a list is a separate
     /// argument.
     fn parse_command(&mut self, parser: &mut Parser) -> Option<Runner> {
         let mut operands = Vec::new();
@@ -487,11 +493,11 @@ impl Project {
         }
         self.operands_command(&operands, parser.file)
     }
-    /// Returns the command whose arguments are the values of operands, each item of a list being one, with its program
-    /// resolved as by [`Self::resolve_command`], unless it is a reference, such as to a crate or a custom command, whose
-    /// path is run, and which it then depends on.
+    /// Returns the command whose arguments are the values of the operands, with each item of a list a separate
+    /// argument. The program is resolved as by [`Self::resolve_command`]. If it is a reference, such as to a crate
+    /// or a custom command, the referenced path is run, and the command depends on it.
     ///
-    /// The operands must give at least one argument, and none can have a newline.
+    /// The operands must give at least one argument, and no argument may have a newline.
     pub(super) fn operands_command(&mut self, operands: &[Operand], file: usize) -> Option<Runner> {
         let operands: Vec<Operand> = operands
             .iter()
@@ -518,16 +524,16 @@ impl Project {
         let Some(program) = program else {
             return Some(self.resolve_command(arguments, file));
         };
-        // the program is run from the project root, as a path rather than from `PATH`
+        // a referenced program is given as a path from the project root, so that it is not searched for in `PATH`
         arguments[0] = Path::new(".").join(&program).display().to_string();
         Some(Runner { command: arguments, program: Some(program) })
     }
-    /// Report the outputs of custom commands and generated files which are, or are within or contain, the output of a
-    /// crate or of another custom command or generated file, which rig would build twice, or in place of a directory,
-    /// or would replace a file which is written when configuring.
+    /// Report each output of a custom command or generated file which overlaps another output: it is the same as,
+    /// inside, or contains the output of a crate, another custom command or another generated file. rig would build
+    /// such a path twice, or as both a file and a directory, or would overwrite a file written while configuring.
     ///
-    /// The outputs are kept in order of their paths as well, in which the paths within a path come directly after it, so
-    /// that each is compared with its ancestors and the paths after it, rather than with every other output.
+    /// The outputs are also kept sorted by path. Paths inside a path sort directly after it, so each output is only
+    /// compared with its ancestors and with the paths just after it, not with every other output.
     pub(super) fn check_outputs(&mut self) {
         let mut owned = Vec::new();
         for key in self.crate_keys() {
@@ -541,7 +547,7 @@ impl Project {
                 owned.push(Output { path, item: Item::Crate, name: name.clone(), span: c.name_span });
             }
         }
-        // the first output with each path, by index in `owned`
+        // the first output with each path, as its index in `owned`
         let mut sorted = BTreeMap::new();
         for (index, output) in owned.iter().enumerate() {
             sorted.entry(output.path.clone()).or_insert(index);
@@ -559,7 +565,7 @@ impl Project {
         }
         for output in checked {
             let path = &output.path;
-            // of the outputs it overlaps, the one which was owned first is reported
+            // if it overlaps several outputs, report the one which was declared first
             let within = path.ancestors().filter_map(|ancestor| sorted.get(ancestor));
             let containing = sorted.range::<Path, _>((Bound::Excluded(path.as_path()), Bound::Unbounded))
                 .take_while(|(other, _)| other.starts_with(path))
@@ -595,7 +601,7 @@ struct Output {
     span: Span,
 }
 
-/// Returns paths as a list of references to them, which are not resolved again where they are used.
+/// Returns paths as a list of references to them, which are not resolved a second time where they are used.
 fn path_refs(paths: &[PathBuf]) -> Data {
     let mut items = Vec::new();
     for path in paths {
@@ -604,8 +610,7 @@ fn path_refs(paths: &[PathBuf]) -> Data {
     Data::List(items)
 }
 
-/// Returns the reference which a value starts with, which is the program if it is the first argument of a command.
-/// Whether a value can be the arguments of a command, which `none` and a dict cannot be, nor a list with them.
+/// Whether a value can be the arguments of a command. `none` and a dict cannot, nor a list which holds either.
 pub(super) fn is_argument(data: &Data) -> bool {
     match data {
         Data::None | Data::Dict(_) => false,

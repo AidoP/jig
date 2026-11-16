@@ -63,31 +63,31 @@ pub struct Field {
     pub value: Data,
 }
 
-/// A target which crates can be compiled for, which is a builtin target of rustc or declared by a `target` statement.
+/// A target crates can be compiled for: a builtin target of rustc, or one declared by a `target` statement.
 pub struct Target {
     pub name: String,
     pub kind: TargetKind,
-    /// Whether crates for the target can be tested, from its `test` attribute, or by default, as given by
-    /// [`Project::can_test`]. Those for the host target always can be.
+    /// Whether crates for the target can be tested, from its `test` attribute, or without one, from
+    /// [`Project::can_test`]. Crates for the host target always can be.
     pub test: Option<bool>,
     /// Whether the tests of crates for the target run on workers, from `test 'workers'`, rather than here.
     pub on_workers: bool,
-    /// The index of the runner of a test harness for the target, which is its last argument, or none to run it
-    /// directly.
+    /// The index of the runner of the target's test harnesses, which takes the harness as its last argument, or
+    /// `None` to run a harness directly.
     pub runner: Option<usize>,
-    /// The linker script of the crates for the target, from its `link-script` attribute, which is passed to the linker
-    /// with `-T` unless a crate has its own.
+    /// The linker script of the crates for the target, from its `link-script` attribute. It is passed to the linker
+    /// with `-T`, unless a crate has its own.
     pub link_script: Option<PathBuf>,
 }
 
 /// Whether a [`Target`] is builtin or has its own specification.
 pub enum TargetKind {
-    /// A target of rustc, whose `test`, `runner` and linker may be set by a `target` statement with `override`, at
-    /// `overridden`.
+    /// A builtin target of rustc. A `target` statement with `override`, at `overridden`, may set its `test`, `runner`
+    /// and linker.
     Builtin {
         overridden: Option<Span>,
-        /// The `linker` and `linker-flavor` fields, which are passed to rustc as the codegen options of the crates for
-        /// the target, as its specification is not written.
+        /// The `linker` and `linker-flavor` fields. A builtin target's specification is not written, so they are
+        /// passed to rustc as codegen options of the crates for the target.
         fields: Vec<Field>,
     },
     /// A target declared with its own specification, which is written to `<build-dir>/targets/<name>.json`.
@@ -135,16 +135,16 @@ impl Target {
     }
 }
 
-/// The fields of a builtin target's specification which a `target` statement with `override` can set, as they are
-/// codegen options too.
+/// The fields of a builtin target's specification which a `target` statement with `override` can set. They can be
+/// set because they are also codegen options.
 const OVERRIDE_FIELDS: &[&str] = &["linker", "linker-flavor"];
 
 impl Project {
-    /// Take a custom target, whose attributes are `inherit`, the builtin target whose specification it is based on, and
-    /// the fields of its specification which may be replaced.
+    /// Take a custom target. Its attributes are `inherit`, which names the builtin target its specification is based
+    /// on, and the fields of the specification to replace.
     ///
-    /// Besides `env`, `os`, `arch` and `linker`, the fields are those with stable codegen options, named after the
-    /// options rather than the fields.
+    /// Apart from `env`, `os`, `arch` and `linker`, the fields are those which have stable codegen options, and they
+    /// are named after the options, not the fields.
     pub(super) fn parse_target(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
             parser.skip_statement();
@@ -310,8 +310,8 @@ impl Project {
         };
         self.diagnostics.push(Diagnostic { span: Some(span), message, severity: Severity::Error });
     }
-    /// Returns whether the sysroot of the toolchain has the standard library for a builtin target, as its `rlib`, which
-    /// rustup installs with `rustup target add`.
+    /// Returns whether the toolchain's sysroot has the standard library for a builtin target, by looking for its
+    /// `rlib`, which `rustup target add` installs.
     ///
     /// The configuration depends on the directory of the target's libraries, so that it is generated again once the
     /// standard library is installed.
@@ -331,8 +331,8 @@ impl Project {
             name.starts_with("libstd-") && name.ends_with(".rlib")
         })
     }
-    /// Returns whether the host can run what is built for a target, which it can for the host target, while for
-    /// another, a probe for its architecture is run, with its runner if it has one, as described in [`probe`].
+    /// Returns whether the host can run what is built for a target. It can for the host target. For any other, a
+    /// probe for the target's architecture is run, with the target's runner if it has one, as [`probe`] describes.
     ///
     /// The result is kept for the configuration, as a probe is a program which is run.
     pub(super) fn can_run(&mut self, name: &str) -> bool {
@@ -350,9 +350,9 @@ impl Project {
         self.can_run.insert(name.into(), can_run);
         can_run
     }
-    /// Returns whether crates for a target can be tested, which is given by its `test` attribute, or is whether the
-    /// host can run what is built for a builtin target, or else whether there are workers, which may, while a custom
-    /// target's specification may describe anything.
+    /// Returns whether crates for a target can be tested. Its `test` attribute decides, if it has one. Otherwise a
+    /// builtin target can be tested if the host can run what is built for it, or if there are workers, one of which
+    /// may be able to. A custom target cannot by default, as its specification may describe anything.
     pub(super) fn can_test(&mut self, name: &str) -> bool {
         match self.target(name).map(|target| (target.test, target.is_custom())) {
             Some((Some(test), _)) => test,
@@ -360,8 +360,8 @@ impl Project {
             Some((None, true)) | None => false,
         }
     }
-    /// Returns whether the tests of crates for a target run on workers: as its `test` attribute is `'workers'`, or as
-    /// it is a builtin target which the host cannot run, and there are workers, of which one may.
+    /// Returns whether the tests of crates for a target run on workers. They do if its `test` attribute is
+    /// `'workers'`, or if it is a builtin target which the host cannot run and there are workers, one of which may.
     pub(super) fn tests_on_workers(&mut self, name: &str) -> bool {
         let Some(target) = self.target(name) else {
             return false;

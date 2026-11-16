@@ -1,19 +1,18 @@
-//! The build database, which records what the build needs after configuring, such as the build directory, the
-//! diagnostics to replay for each flycheck label, the tests to run and the files to install. It is at the project root,
-//! which the commands that read it find it from.
+//! The build database, which records what commands need to know once a project is configured: the build directory,
+//! the diagnostics to replay for each flycheck label, the tests to run, the files to install, and so on. It is at the
+//! project root, which is how the commands which read it find the root.
 //!
-//! It is written when configuring, so that its users do not evaluate the configuration again, which may be impure.
-//! When read, its contents borrow from its bytes.
+//! It is written when configuring, so that the commands which use it do not evaluate the configuration again, which
+//! may be impure. When it is read, its contents borrow from its bytes.
 //!
-//! The format is the magic bytes and a format version, then the input, the toolchain, the build directory, the tags of
-//! the tests which are run by default, the install prefix,
-//! the severities of `proxy-build` and `other-jig`, the `jig` which configured it, then how rig caches: the directory of
-//! the cache, or empty without one, the size it is collected down to as a decimal string, the remote cache, or empty
-//! without one, whether it is pushed to, and the file of the token for it, or empty without one, followed by each
-//! section: the
-//! flychecks, the tests, the lints, the programs, then the installed files. A section is the number of its records
-//! followed by each record. Numbers are little-endian `u32`, strings are their length followed by their UTF-8 bytes, a
-//! list of strings or numbers is their number followed by each of them, and a `bool` is a number which is `0` or `1`.
+//! # Format
+//!
+//! Numbers are little-endian `u32`s. A string is its length followed by its UTF-8 bytes, a list of strings or
+//! numbers is its length followed by its items, and a `bool` is the number `0` or `1`.
+//!
+//! The database is the magic bytes and the format version, followed by the fields of [`Database`] in the order
+//! [`write`] writes them, and then the sections: the flychecks, the tests, the lints, the programs and the
+//! installed files. A section is the number of its records followed by each record.
 
 use std::io::Write;
 
@@ -23,8 +22,8 @@ use std::path::{Path, PathBuf};
 /// The path of the database, relative to the project root.
 pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
-/// The version of the format, which changes with rig's graph's too, so that a graph of another version is generated
-/// again, as the project is configured again for a database of another version.
+/// The version of the format. It must change whenever the version of rig's graph format does: a project is
+/// configured again when its database is of another version, which also generates a graph of the new version.
 const VERSION: u32 = 31;
 
 #[derive(Debug, Default, PartialEq)]
@@ -41,8 +40,8 @@ pub struct Database<'a> {
     pub install_prefix: &'a str,
     /// The severity of the `proxy-build` diagnostic, as the value of its property, which `jig build --proxy` reports.
     pub proxy_build: &'a str,
-    /// The severity of the `other-jig` diagnostic, which is reported when a `jig` other than the one which configured
-    /// the project, and which regenerates its graph, is run.
+    /// The severity of the `other-jig` diagnostic, which is reported when the `jig` being run is not the one which
+    /// configured the project, and which regenerates its graph.
     pub other_jig: &'a str,
     /// The `jig` which configured the project.
     pub jig: &'a str,
@@ -62,20 +61,21 @@ pub struct Database<'a> {
     pub workers_only: bool,
     /// Whether only the targets are fetched of what workers build, and what is built here reads.
     pub download_targets: bool,
-    /// The identity of the toolchain, the identity of its release on any host, and the name rustup installs it by,
-    /// by which a worker may run what is built, or empty.
+    /// The identity of the toolchain, the identity of its release on any host, and the name rustup installs it by.
+    /// A worker is matched to what is built by them. Each may be empty.
     pub toolchain_identity: &'a str,
     pub toolchain_release: &'a str,
     pub toolchain_install: &'a str,
-    /// What rustc answered when the project was configured, with the key of what chose and identified its toolchain,
-    /// as [`crate::rustc::Answers`] has them, by which it is configured again without asking rustc.
+    /// What rustc answered when the project was configured, as [`crate::rustc::Answers`] holds it, with the key of
+    /// what chose and identified its toolchain. While the key is unchanged, the project is configured again
+    /// without asking rustc.
     pub rustc_key: &'a str,
     pub rustc_sysroot: &'a str,
     pub rustc_host: &'a str,
     pub rustc_targets: Vec<&'a str>,
     pub rustc_verbose_version: &'a str,
-    /// The directories of the shared libraries of C, relative to the project root, which `jig run` and `jig test` add
-    /// to the platform's search path of shared libraries, so that what links them finds them as it runs.
+    /// The directories of the shared libraries of C, relative to the project root. `jig run` and `jig test` add
+    /// them to the platform's search path for shared libraries, so that programs which link them find them.
     pub library_path: Vec<&'a str>,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
@@ -86,8 +86,8 @@ pub struct Database<'a> {
 
 /// A flycheck label, whose diagnostics are replayed with those of the flychecks it depends on.
 ///
-/// The dependencies are kept rather than every file to replay, which would grow with the square of the length of a chain
-/// of crates.
+/// Only the direct dependencies are kept. Listing every file to replay for each label would take space quadratic in
+/// the length of a chain of crates.
 #[derive(Debug, PartialEq)]
 pub struct Flycheck<'a> {
     pub label: &'a str,
@@ -105,22 +105,24 @@ pub struct Test<'a> {
     pub name: &'a str,
     /// The program and its arguments, run from the project root.
     pub command: Vec<&'a str>,
-    /// Whether the program is a test harness built by libtest, run directly, which takes its arguments, such as
-    /// `--color`.
+    /// Whether the program is a test harness built by libtest and run directly, so that it takes libtest's
+    /// arguments, such as `--color`.
     pub libtest: bool,
     /// The tags of the test, by which `jig test` chooses it.
     pub tags: Vec<&'a str>,
-    /// The target of a crate's test harness which runs on a worker which runs the target, or empty to run it here.
+    /// For a crate's test harness which runs on a worker: its target, which the worker must be able to run. Empty
+    /// for a test which runs here.
     pub on_workers: &'a str,
-    /// The files a test which runs on a worker is sent, relative to the project root: its harness, and what it depends
-    /// on.
+    /// The files sent to a worker which runs the test, relative to the project root: its harness, and what it
+    /// depends on.
     pub inputs: Vec<&'a str>,
 }
 
 /// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
 #[derive(Debug, PartialEq)]
 pub struct Lint<'a> {
-    /// The name of the crate, with its target if it is not the host target, which its target is `lint/<name>`.
+    /// The name of the crate, with its target if that is not the host target. Its target in the graph is
+    /// `lint/<name>`.
     pub name: &'a str,
     /// The file of the diagnostics saved by the lint, relative to the project root.
     pub diagnostics: &'a str,
@@ -135,9 +137,10 @@ pub struct Program<'a> {
     pub path: &'a str,
     /// The target which builds it, relative to the build directory.
     pub target: &'a str,
-    /// The runner of its target, which it is run by, as its program and first arguments, or empty to run it directly.
+    /// The runner of its target, as a program and its first arguments, which runs the binary. Empty to run the
+    /// binary directly.
     pub runner: Vec<&'a str>,
-    /// Whether the crate is built by default, which chooses it from those which `jig run` could run.
+    /// Whether the crate is built by default. `jig run` prefers such a crate when it could run several.
     pub default: bool,
 }
 
@@ -306,8 +309,8 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
     Some(database)
 }
 
-/// Returns the root of the project which contains the working directory, which is the closest directory to it, or it
-/// itself, with a database.
+/// Returns the root of the project which contains the working directory: the closest directory with a database,
+/// starting from the working directory itself.
 pub fn root() -> Option<PathBuf> {
     let dir = std::env::current_dir().ok()?;
     dir.ancestors().find(|dir| dir.join(PATH).is_file()).map(Path::to_path_buf)

@@ -7,12 +7,12 @@ use crate::Error;
 use crate::configured::{Configured, Output, Request};
 use crate::database::Program;
 
-/// Build a binary crate and run it with arguments, without evaluating the configuration, as `name`, or the only binary
-/// crate if no name is given.
+/// Build a binary crate and run it with arguments, without evaluating the configuration. The crate is the one
+/// named `name`, or the only binary crate if no name is given.
 ///
-/// What is built is reported on stderr, so that stdout is the program's. The program runs in the working directory, as
-/// it would if it were run directly, by the runner of its target if it has one, which it is given to before the
-/// arguments. Its exit status is returned.
+/// What is built is reported on stderr, so that stdout carries only the program's output. The program runs in the
+/// working directory, as if it had been run directly. If its target has a runner, the runner is run instead, with
+/// the program before the arguments. The program's exit status is returned.
 pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, Error> {
     let project = Configured::find(Output::Stderr)?;
     let bytes = project.read()?;
@@ -42,9 +42,9 @@ pub fn run(name: Option<&str>, args: &[std::ffi::OsString]) -> Result<ExitCode, 
     }
 }
 
-/// Returns the program with a name, which is that of its crate, as `<name>@<target>` if its target is not the host
-/// target, or the crate's name alone if the programs with it can be chosen from, as all of them can if no name is
-/// given, as by [`choose`].
+/// Returns the program with a name. A program is named after its crate, as `<name>@<target>` if its target is not
+/// the host target. The crate's name alone also works if [`choose`] can pick one of the programs with that name.
+/// Without a name, it picks among all of them.
 fn find<'a, 'b>(programs: &'b [Program<'a>], name: Option<&str>) -> Result<&'b Program<'a>, Error> {
     let Some(name) = name else {
         if programs.is_empty() {

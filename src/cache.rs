@@ -1,35 +1,36 @@
-//! rig's cache, where the results of rustc, clippy and the custom commands with `cache` are kept, and `jig cache`,
+//! rig's cache, which holds the results of rustc, clippy and the custom commands with `cache`, and `jig cache`,
 //! which shows, collects and clears it.
 //!
-//! The cache is set by the builtin properties `cache/dir`, `cache/size`, `cache/remote` and `cache/push`, which the
-//! user's configuration, as [`crate::config`] finds it, usually sets, each of which an environment variable overrides:
+//! The cache is configured by builtin properties, which the user's configuration ([`crate::config`]) usually sets.
+//! An environment variable overrides each.
 //!
-//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache, `$XDG_CACHE_HOME/jig`, or on Windows,
-//!   `%LOCALAPPDATA%\jig\cache`, or `$HOME/.cache/jig` by default, or `off`, or empty, without a cache.
-//! - `cache/size`, or `JIG_CACHE_SIZE`: the size it is collected down to, after a build at most once a day, `10G` by
-//!   default.
-//! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache it is in front of, if any, as
-//!   `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` there with ssh, or as a command, split at
-//!   spaces, which serves it on its stdin and stdout.
-//!   It can also be `tcp://<host>:<port>`, which `jig serve --listen` serves, or
-//!   `http://[<user>:<password>@]<host>[:<port>][/<path>]`, a server of files over HTTP, laid out as a cache's
-//!   directory is.
+//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache. `off`, or an empty value, turns the cache off. The
+//!   default is `$XDG_CACHE_HOME/jig`, or failing that `$HOME/.cache/jig`, and on Windows `%LOCALAPPDATA%\jig\cache`.
+//! - `cache/size`, or `JIG_CACHE_SIZE`: the size the cache is collected down to, which happens after a build, at most
+//!   once a day. `10G` by default.
+//! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache behind this one, if any. It is one of:
+//!   - `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` on the host with ssh;
+//!   - `tcp://<host>:<port>`, which `jig serve --listen` serves;
+//!   - `http://[<user>:<password>@]<host>[:<port>][/<path>]`, a server of files over HTTP, laid out as a cache's
+//!     directory is;
+//!   - a command, split at spaces, which serves the cache on its stdin and stdout.
 //! - `cache/push`, or `JIG_REMOTE_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
-//! - `cache/token-file`: the file of the token which proves the client to a remote cache which needs one, as one
-//!   reached over TCP does, or which is sent as a bearer token over HTTP, read when it is connected to, so that the
-//!   token is not recorded with the project.
+//! - `cache/token-file`: the file holding the token for a remote cache which needs one. The token proves the client
+//!   to a server reached over TCP, and is sent as a bearer token over HTTP. The file is read when connecting, so the
+//!   token itself is never recorded with the project.
+//! - `workers`, or `JIG_WORKERS`, in which workers are separated by `;`: the workers rig sends cached edges to once
+//!   its own jobs are full. Each is one of:
+//!   - `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` on the host with ssh;
+//!   - `tcp://<host>:<port>`, which `jig worker --listen` serves, using the token of `cache/token-file`;
+//!   - a command, split at spaces, which serves a worker on its stdin and stdout.
+//! - `workers-only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for a worker, rather than being
+//!   built here.
+//! - `download`, or `JIG_DOWNLOAD`: how much of what workers build is fetched. `'all'` fetches everything.
+//!   `'targets'` fetches only what was asked for, which includes the defaults and what is installed or tested, and
+//!   what edges built here read. The rest stays on the workers.
 //!
-//! - `workers`, or `JIG_WORKERS`, with the workers separated by `;`: the workers rig sends cached edges to once its
-//!   own jobs are full, each as `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` there with
-//!   ssh, as `tcp://<host>:<port>`, which `jig worker --listen` serves, with the token of `cache/token-file`, or as a
-//!   command, split at spaces, which serves one on its stdin and stdout.
-//! - `workers-only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for one, rather than being built
-//!   here.
-//! - `download`, or `JIG_DOWNLOAD`: what is fetched of what workers build, `'all'`, or `'targets'`, which are what is
-//!   asked for, as by default, installed or tested, and what is built here, while the rest is left on the workers.
-//!
-//! The settings are resolved when the project is configured, as the variables are read by the configuration, and
-//! recorded in its database, which a build reads them from.
+//! The settings are resolved when the project is configured, as the configuration reads the variables, and are
+//! recorded in the project's database, where a build reads them.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -47,18 +48,18 @@ pub const REMOTE: &str = "JIG_REMOTE_CACHE";
 pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
 /// The environment variable which gives the workers, separated by `;`.
 pub const WORKERS: &str = "JIG_WORKERS";
-/// The environment variable which has what a worker may build wait for one, if it is `1`.
+/// The environment variable which, if it is `1`, makes what a worker may build wait for a worker.
 pub const WORKERS_ONLY: &str = "JIG_WORKERS_ONLY";
-/// The environment variable which gives what is fetched of what workers build, `all` or `targets`.
+/// The environment variable which gives how much of what workers build is fetched, `all` or `targets`.
 pub const DOWNLOAD: &str = "JIG_DOWNLOAD";
 /// The size the cache is collected down to by default.
 pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
 const EVERY: Duration = Duration::from_hours(24);
 
-/// Returns the directory of the cache by default, `$XDG_CACHE_HOME/jig`, or on Windows, where a user's local data
-/// goes, `%LOCALAPPDATA%\jig\cache`, or `$HOME/.cache/jig`, or empty, which is off, without any of them, from
-/// environment variables as `env` gives them.
+/// Returns the default directory of the cache, from environment variables as `env` gives them:
+/// `$XDG_CACHE_HOME/jig`, or failing that `$HOME/.cache/jig`. On Windows, where a user's local data goes in
+/// `%LOCALAPPDATA%`, it is `%LOCALAPPDATA%\jig\cache`. It is empty, which turns the cache off, if none is set.
 pub fn default_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> String {
     let set = |value: Option<OsString>| value.filter(|value| !value.is_empty());
     let local = |env: &mut dyn FnMut(&str) -> Option<OsString>| set(env("LOCALAPPDATA")).filter(|_| cfg!(windows));
@@ -95,22 +96,22 @@ pub struct Settings {
     /// The remote cache, as `cache/remote` gives it, if there is one.
     pub remote: Option<String>,
     pub push: bool,
-    /// The file of the token for the remote cache, absolute, if there is one, which proves the client to its workers
-    /// too.
+    /// The absolute path of the file of the token for the remote cache, if there is one. The same token proves the
+    /// client to its workers.
     pub token_file: Option<PathBuf>,
     /// The workers, as `workers` gives them.
     pub workers: Vec<String>,
     /// Whether what a worker may build waits for one, rather than being built here.
     pub workers_only: bool,
-    /// Whether only the targets are fetched of what workers build, and what is built here reads, rather than all of it.
+    /// Whether, of what workers build, only the targets and what edges built here read are fetched, rather than all.
     pub download_targets: bool,
-    /// The identity of the project's toolchain, and its release: what identifies it on any host, and the name rustup
-    /// installs it by, if it is known, which configuring finds.
+    /// The identity of the project's toolchain, and its release: the release's identity on any host, and the name
+    /// rustup installs it by, if known. Configuring finds them.
     pub release: Option<(String, rig::worker::Release)>,
 }
 
 impl Settings {
-    /// Resolve the settings from the cache's properties, each of which its variable, as `env` gives it, overrides.
+    /// Resolve the settings from the cache's properties, each overridden by its variable, as `env` gives it.
     pub fn resolve(properties: &Properties, mut env: impl FnMut(&str) -> Option<OsString>) -> Result<Self, Error> {
         let mut string = |name: &str, property: &str| match env(name) {
             Some(value) => value.to_string_lossy().into_owned(),
@@ -157,7 +158,7 @@ impl Settings {
         };
         Ok(Self { dir, size, remote, push, token_file, workers, workers_only, download_targets, release: None })
     }
-    /// Opens the cache, if it is on, in front of the remote cache, if there is one and `remote`.
+    /// Opens the cache, if it is on. With `remote`, the remote cache is put behind it, if there is one.
     pub fn open(&self, remote: bool) -> Result<Option<rig::cache::Cache>, Error> {
         let Some(dir) = &self.dir else {
             return Ok(None);
@@ -178,8 +179,8 @@ impl Settings {
         }
         Ok(Some(cache.with_remote(std::sync::Arc::new(remote))))
     }
-    /// Returns the workers, which are connected to when a build first sends one an edge, proved by the token of
-    /// `cache/token-file`, if there is one, over TCP.
+    /// Returns the workers. Each is connected to when a build first sends it an edge. Over TCP, the client proves
+    /// itself with the token of `cache/token-file`, if there is one.
     pub fn workers(&self) -> Result<Vec<std::sync::Arc<rig::remote::Remote>>, Error> {
         let token = match &self.token_file {
             Some(path) if self.workers.iter().any(|worker| worker.starts_with("tcp://")) => Some(read_token(path)?),
@@ -215,13 +216,14 @@ pub enum Transport {
     Http(rig::http::Url),
 }
 
-/// Returns how a remote cache is reached, from `cache/remote`, which pushes if `push`: `tcp://<host>:<port>` over TCP,
-/// `http://...` over HTTP, or otherwise by a command, as [`remote_command`] finds it, or `None` if it is none of them.
+/// Returns how a remote cache is reached, from the value of `cache/remote`: over TCP for `tcp://<host>:<port>`,
+/// over HTTP for `http://...`, and otherwise by the command [`remote_command`] gives. Returns `None` if the value
+/// is none of those. `push` is whether results are pushed to it.
 pub fn remote_transport(remote: &str, push: bool) -> Option<Transport> {
     if remote.starts_with("http://") {
         return rig::http::Url::parse(remote).map(Transport::Http);
     }
-    // TLS is not spoken, which a proxy speaks for it
+    // rig does not speak TLS: a proxy must do that for it
     if remote.starts_with("https://") {
         return None;
     }
@@ -232,8 +234,9 @@ pub fn remote_transport(remote: &str, push: bool) -> Option<Transport> {
     (!host.is_empty() && port.parse::<u16>().is_ok()).then(|| Transport::Tcp(address.to_string()))
 }
 
-/// Returns how a worker is reached, from `workers`: `tcp://<host>:<port>` over TCP, or otherwise by a command, as
-/// [`worker_command`] finds it, or `None` if it is neither, as a server of files over HTTP, which runs nothing, is not.
+/// Returns how a worker is reached, from an item of `workers`: over TCP for `tcp://<host>:<port>`, and otherwise by
+/// the command [`worker_command`] gives. Returns `None` if it is neither. A server of files over HTTP is not a
+/// worker, as it runs nothing.
 pub fn worker_transport(worker: &str) -> Option<Transport> {
     match remote_transport(worker, false)? {
         Transport::Command(_) => worker_command(worker).map(Transport::Command),
@@ -242,28 +245,31 @@ pub fn worker_transport(worker: &str) -> Option<Transport> {
     }
 }
 
-/// Returns a token, from its file, without the whitespace around it, such as the line break which ends it.
+/// Returns the token in a file, without the whitespace around it, such as the line break at its end.
 fn read_token(path: &std::path::Path) -> Result<Vec<u8>, Error> {
     let token = std::fs::read(path).map_err(|error| Error::Read(path.into(), error))?;
     Ok(token.trim_ascii().to_vec())
 }
 
-/// Returns the command which serves a remote cache, from `JIG_REMOTE_CACHE`, which pushes if `push`, or `None` if it is
-/// empty, or an `ssh://` address without a host.
+/// Returns the command which serves a remote cache, from the value of `JIG_REMOTE_CACHE`. Returns `None` if the
+/// value is empty, or is an `ssh://` address without a host. `push` is whether results are pushed to it.
 ///
-/// An `ssh://` address runs `jig`, or the path after its host, with `serve --stdio`, and `--push` to push, by ssh in
-/// batch mode, so that it fails rather than asking for a password. A command is split at spaces, and is run as it is.
+/// An `ssh://` address runs `jig`, or the path given after the host, with `serve --stdio`, and with `--push` to
+/// push. ssh runs in batch mode, so that it fails rather than asking for a password. Any other value is a command,
+/// which is split at spaces and run as it is.
 pub fn remote_command(remote: &str, push: bool) -> Option<Vec<String>> {
     let args: &[&str] = if push { &["serve", "--stdio", "--push"] } else { &["serve", "--stdio"] };
     command_of(remote, args)
 }
 
-/// Returns the command which serves a worker, as [`remote_command`] finds it, which runs `jig worker --stdio` over ssh.
+/// Returns the command which serves a worker, as [`remote_command`] does for a cache. An `ssh://` address runs
+/// `jig worker --stdio`.
 pub fn worker_command(worker: &str) -> Option<Vec<String>> {
     command_of(worker, &["worker", "--stdio"])
 }
 
-/// Returns the command an `ssh://` address runs `jig` with arguments by, or a command split at spaces.
+/// Returns the command for an address or command line: for an `ssh://` address, ssh running `jig` on the host
+/// with `args`, and otherwise the value split at spaces.
 fn command_of(remote: &str, args: &[&str]) -> Option<Vec<String>> {
     let Some(address) = remote.strip_prefix("ssh://") else {
         let command: Vec<String> = remote.split_whitespace().map(String::from).collect();
@@ -289,9 +295,14 @@ fn command_of(remote: &str, args: &[&str]) -> Option<Vec<String>> {
     Some(command)
 }
 
-/// `jig serve --stdio [--push]`, which serves the cache on stdin and stdout, as a remote cache, then collects it if it
-/// is due, or `jig serve --listen <address> --token-file <path> [--push]`, which serves it to every client which
-/// connects over TCP with the token, collecting it after each, taking pushes with `--push`.
+/// The `jig serve` command.
+///
+/// - `jig serve --stdio [--push]` serves the cache on stdin and stdout, as a remote cache, then collects it if that
+///   is due.
+/// - `jig serve --listen <address> --token-file <path> [--push]` serves it to every client which connects over TCP
+///   and has the token, collecting it after each client.
+///
+/// Either takes pushes with `--push`.
 pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     let (mut stdio, mut push, mut listen, mut token_file) = (false, false, None, None);
     let mut args = args.map(|arg| arg.to_string_lossy().into_owned());
@@ -313,7 +324,7 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
             served.map_err(Error::Serve)
         },
         (false, Some(address)) => {
-            // over TCP, which authenticates no one, a client must have the token
+            // TCP authenticates no one, so a client must have the token
             let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
             let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
             let bound = listener.local_addr().map_err(Error::Serve)?;
@@ -326,13 +337,17 @@ pub fn serve(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resul
     }
 }
 
-/// `jig worker --stdio`, which runs the actions of cached edges a build sends it on stdin and stdout, as a worker,
-/// with the toolchains rustup has, and the cache as its store, then collects the cache if it is due, or
-/// `jig worker --listen <address> --token-file <path>`, which runs them for every client which connects over TCP with
-/// the token.
+/// The `jig worker` command.
 ///
-/// It runs as many at once as `--jobs <n>`, or as the machine runs threads at once by default, reports the tags of
-/// each `--tag <tag>`, and with `--install`, installs a toolchain an action needs which it does not have, with rustup.
+/// - `jig worker --stdio` is a worker on stdin and stdout: it runs the actions of the cached edges a build sends
+///   it, with the toolchains rustup has, using the cache as its store. It collects the cache afterwards if that is
+///   due.
+/// - `jig worker --listen <address> --token-file <path>` does the same for every client which connects over TCP
+///   and has the token.
+///
+/// `--jobs <n>` sets how many actions run at once, which defaults to the number of threads the machine has.
+/// `--tag <tag>` adds a tag for the worker to report. With `--install`, the worker uses rustup to install a
+/// toolchain which an action needs and it does not have.
 pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     let (mut stdio, mut listen, mut token_file, mut jobs) = (false, None, None, None);
     let (mut tags, mut install) = (Vec::new(), false);
@@ -362,7 +377,7 @@ pub fn worker(args: impl Iterator<Item = OsString>, settings: &Settings) -> Resu
         executor = executor.installing(crate::toolchain::install);
     }
     let executor = &executor;
-    // what the worker has is found while the client connects, which asks for it next
+    // find the worker's capabilities while the client is connecting, as they are the first thing it asks for
     std::thread::scope(|scope| {
         scope.spawn(|| executor.capabilities());
         serve_worker(&cache, executor, stdio, listen, token_file, settings)
@@ -386,7 +401,7 @@ fn serve_worker(
             worked.map_err(Error::Serve)
         },
         (false, Some(address)) => {
-            // over TCP, which authenticates no one, a client must have the token, as it runs what it is sent
+            // TCP authenticates no one, and a worker runs what it is sent, so a client must have the token
             let token = read_token(&token_file.ok_or(Error::MissingArg("--token-file <path>"))?)?;
             let listener = std::net::TcpListener::bind(&address).map_err(Error::Serve)?;
             let bound = listener.local_addr().map_err(Error::Serve)?;
@@ -401,8 +416,8 @@ fn serve_worker(
     }
 }
 
-/// `jig workers`, which shows each worker of the `workers` property, with its host, jobs, tags and toolchains, or why
-/// it cannot be reached.
+/// The `jig workers` command, which shows each worker of the `workers` property with its host, jobs, tags and
+/// toolchains, or why it cannot be reached.
 pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) -> Result<(), Error> {
     if let Some(extra) = args.next() {
         return Err(Error::ExtraArg(extra.to_string_lossy().into_owned()));
@@ -411,7 +426,7 @@ pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) ->
     if workers.is_empty() {
         println!("no workers, as the `workers` property and `JIG_WORKERS` give none");
     }
-    // each is asked at once, as connecting can take a while
+    // ask all the workers at once, as connecting can take a while
     let reports: Vec<_> = std::thread::scope(|scope| {
         let mut asked = Vec::new();
         for worker in &workers {
@@ -424,7 +439,7 @@ pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) ->
         match report {
             Ok(capabilities) => {
                 let tags: String = capabilities.tags.iter().flat_map(|tag| [", tagged ", tag.as_str()]).collect();
-                // the round trip of the first request, which is mostly starting the worker over ssh
+                // the round trip of the first request is mostly the time to start the worker over ssh
                 let away = worker.link().latency.as_millis();
                 println!("{name}: {}, {jobs} jobs{tags}, {away} ms away", capabilities.host);
                 for toolchain in &capabilities.toolchains {
@@ -438,15 +453,15 @@ pub fn workers(mut args: impl Iterator<Item = OsString>, settings: &Settings) ->
     Ok(())
 }
 
-/// Warn of a remote cache which failed during a build, which went on without it.
+/// Warn that a remote cache failed during a build. The build went on without it.
 pub fn report_remote(cache: &rig::cache::Cache) {
     if let Some(error) = cache.remote().and_then(rig::remote::Remote::error) {
         eprintln!("warning: the remote cache failed, so the build went on without it: {error}");
     }
 }
 
-/// Returns a size in bytes, such as `512`, `100K`, `1.5G` or `10GiB`, with a binary multiple, or `None` if it is not
-/// one.
+/// Parses a size in bytes, such as `512`, `100K`, `1.5G` or `10GiB`. Units are binary multiples. Returns `None` if
+/// the text is not a size.
 pub fn parse_size(size: &str) -> Option<u64> {
     let size = size.trim();
     let size = size.strip_suffix("iB").or_else(|| size.strip_suffix('B')).unwrap_or(size);
@@ -461,7 +476,7 @@ pub fn parse_size(size: &str) -> Option<u64> {
         return number.checked_mul(1 << shift);
     }
     let number: f64 = number.parse().ok().filter(|number: &f64| number.is_finite() && *number >= 0.0)?;
-    // a size beyond a `u64` is not one, and a multiple of a power of two up to 2^40 is exact as an `f64`
+    // A size too large for a `u64` is refused. A multiple of a power of two up to 2^40 is exact as an `f64`.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     let (bytes, max) = (number * (1u64 << shift) as f64, u64::MAX as f64);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

@@ -84,10 +84,10 @@ fn special_bits(permissions: &str, class: char, special: u32) -> u32 {
 
 /// Returns `base` changed by a symbolic mode, as taken by chmod, or [`None`] if it is not one.
 ///
-/// It is clauses separated by `,`, each of which is who it applies to, of `u`, `g`, `o` and `a`, or everyone without
-/// any, followed by operations: `+`, `-` or `=`, and the permissions which are added, removed or set, of `r`, `w`, `x`,
-/// `X`, which is `x` if anyone can execute it, `s` and `t`, or one of `u`, `g` and `o`, whose permissions are copied.
-/// As there is no umask, `+x` is `a+x`.
+/// A symbolic mode is clauses separated by `,`. Each clause is who it applies to, any of `u`, `g`, `o` and `a`,
+/// or nothing for everyone, followed by operations. An operation is `+`, `-` or `=` and the permissions to add,
+/// remove or set: any of `r`, `w`, `x`, `s`, `t` and `X`, which is `x` if anyone can already execute the file,
+/// or one of `u`, `g` and `o`, to copy that class's permissions. There is no umask, so `+x` means `a+x`.
 fn apply_symbolic_mode(symbolic: &str, base: u32) -> Option<u32> {
     // the permissions of each class, in its position for the owner, and the special bit of each class
     const CLASSES: [(char, u32, u32); 3] = [('u', 6, 0o4000), ('g', 3, 0o2000), ('o', 0, 0o1000)];

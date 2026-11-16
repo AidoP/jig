@@ -1,6 +1,5 @@
 //! The build graph: files, and the edges which produce them.
 
-
 use crate::Error;
 
 /// A file, or the name of an alias, in a [`Graph`].
@@ -11,23 +10,23 @@ pub struct NodeId(pub(crate) u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EdgeId(pub(crate) u32);
 
-/// A program to run, with its arguments, environment, working directory and where its stderr goes, which need no
-/// quoting, as no shell reads them. A command which needs a shell runs one, as `sh -c`.
+/// A program to run, with its arguments, environment, working directory and where its stderr goes. No shell reads
+/// them, so they need no quoting. A command which needs a shell runs one itself, as `sh -c`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Exec {
-    /// The program, which is found in `PATH` unless it has a `/`, when it is relative to the working directory.
+    /// The program. One with a `/` is a path relative to the working directory, and any other is found in `PATH`.
     pub program: String,
     pub args: Vec<String>,
     /// Environment variables the program is given, beside those it inherits.
     pub env: Vec<(String, String)>,
-    /// The working directory, relative to the build's directory, which is the build's directory without one.
+    /// The working directory, relative to the build's directory, or `None` for the build's directory itself.
     pub dir: Option<String>,
     /// A file, relative to the build's directory, which stderr is written to rather than captured with stdout.
     pub stderr: Option<String>,
 }
 
 impl Exec {
-    /// Returns the program as a command line for `sh`, as it is shown.
+    /// Returns the program as a command line for `sh`, to show it.
     #[must_use]
     pub fn command_line(&self) -> String {
         use std::fmt::Write as _;
@@ -81,55 +80,58 @@ pub struct Edge {
     pub kind: EdgeKind,
     /// What is shown while the edge runs.
     pub description: String,
-    /// The files the edge writes, the first of which names it, and keeps its record.
+    /// The files the edge writes. The first names the edge, and is the key of its record.
     pub outputs: Vec<NodeId>,
-    /// The files the edge reads, which must be there: one which is missing, and which no edge produces, is an error
-    /// before anything runs.
+    /// The files the edge reads, which must exist: a missing one which no edge produces is an error before anything
+    /// runs.
     pub inputs: Vec<NodeId>,
-    /// The files the edge depends on, which run it again when they change, as its inputs do, but which may be missing:
-    /// one which is missing, and which no edge produces, runs the edge, which says why if it still needs it, as a
-    /// compiler whose dependency was removed with its use does not.
+    /// The files the edge depends on. Like inputs, a change to one runs the edge, but they may be missing: a missing
+    /// one which no edge produces runs the edge, which reports the error itself if it still needs the file. A
+    /// compiler whose dependency was removed along with its use, for example, does not.
     pub dependencies: Vec<NodeId>,
     /// The files which are built before the edge, but which it neither reads nor depends on.
     pub after: Vec<NodeId>,
-    /// The depfile the action writes, in the form gcc writes, of the inputs it discovered.
+    /// The depfile the action writes, in gcc's format, listing the inputs it discovered.
     pub depfile: Option<String>,
     pub pool: Pool,
     /// Whether the edge generates the graph, which is brought up to date before anything else.
     pub generator: bool,
-    /// Whether the edge's outputs are checked again once it has run, so that what depends on an output which did not
-    /// change is not run.
+    /// Whether the edge's outputs are stamped again once it has run, so that an edge which depends only on outputs
+    /// that did not change is not run.
     pub restat: bool,
-    /// Whether the edge's files are stamped by their contents, rather than their time and size, so that it does not
-    /// run when a file is changed back, or written again unchanged, and what depends on its outputs does not run when
-    /// it writes them unchanged.
+    /// Whether the edge's files are stamped by their contents, rather than their time and size. The edge then does
+    /// not run when a file is changed back or rewritten unchanged, and neither does what depends on outputs it
+    /// rewrites unchanged.
     pub hashed: bool,
-    /// Whether the edge's results are kept in a [`Cache`](crate::cache::Cache), and fetched from it rather than run
-    /// again, with what identifies everything else its action depends on but its inputs, such as its toolchain, which
-    /// is part of the key it is cached by. A cached edge's files are stamped by their contents, as a hashed edge's are.
+    /// If set, the edge's results are kept in a [`Cache`](crate::cache::Cache), and fetched from it rather than run
+    /// again. The string identifies everything the action depends on other than its inputs, such as its toolchain,
+    /// and is part of the cache key. A cached edge's files are stamped by their contents, like a hashed edge's.
     pub cache: Option<String>,
-    /// The environment variables the action reads from those it inherits, beside those it sets, whose values are inputs
-    /// of the edge, so that it runs again when one changes. A cached edge, which runs in a hermetic environment,
-    /// inherits only these and those which locate tools, as [`crate::exec::Options::locating`] lists.
+    /// The inherited environment variables the action reads, beside those it sets. Their values are inputs of the
+    /// edge, so it runs again when one changes. A cached edge runs in a hermetic environment, and inherits only these
+    /// and the variables which locate tools, [`crate::exec::Options::locating`].
     pub pass_env: Vec<String>,
     /// Which workers a cached edge may run on.
     pub placement: Placement,
-    /// A program which writes the edge's depfile as running it would, without doing its work, such as rustc with
-    /// `--emit=dep-info` alone, by which the inputs of an edge which has not run are found, to send it to a worker.
+    /// A program which writes the edge's depfile without doing the edge's work, such as rustc with
+    /// `--emit=dep-info` alone. It finds the inputs of an edge which has not run, so that it can be sent to a worker.
     pub discover: Option<Exec>,
-    /// Outputs which the action writes before it finishes, and reports as rustc does with `--json=artifacts`, as the
-    /// metadata of a crate, so that the edges which need only them start once they are written. An edge which has them
-    /// writes what rustc writes with `--error-format=json`, of which what it would have printed is shown.
+    /// Outputs which the action writes, and reports, before it finishes, such as a crate's metadata, which rustc
+    /// reports with `--json=artifacts`. Edges which need only these outputs start as soon as they are written. An
+    /// edge with early outputs must print what rustc prints with `--error-format=json`; the rendered diagnostics in
+    /// it are shown.
     pub early: Vec<NodeId>,
 }
 
-/// Which workers a cached edge may run on, beside those whose toolchain has its identity: whether it may run with the
-/// same release of its toolchain on another host, as what it writes does not depend on the host, the target whose
-/// standard library it needs, if it needs the toolchain's, and the tags a worker must have.
+/// Which workers a cached edge may run on, beside those whose toolchain has the edge's identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Placement {
+    /// Whether it may run with the same release of its toolchain on another host, as what it writes does not depend
+    /// on the host.
     pub any_host: bool,
+    /// The target whose standard library it needs from the toolchain, if any.
     pub target: Option<String>,
+    /// The tags a worker must have.
     pub tags: Vec<String>,
 }
 
@@ -248,9 +250,8 @@ impl Graph {
         let (dependencies, after) = (take(&mut edge.dependencies), take(&mut edge.after));
         self.add_edge_with(edge, [&outputs, &inputs, &dependencies, &after])
     }
-    /// Add an edge whose lists of nodes are given apart from it, rather than in it, as its outputs, inputs,
-    /// dependencies and the files it is built after, so that they need not be in vectors of their own, as when a graph
-    /// is loaded.
+    /// Add an edge whose outputs, inputs, dependencies and `after` nodes are given as slices, in that order, rather
+    /// than in the edge. Loading a graph uses this to avoid allocating four vectors for each edge.
     pub(crate) fn add_edge_with(&mut self, edge: Edge, nodes: [&[NodeId]; LISTS]) -> Result<EdgeId, Error> {
         let id = EdgeId(u32::try_from(self.edges.len()).expect("too many edges"));
         let outputs = nodes[OUTPUTS].iter();
@@ -352,8 +353,8 @@ impl Graph {
         }
         Ok(())
     }
-    /// What an edge needs built first: its inputs, its dependencies and what it is built after, which are stored
-    /// together.
+    /// What an edge needs built first: its inputs, its dependencies and what it is built after. The three lists are
+    /// stored next to each other, so this is one slice.
     fn inputs(&self, edge: usize) -> &[NodeId] {
         let lists = &self.edges[edge].lists;
         &self.ids[lists[INPUTS].0 as usize..lists[AFTER].1 as usize]
@@ -407,12 +408,12 @@ impl<'a> EdgeRef<'a> {
     pub fn restat(&self) -> bool {
         self.data.restat
     }
-    /// Whether the edge's files are stamped by their contents, as it is hashed or cached.
+    /// Whether the edge's files are stamped by their contents, which they are if it is hashed or cached.
     #[must_use]
     pub fn hashed(&self) -> bool {
         self.data.hashed || self.data.cache.is_some()
     }
-    /// Whether the edge is hashed by its own flag, whether or not it is cached.
+    /// The edge's own `hashed` flag, which does not include being cached.
     pub(crate) fn hashed_flag(&self) -> bool {
         self.data.hashed
     }
@@ -421,14 +422,14 @@ impl<'a> EdgeRef<'a> {
     pub fn pass_env(&self) -> &'a [String] {
         &self.data.pass_env
     }
-    /// Whether the edge runs in a hermetic environment, with only the variables it sets, those it passes on and those
-    /// which locate tools, as a cached edge does, so that a variable which is not part of its key cannot change what it
+    /// Whether the edge runs in a hermetic environment, as a cached edge does: with only the variables it sets, those
+    /// it passes on and those which locate tools. A variable outside its cache key then cannot change what it
     /// produces.
     #[must_use]
     pub fn hermetic(&self) -> bool {
         self.data.cache.is_some()
     }
-    /// What identifies what the edge's action depends on beside its inputs, if its results are cached.
+    /// The edge's cache identity, if its results are cached. See [`Edge::cache`].
     #[must_use]
     pub fn cache(&self) -> Option<&'a str> {
         self.data.cache.as_deref()
@@ -438,7 +439,7 @@ impl<'a> EdgeRef<'a> {
     pub fn placement(&self) -> &'a Placement {
         &self.data.placement
     }
-    /// The action which finds what the edge discovers without running it, if it has one.
+    /// The program which writes the edge's depfile without running the edge, if it has one.
     #[must_use]
     pub fn discover(&self) -> Option<&'a Exec> {
         self.data.discover.as_ref()
@@ -535,5 +536,4 @@ mod tests {
             result => panic!("{result:?}"),
         }
     }
-
 }

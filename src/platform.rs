@@ -1,9 +1,9 @@
 //! What jig does differently on each platform: file modes, links, what identifies a file, the programs in a directory,
 //! how a program which was ended by a signal exits, and where `jig install` installs by default.
 //!
-//! On Windows, files have no modes, a link which cannot be made, as making one needs a privilege, is a copy, a file is
-//! identified by its canonical path, a program is found with the extensions Windows runs it by, and what is installed
-//! goes where a user's own programs do.
+//! On Windows: files have no modes; making a link needs a privilege, so where it cannot be made, the file is copied;
+//! a file is identified by its canonical path; a program is found with the extensions Windows runs programs by; and
+//! what is installed goes where a user's own programs go.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ pub fn has_mode(metadata: &std::fs::Metadata, mode: u32) -> bool {
     metadata.permissions().readonly() == (mode & 0o222 == 0)
 }
 
-/// Give a file permissions, as Unix modes, of which Windows takes only whether it is written by none.
+/// Give a file permissions, as a Unix mode. Windows only honours whether anyone may write the file.
 ///
 /// # Errors
 ///
@@ -138,9 +138,9 @@ pub fn inode(metadata: &std::fs::Metadata) -> u64 {
     0
 }
 
-/// Returns the directory `jig install` installs in by default, with `read` reading an environment variable:
-/// `/usr/local` on Unix, and on Windows, where programs a user installs for themselves go, which needs no
-/// administrator, `%LOCALAPPDATA%\Programs`.
+/// Returns the directory `jig install` installs in by default, with `read` reading an environment variable. It is
+/// `/usr/local` on Unix. On Windows it is `%LOCALAPPDATA%\Programs`, where programs a user installs for themselves
+/// go, which needs no administrator.
 #[cfg(unix)]
 pub fn install_prefix(read: impl FnMut(&str) -> Option<std::ffi::OsString>) -> String {
     let _ = read;

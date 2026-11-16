@@ -1,9 +1,11 @@
-//! The wrapper `jig install --proxy` installs for a program on Windows, where a shell script is not run, which builds the
-//! program if needed, then runs it, or itself again if it was reinstalled, as the script does on Unix.
+//! The wrapper `jig install --proxy` installs for a program on Windows, which cannot run a shell script. Like the
+//! script used on Unix, it builds the program if needed and then runs it, or runs itself again if the build
+//! reinstalled it.
 //!
-//! jig compiles it once for a project, in its build directory, and each wrapper is a copy, with what it wraps after
-//! its end, which Windows ignores as it runs it: the project root, the `jig` to build with, the prefix, the wrapper's
-//! own path, and the program, a line each, then their length in bytes, and [`MAGIC`].
+//! jig compiles it once for a project, in the build directory. Each installed wrapper is a copy of it with what it
+//! wraps appended after the end of the executable, which Windows ignores when it runs it: the project root, the
+//! `jig` to build with, the prefix, the wrapper's own path, and the program, each on a line, then the length of
+//! those in bytes, and [`MAGIC`].
 
 use std::process::{Command, Stdio};
 

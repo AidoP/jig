@@ -1,69 +1,88 @@
-//! A remote cache: a [`Cache`] on another machine, or in another process, spoken to over a stream of bytes, such as
-//! the stdin and stdout of `ssh host jig serve --stdio`, which [`serve`] answers, or a store of files served over
-//! HTTP, by [`crate::http`]. A server of the stream's protocol can also be a worker, which runs actions, as
-//! [`crate::worker`] describes.
+//! A remote cache: a [`Cache`] on another machine, or in another process.
 //!
-//! Over HTTP, a blob is at `<url>/cas/<the first two digits of its hash>/<the rest>`, a result at `<url>/ac/<key>` and a
-//! manifest at `<url>/mf/<key>`, in hexadecimal, as they are in a cache's directory, so that a server of the files of
-//! one serves it as it is, which are got with `GET`, and pushed with `PUT`, after
-//! `HEAD` finds which blobs the server does not have. A manifest is pushed merged with the server's, which a push from
-//! elsewhere at once may replace, which loses one set of inputs or the other, as a miss. Requests from several threads,
-//! such as for the blobs of a result, go at once, on connections of their own.
+//! It is reached in one of two ways: over a stream of bytes, such as the stdin and stdout of
+//! `ssh host jig serve --stdio`, which [`serve`] answers, or as a store of files served over HTTP, through
+//! [`crate::http`]. A server of the stream protocol can also be a worker, which runs actions, as [`crate::worker`]
+//! describes.
 //!
-//! The protocol is of requests and their replies, each a frame: its kind as a byte, the id of the request as a
-//! little-endian `u32`, which its reply has, the length of its payload as a little-endian `u64`, then the payload.
-//! Requests are not answered in turn: a client sends as many as it has, from as many threads as it has, and the server
-//! answers them on several threads, in any order, so that one connection, such as one ssh session, carries the
-//! requests of a whole build without one waiting for another's round trip. Hashes and keys are 32 bytes, numbers are
-//! little-endian `u32`s and strings are their length followed by their UTF-8 bytes.
+//! # HTTP
 //!
-//! - The client sends `HELLO`, with the magic bytes and the version, and the server replies `HELLO`, with the version,
-//!   whether it takes pushes, `1` or `0`, the number of actions it runs at once as a worker, or `0` if it is not one,
-//!   and whether it needs a token, `1` followed by a random nonce of 32 bytes,
-//!   or `0`, or `ERROR` with why it does not speak the version.
-//! - A server which needs a token, as one which is reached over TCP does, answers nothing until the client sends
-//!   `AUTH`, with the BLAKE3 hash of the token and the nonce, which it replies to with `OK`, or `ERROR`, ending the
-//!   connection, if it is not of its token. The token itself is never sent, and an answer which is overheard is of no
-//!   use with another nonce. The connection is not encrypted, so a remote cache reached over TCP belongs on a private
-//!   network, while ssh both authenticates and encrypts.
-//! - `GET_MANIFEST` and `GET_BLOB`, with a key or hash, are replied to with `FOUND` and the manifest as it is stored,
-//!   or the blob, or `NOT_FOUND`.
-//! - `GET_RESULTS`, with a number of second keys, is replied to with `FOUND`, the index of the first key whose result
-//!   the server has, with every blob it refers to, and the result as it is stored, or `NOT_FOUND`, so that every set of
-//!   inputs an edge may have discovered is looked up at once.
-//! - `MISSING`, with a number of hashes, is replied to with `MISSING` and those of them the server does not have. Those
-//!   it has are made the latest used, so that they are kept from its collection.
-//! - `PUT_BLOB`, with a hash and the blob, `PUT_RESULT`, with a key and the result as it is stored, and
+//! The files are laid out as in a cache's directory, so that any server of the files of a cache directory works as
+//! it is. With hashes and keys in hexadecimal:
+//!
+//! - a blob is at `<url>/cas/<the first two digits of its hash>/<the rest>`;
+//! - a result is at `<url>/ac/<key>`;
+//! - a manifest is at `<url>/mf/<key>`.
+//!
+//! Files are fetched with `GET`, and pushed with `PUT` after `HEAD` has found which blobs the server lacks. A
+//! manifest is pushed merged with the server's. A push from elsewhere at the same time may overwrite it, losing one
+//! set of inputs, which only causes a miss. Requests from several threads, such as for the blobs of one result, are
+//! sent at once, each on its own connection.
+//!
+//! # The stream protocol
+//!
+//! The protocol is made of requests and replies. Each is a frame: its kind as a byte, the id of the request as a
+//! little-endian `u32`, the length of its payload as a little-endian `u64`, then the payload. A reply has the id of
+//! its request. Within payloads, hashes and keys are 32 bytes, numbers are little-endian `u32`s, and strings are their
+//! length followed by their UTF-8 bytes.
+//!
+//! Requests are not answered in order. A client sends requests from as many threads as it likes, and the server
+//! answers them on several threads, in any order. One connection, such as one ssh session, can therefore carry all
+//! the requests of a build without any waiting for another's round trip.
+//!
+//! - `HELLO`: the client sends the magic bytes and the version. The server replies `HELLO` with the version, whether
+//!   it takes pushes (`1` or `0`), the number of actions it runs at once as a worker (`0` if it is not one), and
+//!   whether it needs a token (`1` followed by a random 32-byte nonce, or `0`). If it does not speak the version, it
+//!   replies `ERROR` with the reason.
+//! - `AUTH`: a server which needs a token, as one reached over TCP does, answers nothing else until the client sends
+//!   `AUTH` with the BLAKE3 hash of the token and the nonce. The server replies `OK`, or if the hash is wrong, `ERROR`,
+//!   and ends the connection. The token itself is never sent, and an overheard hash is useless with another nonce.
+//!   The connection is not encrypted, so a remote cache reached over TCP belongs on a private network. ssh both
+//!   authenticates and encrypts.
+//! - `GET_MANIFEST`, with a key, and `GET_BLOB`, with a hash: the reply is `FOUND` with the stored bytes of the
+//!   manifest, or the blob, or else `NOT_FOUND`.
+//! - `GET_RESULTS`, with a list of second keys: the reply is `FOUND` with the index of the first key for which the
+//!   server has the result and every blob it refers to, and the stored bytes of that result, or else `NOT_FOUND`.
+//!   Every set of inputs an edge may have discovered is looked up in this one request.
+//! - `MISSING`, with a list of hashes: the reply is `MISSING` with those the server does not have. Those it has are
+//!   marked as used just now, which keeps them from its collection.
+//! - `PUT_BLOB`, with a hash and the blob; `PUT_RESULT`, with a key and the stored bytes of the result; and
 //!   `ADD_TO_MANIFEST`, with a key and the inputs and environment variables an edge discovered, as two lists of
-//!   strings, are replied to with `OK`, or `ERROR` with why, as when the server does not take pushes, or what was sent
-//!   is not valid. A worker takes blobs, as the inputs of the actions it runs, though not results or manifests, unless
-//!   it takes pushes.
-//! - `EXECUTE`, with a [`crate::worker::Request`], is replied to by a worker with `FOUND`, whether the action
-//!   succeeded, `1` or `0`, and its result as a cache stores one, whose blobs the worker has, `NOT_FOUND` if it does
+//!   strings: the reply is `OK`, or `ERROR` with the reason, such as that the server does not take pushes, or that
+//!   what was sent is not valid. A worker always takes blobs, as they are the inputs of the actions it runs, but
+//!   takes results and manifests only if it takes pushes.
+//! - `EXECUTE`, with a [`crate::worker::Request`]: a worker replies `FOUND` with whether the action succeeded (`1`
+//!   or `0`) and its result in the form a cache stores, whose blobs the worker has. It replies `NOT_FOUND` if it does
 //!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
-//!   that requests for blobs are answered while they run. Before it, each of the action's early outputs which it
-//!   reports, as rustc reports its metadata, is told as it is, once the worker has its blob, by a frame of the kind
-//!   `MORE` with the id of the request, and the output's hash, whether it is executable, `1` or `0`, and its path.
-//! - `GET_CAPABILITIES` is replied to by a worker with `FOUND` and its [`crate::worker::Capabilities`].
-//! - `CANCEL`, which is not replied to, has a worker interrupt the actions it runs for the client, as when the client's
-//!   build is interrupted, and kill them a second later if they have not stopped, and run no more of them. It does so
-//!   too when the client ends the connection. The action which is interrupted is replied to as it finishes.
+//!   requests for blobs are answered while they run. Before the reply, the worker reports each early output of the
+//!   action, such as rustc's metadata, once it has the output's blob: in a `MORE` frame with the id of the request,
+//!   holding the output's hash, whether it is executable (`1` or `0`) and its path.
+//! - `GET_CAPABILITIES`: a worker replies `FOUND` with its [`crate::worker::Capabilities`].
+//! - `CANCEL`, which has no reply: a worker interrupts the actions it is running for the client, kills them a second
+//!   later if they have not stopped, and runs no more for it. The client sends it when its build is interrupted. A
+//!   worker does the same when the client ends the connection. Each interrupted action is still replied to as it
+//!   finishes.
 //!
-//! A blob larger than a part, a MiB, is sent in parts, whether it is a reply to `GET_BLOB` or the request `PUT_BLOB`:
-//! a frame of the kind `MORE` with the id of the request for each part but the last, then the frame of the reply or
-//! request, with the last part, so that the frames of other requests are sent between them, rather than after the
-//! whole blob, and neither end holds the whole blob. The parts of a blob which is received are written to a file in the
-//! cache as they are, hashed, and the file is added once it is whole and has its hash. A server which finds, as it
-//! sends a blob, that it is corrupted, ends it with `NOT_FOUND`, and removes it.
+//! # Large blobs
 //!
-//! What is fetched is checked as what is read from a cache on disk is: a blob against its hash, and a manifest or
-//! result against the hash which ends it, so that a server which sends something corrupted is a miss.
+//! A blob larger than a part, which is a MiB, is sent in parts, whether in the reply to `GET_BLOB` or in a `PUT_BLOB`
+//! request. Each part but the last is a `MORE` frame with the id of the request, and the last part is in the frame
+//! of the reply or request itself. Frames of other requests can then be sent between the parts, rather than waiting
+//! for the whole blob, and neither end holds a whole blob in memory. A receiver writes the parts to a file in its
+//! cache as they arrive, hashing them, and adds the file once it is complete and has the right hash. A server which
+//! finds a blob is corrupted while sending it ends it with `NOT_FOUND`, and removes it.
 //!
-//! A [`Remote`] asks for the manifest of a first key once, keeping what it found, or that it found none, for as long as
-//! it is used, as a build only adds to a manifest what it pushes, which it has itself. It pushes in the background,
-//! each result's blobs together, then the result and its manifest, and [`Remote::wait_for_pushes`] waits for what it
-//! has been given to push. A remote which fails, as its connection is lost or the server replies with an error, is not
-//! used again, so that the build goes on with the local cache, and [`Remote::error`] says why.
+//! # Trust and failure
+//!
+//! What is fetched is checked like what is read from a cache on disk: a blob against its hash, and a manifest or
+//! result against the hash which ends it. A server which sends something corrupted only causes a miss.
+//!
+//! A [`Remote`] asks for the manifest of each first key once, and remembers the answer, including that there was
+//! none, for as long as it is used. That is sound because the only sets a build adds to a manifest are those it
+//! pushes itself, which it already has. Pushes happen in the background: the blobs of each result together, then the
+//! result and its manifest. [`Remote::wait_for_pushes`] waits for everything queued. A remote which fails, as when
+//! its connection is lost or the server replies with an error, is not used again: the build goes on with the local
+//! cache, and [`Remote::error`] says why.
 
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -95,13 +114,14 @@ const FOUND: u8 = 64;
 const NOT_FOUND: u8 = 65;
 const OK: u8 = 66;
 const ERROR: u8 = 67;
-/// A part of a request or reply, which more frames of the same id follow, the last of which is of its kind.
+/// A part of a request or reply. More frames with the same id follow, and the last has the kind of the request or
+/// reply itself.
 const MORE: u8 = 68;
 
 /// The largest part of a blob which is sent in a frame.
 const PART: usize = 1 << 20;
 
-/// The largest payload of a frame which is read, beyond which the stream is taken as corrupted.
+/// The largest payload of a frame which is accepted. A longer one means the stream is corrupted.
 const MAX_FRAME: u64 = 16 << 20;
 
 /// The threads a server answers requests on.
@@ -113,10 +133,10 @@ type Frame = (u8, u32, Vec<u8>);
 /// A reply: its kind and its payload.
 type Reply = (u8, Vec<u8>);
 
-/// What takes the parts of a reply which is sent in parts, as they are received.
+/// Receives the parts of a reply which is sent in parts, as they arrive.
 type Sink = Box<dyn FnMut(&[u8]) + Send>;
 
-/// A request waiting for its reply, with what takes the parts of it which come before, if it is sent in parts.
+/// A request waiting for its reply, with what receives the earlier parts of the reply, if it may come in parts.
 struct Waiter {
     reply: Sender<Reply>,
     sink: Option<Sink>,
@@ -159,8 +179,8 @@ fn hashes(hashes: &[Hash]) -> Vec<u8> {
     w.0
 }
 
-/// A connection to a server, which requests are sent on from any thread, and whose replies a thread of its own reads,
-/// giving each to the request which waits for it.
+/// A connection to a server. Requests are sent on it from any thread. A thread of its own reads the replies, and
+/// gives each to the request waiting for it.
 struct Connection {
     writer: Mutex<Box<dyn Write + Send>>,
     waiting: Waiting,
@@ -172,12 +192,13 @@ struct Connection {
     /// The number of actions the server runs at once, as a worker, or `0` if it is not one.
     jobs: usize,
     process: Mutex<Option<Process>>,
-    /// The socket of a connection over TCP, which is shut down to end it, as the thread which reads it holds it too.
+    /// The socket of a connection over TCP. The thread which reads holds it too, so it is shut down to end the
+    /// connection.
     socket: Option<std::net::TcpStream>,
 }
 
-/// The process which serves a connection, if one does, with what it writes to stderr, which is kept to tell why it
-/// failed, and the thread which reads it.
+/// The process which serves a connection, if one does. What it writes to stderr is read by a thread and kept, to
+/// explain a failure.
 struct Process {
     child: Child,
     stderr: Arc<Mutex<Vec<u8>>>,
@@ -211,7 +232,7 @@ impl Connection {
                         let Some(mut waiter) = waiter else {
                             continue;
                         };
-                        // a part is given to the request's sink, without holding the lock, and the request waits for
+                        // give a part to the request's sink, without holding the lock; the request goes on waiting for
                         // the rest
                         if kind == MORE {
                             if let Some(sink) = &mut waiter.sink {
@@ -231,7 +252,7 @@ impl Connection {
             if let Ok(mut failed) = failure.lock() {
                 failed.get_or_insert(why);
             }
-            // the requests which wait are given no reply, which fails them
+            // fail the requests still waiting, by dropping what would give them their replies
             if let Ok(mut waiting) = replies.lock() {
                 waiting.clear();
             }
@@ -248,18 +269,18 @@ impl Connection {
     fn has_failed(&self) -> bool {
         self.failed.lock().map_or(true, |failed| failed.is_some())
     }
-    /// Send a request, returning what its reply is given to, or `None` if the connection has failed.
+    /// Send a request. Returns the receiver of its reply, or `None` if the connection has failed.
     fn send(&self, kind: u8, payload: &[u8]) -> Option<Receiver<Reply>> {
         let (id, receiver) = self.register(None)?;
         self.write(kind, id, payload).then_some(receiver)
     }
-    /// Send a request whose reply may come in parts, which are given to `sink` as they are received.
+    /// Send a request whose reply may come in parts. Each part is given to `sink` as it is received.
     fn send_to(&self, kind: u8, payload: &[u8], sink: Sink) -> Option<Receiver<Reply>> {
         let (id, receiver) = self.register(Some(sink))?;
         self.write(kind, id, payload).then_some(receiver)
     }
-    /// Send a request of `head` followed by what is read from a file of a size, in parts, each written on its own, so
-    /// that other requests are sent between them.
+    /// Send a request made of `head` followed by `size` bytes read from a file. It is sent in parts, each written
+    /// separately, so that other requests can be sent between them.
     fn send_parts(&self, kind: u8, head: &[u8], mut file: impl Read, size: u64) -> Option<Receiver<Reply>> {
         let (id, receiver) = self.register(None)?;
         let mut remaining = size;
@@ -281,7 +302,7 @@ impl Connection {
         }
         self.write(kind, id, &last).then_some(receiver)
     }
-    /// Returns a new request's id, waiting for its reply, or `None` if the connection has failed.
+    /// Registers a new request as waiting for its reply and returns its id, or `None` if the connection has failed.
     fn register(&self, sink: Option<Sink>) -> Option<(u32, Receiver<Reply>)> {
         if self.has_failed() {
             return None;
@@ -291,7 +312,7 @@ impl Connection {
         self.waiting.lock().ok()?.insert(id, Waiter { reply, sink });
         Some((id, receiver))
     }
-    /// Write a frame, returning whether it was, failing the connection if it could not be.
+    /// Write a frame. Returns whether it was written; if not, the connection is failed.
     fn write(&self, kind: u8, id: u32, payload: &[u8]) -> bool {
         match self.writer.lock().ok().map(|mut writer| write_frame(&mut **writer, kind, id, payload)) {
             Some(Ok(())) => true,
@@ -327,8 +348,8 @@ impl Connection {
     }
 }
 impl Connection {
-    /// End the connection: close what is written to the server, which it ends once it reads to the end of, and shut
-    /// down its socket, if it has one.
+    /// End the connection. Closing what is written to the server makes it end once it has read to the end, and its
+    /// socket, if it has one, is shut down.
     fn close(&self) {
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.flush();
@@ -362,14 +383,14 @@ enum Transport {
 }
 
 enum State {
-    /// Not connected yet, with the streams to connect over if they were given rather than a transport.
+    /// Not connected yet. Holds the streams to connect over, if streams were given rather than a transport.
     Unconnected(Option<(Box<dyn Read + Send>, Box<dyn Write + Send>)>),
     Connected(Arc<Connection>),
     /// It could not connect, for this reason.
     Failed(String),
 }
 
-/// A result to push, from the local cache, which has it, by its keys, with what its edge discovered.
+/// A result to push from the local cache, which has it: its keys, and what its edge discovered.
 struct Push {
     local: Cache,
     first: Hash,
@@ -377,9 +398,12 @@ struct Push {
     discovery: Discovery,
 }
 
-/// What a build estimates of the link to a server, by which it finds whether to send an edge to a worker: the time a
-/// request takes to be answered, beside what it sends, the bytes it sends or fetches each second, and, as a worker,
-/// how long it takes to run an edge, against how long the edge took here, `1.0` for as long.
+/// A build's estimate of the link to a server, from which it decides whether to send an edge to a worker.
+///
+/// - `latency`: how long a request takes to be answered, apart from the time to transfer what it carries.
+/// - `bandwidth`: the bytes sent or fetched each second.
+/// - `speed`: for a worker, how long it takes to run an edge relative to how long the edge took here. `1.0` is
+///   the same time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Link {
     pub latency: std::time::Duration,
@@ -396,27 +420,27 @@ impl Default for Link {
 impl Link {
     /// The bandwidth assumed until it is measured, of a network rather than a disk.
     const ASSUMED: f64 = 50e6;
-    /// The fewest bytes sent or fetched at once which the bandwidth is measured by, as the time of fewer is mostly
+    /// The fewest bytes in one transfer from which bandwidth is measured. The time of a smaller transfer is mostly
     /// latency.
     const MEASURED: u64 = 1 << 16;
-    /// The shortest time an edge took here by which the speed of a worker is measured, as what takes less is mostly
-    /// starting its command.
+    /// The shortest time an edge must have taken here for a worker's speed to be measured from it. A shorter time
+    /// is mostly that of starting the command.
     const TIMED: std::time::Duration = std::time::Duration::from_millis(100);
-    /// Returns the time it is estimated a worker takes to run an edge which took a time here.
+    /// Estimates how long a worker takes to run an edge which took a given time here.
     #[must_use]
     pub fn running(&self, here: std::time::Duration) -> std::time::Duration {
         here.mul_f64(self.speed.max(0.0))
     }
-    /// Take a measure of the speed of a worker, from the time it took to run an edge, which has the latency of a round
-    /// trip in it, against the time the edge took here, if it took long enough here to measure it by, weighting what
-    /// was measured before as much as it.
+    /// Update the worker's speed from one edge: how long the worker took to run it, which includes the latency of a
+    /// round trip, against how long it took here. The edge is ignored if it was too short here to measure by. The
+    /// new measurement and the previous estimate are weighted equally.
     fn measure_speed(&mut self, there: std::time::Duration, here: std::time::Duration) {
         if here >= Self::TIMED {
             let there = there.saturating_sub(self.latency).as_secs_f64();
             self.speed = f64::midpoint(self.speed, there / here.as_secs_f64());
         }
     }
-    /// Returns the time it is estimated to take to send or fetch a number of bytes, in a number of round trips.
+    /// Estimates how long it takes to send or fetch a number of bytes, in a number of round trips.
     #[must_use]
     // an estimate needs no more precision than an `f64` has of a number of bytes
     #[allow(clippy::cast_precision_loss)]
@@ -424,8 +448,9 @@ impl Link {
         let sending = std::time::Duration::from_secs_f64(bytes as f64 / self.bytes_per_second.max(1.0));
         self.latency * round_trips + sending
     }
-    /// Take a measure of the bandwidth, from a number of bytes sent or fetched in a time, which has the latency of a
-    /// round trip in it, if there are enough to measure it by, weighting what was measured before as much as it.
+    /// Update the bandwidth from one transfer: a number of bytes sent or fetched, and the time taken, which includes
+    /// the latency of a round trip. The transfer is ignored if it was too small to measure by. The new measurement
+    /// and the previous estimate are weighted equally.
     #[allow(clippy::cast_precision_loss)]
     fn measure(&mut self, bytes: u64, took: std::time::Duration) {
         let sending = took.saturating_sub(self.latency).as_secs_f64();
@@ -443,11 +468,11 @@ pub struct Remote {
     /// Whether results are pushed to it, if it takes them.
     push: bool,
     state: Mutex<State>,
-    /// The manifests found, or not, by first key, which are asked for once.
+    /// The manifest found for each first key asked about, or `None` if there was none. Each is asked for once.
     manifests: Mutex<HashMap<Hash, Option<Vec<u8>>>>,
-    /// The queue of results to push, and the thread which pushes them, once one has been given.
+    /// The queue of results to push, and the thread which pushes them, started when the first is queued.
     pusher: Mutex<Option<(Sender<Push>, std::thread::JoinHandle<()>)>>,
-    /// The client of a server over HTTP, with why it failed, once it has, if the remote cache is one.
+    /// For a remote cache over HTTP, the client, and why it failed, once it has.
     http: Option<Arc<Http>>,
     /// The identities of the toolchains which the server, as a worker, does not have.
     refused: Mutex<std::collections::HashSet<String>>,
@@ -475,13 +500,13 @@ impl Remote {
         let (state, link) = (Mutex::new(state), Mutex::new((Link::default(), false)));
         Self { transport, token: None, push, state, manifests, pusher, http: None, refused, reported, link }
     }
-    /// A remote cache which a command serves on its stdin and stdout, such as `ssh host jig serve --stdio`, which
-    /// results are pushed to with `push`, if it takes them.
+    /// A remote cache served by a command on its stdin and stdout, such as `ssh host jig serve --stdio`. With
+    /// `push`, results are pushed to it, if it takes them.
     #[must_use]
     pub fn command(command: Vec<String>, push: bool) -> Self {
         Self::with_state(Transport::Command(command), push, State::Unconnected(None))
     }
-    /// A remote cache which a server listening at an address, `<host>:<port>`, serves over TCP, as [`listen`] does.
+    /// A remote cache served over TCP by a server listening at `<host>:<port>`, as [`listen`] does.
     #[must_use]
     pub fn tcp(address: String, push: bool) -> Self {
         Self::with_state(Transport::Tcp(address), push, State::Unconnected(None))
@@ -492,8 +517,8 @@ impl Remote {
         let streams: (Box<dyn Read + Send>, Box<dyn Write + Send>) = (Box::new(reader), Box::new(writer));
         Self::with_state(Transport::Streams, push, State::Unconnected(Some(streams)))
     }
-    /// A remote cache which is a store of files served over HTTP, under a URL, which results are pushed to with
-    /// `push`, which authenticates with a bearer token, if there is one, or else the URL's user and password.
+    /// A remote cache which is a store of files served over HTTP, under a URL. With `push`, results are pushed to
+    /// it. Requests authenticate with a bearer token, if one is given, and otherwise with the URL's user and password.
     #[must_use]
     pub fn http(url: crate::http::Url, token: Option<&[u8]>, push: bool) -> Self {
         let mut remote = Self::with_state(Transport::Http, push, State::Unconnected(None));
@@ -519,8 +544,8 @@ impl Remote {
             State::Unconnected(_) => None,
         }
     }
-    /// Whether results are pushed to the remote cache, as it is asked to and it takes them, connecting to it to find
-    /// out.
+    /// Whether results are pushed to the remote cache: it was asked to push, and the server takes pushes. Connects
+    /// to the server to find out.
     #[must_use]
     pub fn pushes(&self) -> bool {
         if let Some(http) = &self.http {
@@ -528,7 +553,7 @@ impl Remote {
         }
         self.push && self.connection().is_some_and(|connection| connection.pushes)
     }
-    /// Returns the connection, connecting first if it is not, or `None` if it failed.
+    /// Returns the connection, connecting first if needed, or `None` if the remote cache has failed.
     fn connection(&self) -> Option<Arc<Connection>> {
         let mut state = self.state.lock().ok()?;
         if let State::Unconnected(streams) = &mut *state {
@@ -564,7 +589,7 @@ impl Remote {
             let (Some(stdin), Some(stdout)) = (stdin, stdout) else {
                 return Err(format!("`{program}` has no stdin or stdout"));
             };
-            // stderr is read as it is written, so that the process does not block on it
+            // read stderr as it is written, so that the process never blocks writing to it
             let stderr = Arc::new(Mutex::new(Vec::new()));
             let reading = child.stderr.take().map(|mut pipe| {
                 let kept = Arc::clone(&stderr);
@@ -589,7 +614,7 @@ impl Remote {
         let receiver = connection.send(HELLO, &hello);
         match receiver.and_then(|receiver| receiver.recv().ok()) {
             Some((HELLO, payload)) if payload.len() >= 10 && payload[..4] == VERSION.to_le_bytes() => {
-                // the latency is of the reply to `HELLO`, which has little to send
+                // take the latency from the reply to `HELLO`, which carries little
                 if let Ok(mut link) = self.link.lock()
                     && !link.1
                 {
@@ -600,7 +625,7 @@ impl Remote {
                 if payload[9] == 1 {
                     let nonce = payload.get(10..42).ok_or("the server sent no nonce")?;
                     let token = self.token.as_deref().ok_or("the server needs a token")?;
-                    // the reply is taken as it is, as the server ends the connection once it refuses the token
+                    // either reply is taken here: the server ends the connection after refusing a token
                     let receiver = connection.send(AUTH, &proof(token, nonce));
                     match receiver.and_then(|receiver| receiver.recv().ok()) {
                         Some((OK, _)) => (),
@@ -640,13 +665,13 @@ impl Remote {
             None => false,
         }
     }
-    /// Returns a manifest as it is stored, if the remote cache has it, which is asked for once.
+    /// Returns the stored bytes of a manifest, if the remote cache has it. Each manifest is asked for once.
     #[must_use]
     pub fn manifest(&self, key: &Hash) -> Option<Vec<u8>> {
         if let Some(found) = self.manifests.lock().ok()?.get(key) {
             return found.clone();
         }
-        // a manifest which could not be asked for is asked for again, while one which was not found is not
+        // a failed request is not remembered, so the manifest is asked for again, but "not found" is remembered
         let found = if let Some(http) = &self.http {
             http.get(&format!("/mf/{}", crate::cache::hex(key))).ok()?
         } else {
@@ -658,15 +683,15 @@ impl Remote {
         self.manifests.lock().ok()?.insert(*key, found.clone());
         found
     }
-    /// Returns the first of the results by second keys which the remote cache has, with every blob it refers to, with
-    /// its index, as it is stored.
+    /// Looks up results by second keys. Returns the index of the first key for which the remote cache has the result
+    /// and every blob it refers to, with the stored bytes of that result.
     #[must_use]
     pub fn first_result(&self, keys: &[Hash]) -> Option<(usize, Vec<u8>)> {
         if keys.is_empty() {
             return None;
         }
         if let Some(http) = &self.http {
-            // each asked for at once, of which the first found in order is taken
+            // over HTTP each key is asked for at once, and the first in order which is found is taken
             let found = in_parallel(keys, |key| http.get(&format!("/ac/{}", crate::cache::hex(key))).ok().flatten());
             return found.into_iter().enumerate().find_map(|(index, result)| Some((index, result?)));
         }
@@ -676,8 +701,8 @@ impl Remote {
         let index = payload.u32()? as usize;
         (index < keys.len()).then(|| (index, payload.0.to_vec()))
     }
-    /// Fetch blobs into a cache, asking for them at once, returning those which were added. The parts of each are
-    /// written to the cache as they are received, and each is added once it is whole and has its hash.
+    /// Fetch blobs into a cache, all requested at once. Returns those which were added. The parts of each blob are
+    /// written to the cache as they arrive, and the blob is added once it is complete and has the right hash.
     pub fn fetch_blobs(&self, local: &Cache, blobs: &[Hash]) -> Vec<Hash> {
         if let Some(http) = &self.http {
             let fetched = in_parallel(blobs, |blob| http.fetch_blob(local, blob).then_some(*blob));
@@ -704,7 +729,7 @@ impl Remote {
         }
         let mut fetched = Vec::new();
         for (blob, writer, receiver) in sent {
-            // once the reply has come, the sink has been given every part before it
+            // by the time the reply arrives, the sink has received every earlier part
             let last = Self::get(&connection, connection.wait(receiver));
             let writer = writer.lock().ok().and_then(|mut writer| writer.take());
             if let Some((last, mut writer)) = last.zip(writer) {
@@ -740,8 +765,9 @@ impl Remote {
             Self::put(&connection, connection.wait(receiver).map(|(kind, _)| kind))
         })
     }
-    /// Queue a result in a local cache to be pushed, by its keys, with what its edge discovered, if the remote cache
-    /// takes pushes, returning whether it was queued. It is pushed in the background, in the order queued.
+    /// Queue a result held by a local cache to be pushed, with its keys and what its edge discovered. Returns
+    /// whether it was queued, which it is only if the remote cache takes pushes. Results are pushed in the
+    /// background, in the order they were queued.
     pub fn queue_push(&self, local: Cache, first: &Hash, second: &Hash, discovery: &Discovery) -> bool {
         if !self.pushes() {
             return false;
@@ -771,8 +797,8 @@ impl Remote {
         let push = Push { local, first: *first, second: *second, discovery: discovery.clone() };
         sender.send(push).is_ok()
     }
-    /// Returns the number of actions the server runs at once, as a worker, connecting to it to find out, or `0` if it
-    /// is not one, or has failed.
+    /// Returns the number of actions the server runs at once as a worker, connecting to it to find out. Returns `0`
+    /// if it is not a worker, or has failed.
     #[must_use]
     pub fn jobs(&self) -> usize {
         if self.http.is_some() {
@@ -824,30 +850,31 @@ impl Remote {
             _ => Err(failed()),
         }
     }
-    /// Returns what the server, as a worker, last reported of itself, if it has been asked, without asking it.
+    /// Returns what the server, as a worker, last reported of itself, if it has been asked. Does not ask it.
     #[must_use]
     pub fn reported(&self) -> Option<Arc<crate::worker::Capabilities>> {
         self.reported.try_lock().ok()?.clone()
     }
-    /// Whether the server, as a worker, may have a toolchain: whether it has not refused an action of it.
+    /// Whether the server, as a worker, may have a toolchain: it has not refused an action for lacking it.
     #[must_use]
     pub fn may_have(&self, identity: &str) -> bool {
         self.refused.lock().is_ok_and(|refused| !refused.contains(identity))
     }
-    /// Run an action on the server, as a worker, first sending the blobs of its inputs which it does not have, from
-    /// their files, relative to the build's directory. The blobs of the outputs and what it printed are left on the
+    /// Run an action on the server, as a worker. The blobs of its inputs which the worker lacks are sent first, from
+    /// their files, relative to the build's directory. The blobs of its outputs and of what it printed stay on the
     /// worker, to be fetched.
     ///
     /// # Errors
     ///
-    /// If the worker does not have the toolchain, which it is not asked again, or could not run the action, as when an
-    /// input changed as it was sent, or the connection failed, after which the worker is not used again.
+    /// If the worker does not have the toolchain, in which case it is not asked for that toolchain again; if it
+    /// could not run the action, as when an input changed while it was being sent; or if the connection failed,
+    /// after which the worker is not used again.
     pub fn execute(&self, dir: &std::path::Path, request: &Request) -> Result<Executed, Refused> {
         self.execute_timed(dir, request, &|_| ()).map(|(executed, _)| executed)
     }
-    /// Run an action on the server, as [`Self::execute`] does, returning too how long it took to run, from when it was
-    /// sent until its reply came, once its inputs were sent, and telling `wrote` each of its early outputs as the
-    /// worker tells it, on a thread of its own, before it returns.
+    /// Run an action on the server, as [`Self::execute`] does. Also returns how long the action took to run: from
+    /// when it was sent, after its inputs, until its reply came. `wrote` is called with each early output as the
+    /// worker reports it, on a separate thread, and all the calls finish before this returns.
     ///
     /// # Errors
     ///
@@ -875,7 +902,7 @@ impl Remote {
             bytes += size;
             sent.push(connection.send_parts(PUT_BLOB, blob, BufReader::new(file), size));
         }
-        // a blob which is refused, as its file changed after it was hashed, fails only this action
+        // a blob which is refused, as its file changed after it was hashed, fails only this action, not the worker
         for receiver in sent {
             match receiver.and_then(|receiver| receiver.recv().ok()) {
                 Some((OK, _)) => (),
@@ -885,8 +912,8 @@ impl Remote {
         }
         self.measured(bytes, sending.elapsed());
         let running = std::time::Instant::now();
-        // the early outputs it tells of are given to `wrote` on a thread of their own, as they may be fetched, until
-        // the reply comes, which drops what sends them
+        // `wrote` is called on a separate thread, as it may fetch the output. The thread ends when the reply comes,
+        // which drops the sender of the outputs.
         let (notices, told) = std::sync::mpsc::channel::<Vec<u8>>();
         let sink: Sink = Box::new(move |notice: &[u8]| {
             let _ = notices.send(notice.to_vec());
@@ -941,8 +968,8 @@ impl Remote {
             link.0.measure_speed(there, here);
         }
     }
-    /// Have the server, as a worker, interrupt the actions it runs for this client, and run no more, as when the
-    /// build is interrupted. Those which are interrupted fail.
+    /// Tell the server, as a worker, to interrupt the actions it is running for this client, and to run no more, as
+    /// when the build is interrupted. The interrupted actions fail.
     pub fn cancel(&self) {
         let connection = match self.state.try_lock().as_deref() {
             Ok(State::Connected(connection)) => Some(Arc::clone(connection)),
@@ -969,19 +996,19 @@ fn cas_path(hash: &Hash) -> String {
     format!("/cas/{}/{}", &hex[..2], &hex[2..])
 }
 
-/// What a remote cache is spoken to by, which the thread which pushes has.
+/// The transport of a remote cache, of which the thread which pushes holds a copy.
 enum Backend {
     Rig(Arc<Connection>),
     Http(Arc<Http>),
 }
 
-/// That a server over HTTP failed, which [`Http::fail`] has recorded why.
+/// The error for a server over HTTP which has failed. The reason has been recorded by [`Http::fail`].
 struct Failed;
 
 /// The most requests over HTTP which are sent at once, each on a connection of its own.
 const HTTP_AT_ONCE: usize = 8;
 
-/// Returns what `f` returns for each of `items`, in their order, running it for several at once, each on a thread.
+/// Calls `f` for each of `items` on several threads at once, and returns the results in the order of the items.
 fn in_parallel<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     if items.len() <= 1 {
         return items.iter().map(f).collect();
@@ -1003,8 +1030,8 @@ impl Http {
             failed.get_or_insert(why);
         }
     }
-    /// Send a request, returning its status, if it was answered with one which is `2xx` or `404`, or `None` if the
-    /// server failed, or failed now, when it is not used again.
+    /// Send a request. Returns its status if that is `2xx` or `404`. Returns `None` if the server had already failed,
+    /// or fails on this request, after which it is not used again.
     fn request(&self, method: &str, path: &str, body: crate::http::Body, sink: &mut dyn FnMut(&[u8])) -> Option<u16> {
         if self.has_failed() {
             return None;
@@ -1022,7 +1049,7 @@ impl Http {
             },
         }
     }
-    /// Returns a file, or `None` if the server does not have it, failing if the server did.
+    /// Returns a file, or `None` if the server does not have it. Fails if the server failed.
     fn get(&self, path: &str) -> Result<Option<Vec<u8>>, Failed> {
         let mut body = Vec::new();
         let status = self.request("GET", path, crate::http::Body::None, &mut |part| body.extend_from_slice(part));
@@ -1031,7 +1058,7 @@ impl Http {
     fn put(&self, path: &str, body: crate::http::Body) -> bool {
         self.request("PUT", path, body, &mut |_| ()).is_some_and(|status| status != 404)
     }
-    /// Fetch a blob into a cache, written to it in parts as they are read, returning whether it was added.
+    /// Fetch a blob into a cache, writing it in parts as they are read. Returns whether it was added.
     fn fetch_blob(&self, local: &Cache, blob: &Hash) -> bool {
         let Ok(mut writer) = local.blob_writer() else {
             return false;
@@ -1040,7 +1067,7 @@ impl Http {
         let status = self.request("GET", &path, crate::http::Body::None, &mut |part| writer.write(part));
         status == Some(200) && writer.finish(blob)
     }
-    /// Returns those of the blobs the server does not have, asking for each at once.
+    /// Returns those of the blobs which the server does not have, asking about all of them at once.
     fn missing(&self, blobs: &[Hash]) -> Option<Vec<Hash>> {
         let found = in_parallel(blobs, |blob| {
             let path = cas_path(blob);
@@ -1049,8 +1076,9 @@ impl Http {
         let found: Option<Vec<_>> = found.into_iter().collect();
         Some(found?.into_iter().filter(|&(_, missing)| missing).map(|(blob, _)| blob).collect())
     }
-    /// Push a result: the blobs the server does not have, at once, each sent from its file, then the result, then the
-    /// manifest, merged with the server's, so that it never has a result without its blobs.
+    /// Push a result. The blobs the server lacks are pushed first, all at once, each from its file. The result
+    /// follows, then the manifest, merged with the server's. The server therefore never has a result without its
+    /// blobs.
     fn push_result(&self, push: &Push) {
         let Some(result) = push.local.raw_result(&push.second) else {
             return;
@@ -1079,8 +1107,8 @@ impl Http {
     }
 }
 
-/// Push a result: the blobs the remote cache does not have, at once, then the result and the discovered inputs of
-/// its manifest, so that it never has a result without its blobs.
+/// Push a result. The blobs the remote cache lacks are pushed first, all at once, then the result and the
+/// discovered inputs for its manifest. The remote cache therefore never has a result without its blobs.
 fn push_result(connection: &Connection, push: &Push) {
     let Some(result) = push.local.raw_result(&push.second) else {
         return;
@@ -1093,7 +1121,7 @@ fn push_result(connection: &Connection, push: &Push) {
     }) else {
         return;
     };
-    // each is sent in parts, read from its file as it is sent
+    // each blob is sent in parts, read from its file as it is sent
     let mut sent = Vec::new();
     for blob in &missing {
         let Ok((file, size)) = push.local.open_blob(blob) else {
@@ -1136,15 +1164,16 @@ fn nonce() -> std::io::Result<[u8; 32]> {
     Ok(nonce)
 }
 
-/// Connect to a server listening at an address over TCP, trying each address it resolves to in turn, and giving up on
-/// one after 10 seconds.
+/// Connect to a server listening at an address over TCP. Each address the name resolves to is tried in turn, for
+/// up to 10 seconds each.
 fn connect_tcp(address: &str) -> std::io::Result<std::net::TcpStream> {
     use std::net::ToSocketAddrs;
     let mut error = std::io::Error::new(std::io::ErrorKind::NotFound, "the address resolves to nothing");
     for resolved in address.to_socket_addrs()? {
         match std::net::TcpStream::connect_timeout(&resolved, std::time::Duration::from_secs(10)) {
             Ok(stream) => {
-                // requests are small, and waited for, so they are not held back to be sent together
+                // send each request at once rather than batching small writes: requests are small, and each is waited
+                // for
                 stream.set_nodelay(true)?;
                 return Ok(stream);
             },
@@ -1154,8 +1183,8 @@ fn connect_tcp(address: &str) -> std::io::Result<std::net::TcpStream> {
     Err(error)
 }
 
-/// What a server serves: a cache, which takes pushes if `push`, to clients which prove they have the token, if there
-/// is one, and runs actions as a worker, with the executor, if there is one.
+/// What a server serves: a cache, which takes pushes if `push`. If it has a token, clients must prove they have it.
+/// If it has an executor, it also runs actions as a worker.
 #[derive(Clone, Copy)]
 pub struct Server<'a> {
     pub cache: &'a Cache,
@@ -1164,9 +1193,9 @@ pub struct Server<'a> {
     pub executor: Option<&'a crate::worker::Executor>,
 }
 
-/// Serve a cache to every client which connects to a listener over TCP, each on a thread of its own, as `jig serve
-/// --listen` does, taking pushes if `push`, from clients which prove they have the token. `after` is run once each
-/// client is done, as to collect the cache. It serves until the listener fails.
+/// Serve a cache to every client which connects to a listener over TCP, each on a thread of its own, as
+/// `jig serve --listen` does. It takes pushes if `push`, and clients must prove they have the token. `after` is run
+/// each time a client is done, such as to collect the cache. It serves until the listener fails.
 ///
 /// # Errors
 ///
@@ -1182,8 +1211,8 @@ pub fn listen(
 }
 
 impl Server<'_> {
-    /// Serve a client over streams until it ends them, answering requests on several threads, and running actions on
-    /// as many as the executor runs at once.
+    /// Serve a client over streams until it ends them. Requests are answered on several threads, and as many actions
+    /// run at once as the executor allows.
     ///
     /// # Errors
     ///
@@ -1191,8 +1220,8 @@ impl Server<'_> {
     pub fn serve(&self, reader: impl Read, writer: impl Write + Send) -> std::io::Result<()> {
         serve_as(*self, reader, writer)
     }
-    /// Serve every client which connects to a listener over TCP, each on a thread of its own, running `after` once each
-    /// is done, until the listener fails.
+    /// Serve every client which connects to a listener over TCP, each on a thread of its own, running `after` each
+    /// time one is done, until the listener fails.
     ///
     /// # Errors
     ///
@@ -1214,8 +1243,8 @@ impl Server<'_> {
     }
 }
 
-/// Serve a cache over streams, as `jig serve --stdio` does on its stdin and stdout, until the client ends the stream,
-/// taking pushes if `push`, answering requests on several threads.
+/// Serve a cache over streams until the client ends them, as `jig serve --stdio` does on its stdin and stdout. It
+/// takes pushes if `push`, and answers requests on several threads.
 ///
 /// # Errors
 ///
@@ -1241,8 +1270,8 @@ pub fn serve_with_token(
 
 fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std::io::Result<()> {
     let Server { cache, push, token, executor } = server;
-    // a worker takes the blobs of the inputs of its actions, which are checked against their hashes, though not
-    // results, which only a cache which takes pushes does
+    // A worker takes blobs, which are the inputs of its actions and are checked against their hashes. Only a cache
+    // which takes pushes takes results.
     let blobs = push || executor.is_some();
     let (mut reader, mut writer) = (BufReader::new(reader), BufWriter::new(writer));
     let Ok(Some((HELLO, id, hello))) = read_frame(&mut reader) else {
@@ -1284,11 +1313,11 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
     let writer = Mutex::new(writer);
     let (requests, work) = std::sync::mpsc::channel::<Frame>();
     let work = Mutex::new(work);
-    // actions run on threads of their own, so that they do not hold up the requests for blobs
+    // actions run on threads of their own, so that they do not hold up requests for blobs
     let (actions, running) = std::sync::mpsc::channel::<(u32, Vec<u8>)>();
     let running = Mutex::new(running);
-    // the process groups of the actions which run, by the ids of their requests, which are interrupted once the
-    // client cancels them, or ends the connection
+    // The process groups of the running actions, by the ids of their requests. They are interrupted when the
+    // client cancels, or ends the connection.
     let groups: Mutex<HashMap<u32, u32>> = Mutex::default();
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     let cancel = || {
@@ -1302,7 +1331,7 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
             }
         };
         signal(crate::sys::SIGINT);
-        // what ignores the signal is killed
+        // kill whatever ignored the signal
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while groups.lock().is_ok_and(|groups| !groups.is_empty()) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1321,7 +1350,7 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
     std::thread::scope(|scope| {
         for _ in 0..SERVER_THREADS {
             scope.spawn(|| {
-                // the lock is held while waiting for a request, which the other threads wait for in turn
+                // the lock is held while waiting for a request, so the threads take requests one at a time
                 while let Ok(Ok((kind, id, payload))) = work.lock().map(|work| work.recv()) {
                     if kind == GET_BLOB && let Ok(key) = <Hash>::try_from(payload.as_slice()) {
                         send_blob(cache, &key, &|kind, payload| reply(kind, id, payload));
@@ -1375,8 +1404,8 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                 }
             });
         }
-        // the parts of the blobs being pushed, by the ids of their requests, which are written as they are read, or
-        // `None` for a blob which is not taken
+        // The blobs being pushed in parts, by the ids of their requests. Each part is written as it is read. `None`
+        // stands for a blob which is being refused.
         let mut uploads: HashMap<u32, Option<crate::cache::BlobWriter>> = HashMap::new();
         let read = loop {
             match read_frame(&mut reader) {
@@ -1415,8 +1444,8 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
                 Err(error) => break Err(error),
             }
         };
-        // the threads stop once there are no more requests, and the actions which run have finished, which are
-        // cancelled, as the client which would fetch what they write is gone
+        // The threads stop once there are no more requests and the running actions have finished. The actions are
+        // cancelled first, as the client which would fetch their outputs is gone.
         drop(requests);
         drop(actions);
         cancel();
@@ -1425,12 +1454,12 @@ fn serve_as(server: Server, reader: impl Read, writer: impl Write + Send) -> std
     written.into_inner().unwrap_or(Ok(()))
 }
 
-/// Encode an early output of an action as a worker tells it: its hash, whether it is executable, and its path.
+/// Encode an early output of an action as a worker reports it: its hash, whether it is executable, and its path.
 fn encode_output(output: &crate::cache::Output) -> Vec<u8> {
     [output.blob.as_slice(), &[u8::from(output.executable)], output.path.as_bytes()].concat()
 }
 
-/// Decode an early output of an action as a worker tells it, or `None` if it is not valid.
+/// Decode an early output of an action as a worker reports it, or `None` if it is not valid.
 fn decode_output(bytes: &[u8]) -> Option<crate::cache::Output> {
     let (blob, rest) = bytes.split_at_checked(32)?;
     let (&executable, path) = rest.split_first()?;
@@ -1443,9 +1472,9 @@ fn decode_output(bytes: &[u8]) -> Option<crate::cache::Output> {
     Some(crate::cache::Output { path, blob: blob.try_into().ok()?, executable })
 }
 
-/// Send a blob as the reply to a request, by `reply`, in parts, as it is read, checking it against its hash, and
-/// ending it with `NOT_FOUND`, and removing it, if it does not have it, or with `NOT_FOUND` alone if the cache does not
-/// have it.
+/// Send a blob as the reply to a request, through `reply`, in parts, as it is read. If the cache does not have the
+/// blob, the reply is `NOT_FOUND`. If the blob turns out not to match its hash, the reply is ended with `NOT_FOUND`
+/// and the blob is removed.
 fn send_blob(cache: &Cache, hash: &Hash, reply: &dyn Fn(u8, &[u8])) {
     let Ok((file, size)) = cache.open_blob(hash) else {
         return reply(NOT_FOUND, &[]);
@@ -1474,7 +1503,7 @@ fn send_blob(cache: &Cache, hash: &Hash, reply: &dyn Fn(u8, &[u8])) {
     reply(FOUND, &last);
 }
 
-/// Whether two byte strings are the same, comparing every byte, so that how long it takes does not tell where they
+/// Whether two byte strings are equal. Every byte is compared, so that the time taken does not reveal where they
 /// differ.
 fn same(lhs: &[u8], rhs: &[u8]) -> bool {
     lhs.len() == rhs.len() && lhs.iter().zip(rhs).fold(0, |differ, (lhs, rhs)| differ | (lhs ^ rhs)) == 0
@@ -1521,7 +1550,7 @@ fn answer(cache: &Cache, push: bool, blobs: bool, kind: u8, payload: &[u8]) -> (
     }
 }
 
-/// Returns a remote cache which `cache` is served as, by [`serve`] on another thread, over pipes.
+/// Returns a remote cache which serves `cache`, with [`serve`] running on another thread, over pipes.
 #[cfg(test)]
 pub(crate) fn served(cache: Cache, push: bool, pushes: bool) -> Remote {
     let (requests, client) = std::io::pipe().unwrap();
@@ -1530,7 +1559,7 @@ pub(crate) fn served(cache: Cache, push: bool, pushes: bool) -> Remote {
     Remote::streams(server, client, push)
 }
 
-/// Returns a worker which runs actions with an executor, with `cache` as its store, served over pipes.
+/// Returns a worker which runs actions with an executor and has `cache` as its store, served over pipes.
 #[cfg(test)]
 pub(crate) fn served_worker(cache: Cache, executor: crate::worker::Executor) -> Remote {
     let (requests, client) = std::io::pipe().unwrap();
@@ -1541,8 +1570,8 @@ pub(crate) fn served_worker(cache: Cache, executor: crate::worker::Executor) -> 
     Remote::streams(server, client, false)
 }
 
-/// Returns a remote cache which `cache` is served as, over pipes, to a client which has the token, if there is one,
-/// which proves itself with `client`, if it is given.
+/// Returns a remote cache which serves `cache` over pipes. The server requires `token`, if one is given, and the
+/// client proves itself with `client`, if that is given.
 #[cfg(test)]
 pub(crate) fn served_with_token(cache: Cache, token: Option<&'static [u8]>, client: Option<&[u8]>) -> Remote {
     let (requests, writer) = std::io::pipe().unwrap();

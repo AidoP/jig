@@ -101,9 +101,9 @@ fn generate(random: &mut Random) -> Generated {
                 dependencies.push(input);
             }
         }
-        // an alias is only a dependency, as it is not a file which `cat` could read, and not of a restat edge, as
-        // when the model was checked against ninja, which runs such an edge again the next time it builds after it left
-        // its output alone, though nothing it depends on changed, which rig does not
+        // An alias can only be a dependency, as it is not a file which `cat` could read. A restat edge is not given
+        // one. That rule dates from checking the model against ninja: after a restat edge left its output alone, ninja
+        // ran it again on the next build though nothing had changed, which rig does not.
         if rule != "gen" && !aliases.is_empty() && random.chance(25) {
             dependencies.push(random.pick(&aliases).0.clone());
         }
@@ -188,14 +188,19 @@ fn write(generated: &Generated, dir: &Path) {
     graph.save(&dir.join(rig_graph::FILE)).unwrap_or_else(|error| panic!("{error}"));
 }
 
-/// A model of a build of a generated graph, which says which edges must run, and what they write, without files or
-/// processes: each file has its contents and the logical time it was last written, and each edge which has run, the
-/// times of its inputs and outputs then, as rig records their stamps.
+/// A model of a build of a generated graph, which says which edges must run and what they write, without files or
+/// processes. Each file has its contents and the logical time it was last written. Each edge which has run has the
+/// times its inputs and outputs had then, as rig records their stamps.
 ///
-/// An edge which is wanted runs if it has not run, or one of its outputs is missing, or was written since by other than
-/// it, or one of its inputs, with the targets of an alias in its place, and the headers it discovered when it last ran,
-/// has another time than it had then. Its order-only inputs are built first, but do not run it. The edges are generated
-/// in an order in which each comes after those it depends on, so a build runs them in that order.
+/// An edge which is wanted runs if any of these holds:
+///
+/// - it has not run;
+/// - one of its outputs is missing, or was written since by something other than the edge;
+/// - one of its inputs has a different time from the one recorded, where its inputs are those it declares, with the
+///   targets of an alias in place of the alias, and the headers it discovered when it last ran.
+///
+/// Its order-only inputs are built first, but do not make it run. The edges are generated in an order in which each
+/// comes after those it depends on, so a build runs them in that order.
 struct Model<'a> {
     generated: &'a Generated,
     files: HashMap<String, (String, u64)>,
@@ -259,8 +264,8 @@ impl<'a> Model<'a> {
         let spec = &self.generated.edges[id];
         std::iter::once(&spec.output).chain(&spec.extra_outputs).cloned().collect()
     }
-    /// Returns the edges which building targets wants, the edges which produce them and those they depend on, or every
-    /// edge without targets.
+    /// Returns the edges which building the targets wants: those which produce the targets, and those they depend
+    /// on. Without targets, that is every edge.
     fn wanted(&self, targets: &[&str]) -> BTreeSet<usize> {
         let edges = &self.generated.edges;
         if targets.is_empty() {
@@ -359,9 +364,9 @@ fn build_rig(dir: &Path, targets: &[&str]) -> Ran {
     Ran { succeeded: report.succeeded(), edges: take_log(dir) }
 }
 
-/// Opens the state of a build, which the test's other threads can hold for a moment after this one closed it: a
-/// process which one of them is starting has a copy of every descriptor until it runs its program, the lock's
-/// among them.
+/// Opens the state of a build, retrying while it is locked. Another thread of the test can hold the lock for a
+/// moment after this thread released it: a process which that thread is starting inherits a copy of every open
+/// descriptor, the lock's among them, until it runs its program.
 fn open_state(dir: &Path) -> rig::state::State {
     let mut tries = 0;
     loop {
@@ -404,9 +409,9 @@ fn apply(edit: &Edit, dir: &Path) {
             let mut file = std::fs::File::options().append(true).open(dir.join(path)).unwrap();
             writeln!(file, "changed").unwrap();
         },
-        // written again unchanged, so that its time is the file system's clock, as the outputs' are, rather than the
-        // precise time now, which can be later than an output written after it within the file system's tick, which
-        // would be older than its input
+        // Write the file again, unchanged, to give it a new time from the file system's clock, as outputs get theirs.
+        // Setting the precise time now could give a time later than that of an output written afterwards within the
+        // same tick of the file system's clock, which would make the output look older than its input.
         Edit::Touch(path) => {
             let path = dir.join(path);
             let contents = std::fs::read(&path).unwrap();

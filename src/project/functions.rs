@@ -490,10 +490,10 @@ impl Project {
         parser.offset += 2;
         Some(Argument::Named { name, span, value: self.parse_binary(parser, 0)? })
     }
-    /// Returns whether a version meets a requirement, as cargo compares a version to a dependency's default
-    /// requirement, from the arguments of `semver-compatible`, which are the version and the requirement, and
-    /// `ignore-pre-release: <bool>`, which compares them by their numbers alone, so that a nightly version of rustc is
-    /// compatible as its release would be.
+    /// Evaluates `semver-compatible`: whether a version meets a requirement, compared as cargo compares a version to
+    /// a dependency's default requirement. Its arguments are the version, the requirement, and optionally
+    /// `ignore-pre-release: <bool>`, which compares by the numbers alone, so that a nightly rustc is as compatible as
+    /// its release would be.
     fn semver_compatible(&mut self, arguments: Vec<Argument>, expected: Arguments, span: Span) -> Option<Data> {
         let mut positional = Vec::new();
         let mut ignore_pre_release = None;
@@ -682,8 +682,9 @@ impl Project {
             if dir.as_os_str().is_empty() {
                 continue;
             }
-            // a directory which is missing is recorded as missing, as rig would otherwise find it out of date each
-            // time, and configure the project again endlessly, while it configures the project again once it exists
+            // A missing directory is recorded as missing, not as a dependency: rig would find a missing dependency
+            // out of date on every build, and configure the project again endlessly. Recorded as missing, it
+            // configures the project again only once it exists.
             self.depend_on_path(&dir);
             if let Some(path) = crate::platform::program_in(&dir, name) {
                 return Ok(path);
@@ -693,8 +694,9 @@ impl Project {
     }
     /// Add a path which the configuration depends on, if it exists.
     ///
-    /// A path which is missing is recorded as missing instead, in the graph's depfile, as rig takes a missing input it
-    /// discovered as out of date, until the edge which generates the graph has run without it.
+    /// A path which does not exist is recorded as missing instead, and is still listed in the graph's depfile. rig
+    /// treats a missing input it discovered as out of date only until the edge which generates the graph has run
+    /// without it, so the project is configured again once the path exists.
     pub(super) fn depend_on_path(&mut self, path: &Path) {
         if path.exists() {
             self.depend(path.to_path_buf());
@@ -753,11 +755,11 @@ impl Project {
     }
     /// Returns the value of a property where `span` is, if it has one, as `defined` and `select` take it.
     ///
-    /// A property which has not been declared yet has no value, as it may be declared later, while one which is never
+    /// A property which has not been declared yet has no value, as it may be declared later. One which is never
     /// declared is reported when the configuration ends, so that a misspelt name is an error rather than ignored.
     ///
-    /// A crate is a property, which is referred to by its name alone for the `target` property, while one for a target,
-    /// `<target>/<name>`, has no value if it has not been declared, as it may be later.
+    /// A crate is a property too. Its name alone refers to the crate for the `target` property. The name of one for
+    /// a given target, `<target>/<name>`, has no value until that crate is declared, as it may be declared later.
     fn named_value(&mut self, name: &str, span: Span) -> Option<&Value> {
         // a local, such as the variable of a `@for`, which is not a property
         if self.files[span.file].locals.contains_key(name) {

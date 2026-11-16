@@ -7,12 +7,13 @@ use crate::configured::{Configured, Output, Request};
 use crate::project::{self, Message, Severity};
 use crate::{Error, database};
 
-/// Install the files of the crates and custom commands with `install` in a prefix, or the `install-prefix` property if
-/// none is given, without evaluating the configuration.
+/// Install the files of the crates and custom commands which have `install`, in a prefix, or in the
+/// `install-prefix` property if no prefix is given. The configuration is not evaluated.
 ///
-/// What is installed is built first, then each file is copied into its directory within the prefix, replacing
-/// any file there, with its permissions, followed by a summary. With `proxy`, a program is installed as a wrapper which
-/// builds it if needed then runs it, and any other file as a link to it, so that what is installed follows the build.
+/// What is installed is built first. Each file is then copied into its directory within the prefix, replacing any
+/// file there, and given its permissions, and a summary is shown. With `proxy`, a program is instead installed as a
+/// wrapper which builds it if needed and then runs it, and any other file as a link to it, so that what is installed
+/// follows the build.
 pub fn install(prefix: Option<PathBuf>, proxy: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
     project.build(&Request { targets: &["install"], ..Default::default() })?;
@@ -101,11 +102,12 @@ fn link(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// wrapper instead, as what it runs may have changed.
 pub const REINSTALLED: u8 = 75;
 
-/// Returns the wrapper for a program, which builds it with `jig build --proxy` from the project root, then runs it with
-/// the wrapper's arguments, or runs the wrapper again if `jig` reinstalls it.
+/// Returns the wrapper for a program. The wrapper builds the program with `jig build --proxy`, from the project
+/// root, then runs it with the wrapper's own arguments. If the build reinstalled the wrapper, it runs the new
+/// wrapper instead.
 ///
-/// The paths are absolute, and the wrapper is identified by its prefix and its own path, which `jig` finds its program
-/// by. The build's output is written to stderr, so that the program's output is its own.
+/// The paths in it are absolute. The wrapper identifies itself to `jig` by its prefix and its own path, from which
+/// `jig` finds its program. The build's output goes to stderr, so that stdout carries only the program's output.
 #[cfg(unix)]
 fn proxy_script(root: &Path, jig: &Path, prefix: &Path, wrapper: &Path, source: &Path) -> String {
     let quote = |path: &Path| shell_quote(&path.display().to_string());
@@ -206,8 +208,8 @@ fn set_aside(wrapper: &Path) -> std::io::Result<()> {
     remove(wrapper)
 }
 
-/// Write a wrapper for a program, with permissions `mode`, unless it is already as it would be written: a shell script
-/// on Unix, and on Windows, an executable which does as the script does.
+/// Write a wrapper for a program, with permissions `mode`, unless the file there is already what would be written.
+/// It is a shell script on Unix, and on Windows an executable which does what the script does.
 ///
 /// Returns whether it was written.
 fn write_proxy(
@@ -237,9 +239,9 @@ fn write_proxy(
     Ok(true)
 }
 
-/// Returns the `jig` for the wrappers installed in a prefix to run, which is the one running, as by [`jig`], unless it
-/// is where one of them is installed, as when jig installs itself, which would make that wrapper run itself, so the
-/// program it wraps is run instead.
+/// Returns the `jig` which the wrappers installed in a prefix run. That is the one running, as [`jig`] gives it,
+/// with one exception: if a wrapper is being installed at that very path, as when jig installs itself, the wrapper
+/// would run itself, so the program it wraps is used instead.
 fn proxy_jig(root: &Path, prefix: &Path, installs: &[database::Install]) -> std::io::Result<PathBuf> {
     let jig = crate::configured::jig()?;
     for file in installs {
@@ -255,14 +257,14 @@ fn destination(prefix: &Path, file: &database::Install) -> PathBuf {
     prefix.join(file.dir).join(Path::new(file.path).file_name().unwrap_or_default())
 }
 
-/// Build the program of a wrapper installed by `jig install --proxy` in a prefix, which is found by the wrapper's path
-/// once the configuration is current, then reinstall the wrapper if it would be written differently, such as when its
-/// program has moved or `jig` has changed.
+/// Build the program of a wrapper which `jig install --proxy` installed in a prefix. The program is found from the
+/// wrapper's path, once the configuration is current. The wrapper is then reinstalled if it would now be written
+/// differently, such as when its program has moved or `jig` has changed.
 ///
-/// The `proxy-build` diagnostic is reported first if the configuration or the program is out of date, before the
-/// configuration is regenerated, so that it precedes any diagnostics from configuring. Its severity is that recorded
-/// when last configured, and as an error, nothing is configured or built. The build is quiet, so that only the
-/// diagnostic and the output of what it runs are shown.
+/// If the configuration or the program is out of date, the `proxy-build` diagnostic is reported first, before the
+/// configuration is regenerated, so that it comes before any diagnostics from configuring. Its severity is the one
+/// recorded when the project was last configured. If that is an error, nothing is configured or built. The build is
+/// quiet, so that only the diagnostic and the output of what runs are shown.
 ///
 /// Returns whether the wrapper was reinstalled, as it should then be run again.
 pub fn build_proxy(prefix: &Path, wrapper: &Path) -> Result<bool, Error> {

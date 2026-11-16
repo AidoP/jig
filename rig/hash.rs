@@ -1,12 +1,15 @@
-//! A fast hasher for the maps of paths a build looks up many times, as loading a graph and its state does: `FxHash`, as
-//! rustc uses, which takes eight bytes at a time.
+//! `FxHash`, the fast hasher rustc uses, for the maps a build looks up many times, such as those of its paths.
 //!
-//! It is not resistant to collisions chosen by an attacker, which a build's own paths are not.
+//! It hashes eight bytes at a time. It does not resist collisions chosen by an attacker, so it is only for keys the
+//! build makes itself.
 
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// A map with the fast hasher.
 pub type Map<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<Fx>>;
+
+/// A set with the fast hasher.
+pub type Set<K> = std::collections::HashSet<K, BuildHasherDefault<Fx>>;
 
 /// `FxHash`, which mixes each word into the hash by a rotation, an exclusive or and a multiplication.
 #[derive(Clone, Copy, Default)]

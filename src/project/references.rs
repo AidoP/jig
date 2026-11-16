@@ -89,10 +89,10 @@ impl Project {
         let target = self.value("target", file)?.data.coerce_string();
         self.value(&format!("{target}/{name}"), file)
     }
-    /// Returns an operand as what it names, where a path or a program is taken, if it is a name computed in `{}`, as
-    /// `{name}`, or a list of them, which names a crate, custom command, generated file or test, as a statement's name
-    /// computed in `{}` does, rather than as a string. A string which isn't in `{}`, or which names nothing else, is a
-    /// string, as before.
+    /// Resolves an operand given where a path or a program is expected. If it is a name computed in `{}`, as
+    /// `{name}`, or a list of those, and it names a crate, custom command, generated file or test, it becomes a
+    /// reference to that, as a statement's name computed in `{}` would. Any other string, whether it is not in `{}`
+    /// or names none of those, stays a string.
     pub(super) fn computed_reference(&self, operand: Operand) -> Operand {
         if operand.coerce != Coercion::Any {
             return operand;
@@ -139,8 +139,8 @@ impl Project {
     }
     /// Take the attribute of what a reference refers to, a property, a declared target or a test, after its name.
     ///
-    /// A crate or custom command is referred to by the value of a property, such as the one with its name, so it is
-    /// looked for first, while a test has its own names, so it is looked for last.
+    /// A crate or custom command is referred to through the value of a property, such as the one with its name, so
+    /// properties are looked up first. Tests have names of their own, so they are looked up last.
     pub(super) fn parse_named_attribute(&mut self, parser: &mut Parser, name: &str, span: Span, start: usize) -> Option<Operand> {
         let (attribute, attribute_span) = self.parse_attribute_access(parser)?;
         let operand_span = parser.span_from(start);

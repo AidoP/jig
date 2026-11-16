@@ -1,7 +1,7 @@
 //! rustup toolchains, which are selected with `+<toolchain>` before the command, as with cargo.
 //!
-//! A toolchain is selected by running rustup's proxies, such as `rustc`, with `RUSTUP_TOOLCHAIN`, which jig gives each
-//! command it runs, and rig's graph gives each of its commands, once the project is configured with it.
+//! rustup's proxies, such as `rustc`, run the toolchain named by `RUSTUP_TOOLCHAIN`. jig sets the variable for each
+//! command it runs, and once a project is configured with a toolchain, rig's graph sets it for each of its commands.
 
 use std::ffi::OsString;
 use std::iter::Peekable;
@@ -48,14 +48,16 @@ pub fn apply(command: &mut Command, toolchain: Option<&str>) {
 /// The channel's manifest which rustup writes to a toolchain's sysroot when it installs or updates it.
 const MANIFEST: &str = "lib/rustlib/multirust-channel-manifest.toml";
 
-/// Returns what identifies a toolchain, by which rig caches what it compiles, and finds a worker which has it: a hash
-/// of rustc's version, with its commit and host, from `rustc -vV`, and of the channel's manifest which rustup writes to
-/// the sysroot when it installs or updates the toolchain, or without it, of rustc in the sysroot, so that the toolchain
-/// has the same identity wherever it is installed, and whichever components it has. The file hashed is returned too,
-/// if it exists.
+/// Returns the identity of a toolchain, by which rig caches what it compiles and finds a worker which has it. The
+/// file which was hashed is returned too, if it exists.
 ///
-/// The name the toolchain was chosen by is not part of it, as one toolchain has several, and a command which is given
-/// one has it in its action.
+/// The identity is a hash of rustc's version, commit and host, from `rustc -vV`, and of the channel's manifest,
+/// which rustup writes to the sysroot when it installs or updates the toolchain. Without a manifest, the `rustc` in
+/// the sysroot is hashed instead. A toolchain therefore has the same identity wherever it is installed, and
+/// whichever components it has.
+///
+/// The name the toolchain was chosen by is not part of its identity, as one toolchain goes by several names. A
+/// command which is given a name has it in its action anyway.
 pub fn identity(verbose_version: &str, sysroot: &Path) -> (String, Option<PathBuf>) {
     let mut key = rig::cache::Key::new("jig toolchain");
     key.part(verbose_version.as_bytes());
@@ -88,9 +90,9 @@ pub fn release_identity(verbose_version: &str, sysroot: &Path) -> String {
     identity(&verbose_version, sysroot).0
 }
 
-/// Returns the name rustup installs a toolchain by, from the manifest of its channel in its sysroot: the version of a
-/// stable release, such as `1.97.0`, or the channel and date of a nightly or beta, such as `nightly-2026-11-03`, or
-/// `None` without the manifest, as for a toolchain which rustup did not install.
+/// Returns the name rustup installs a toolchain by, read from the channel's manifest in its sysroot: the version
+/// of a stable release, such as `1.97.0`, or the channel and date of a nightly or beta, such as
+/// `nightly-2026-11-03`. Returns `None` without a manifest, as for a toolchain which rustup did not install.
 pub fn install_name(sysroot: &Path) -> Option<String> {
     let manifest = std::fs::read_to_string(sysroot.join(MANIFEST)).ok()?;
     let value = |line: &str, key: &str| {
@@ -111,11 +113,12 @@ pub fn install_name(sysroot: &Path) -> Option<String> {
     valid.then_some(name)
 }
 
-/// Returns what a worker has, with its tags: the host of the `rustc` which is run without a toolchain, each toolchain
-/// rustup has, which is run with `RUSTUP_TOOLCHAIN`, and that `rustc`, which is the only one without rustup.
+/// Returns the capabilities of a worker with these tags: the host of the `rustc` which runs when no toolchain is
+/// chosen, and its toolchains. Those are each toolchain rustup has, which is run with `RUSTUP_TOOLCHAIN`, and that
+/// plain `rustc`, which is the only one if there is no rustup.
 ///
-/// What identifies each toolchain is kept in a file, `known`, by its sysroot, with the size and time of the file its
-/// identity is of, so that rustc is run only for a toolchain which is new, or has been updated.
+/// Each toolchain's identity is kept in a file, `known`, by its sysroot, with the size and time of the file the
+/// identity was made from. rustc is then only run for a toolchain which is new or has been updated.
 pub fn capabilities(tags: Vec<String>, known: &Path) -> rig::worker::Capabilities {
     let mut identified = Known::read(known);
     let mut rustup = Command::new("rustup");

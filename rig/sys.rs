@@ -13,10 +13,10 @@ mod windows;
 #[cfg(windows)]
 pub use windows::*;
 
-/// Returns the canonical path of a file, as [`std::fs::canonicalize`] does, but on Windows, as such a path is usually
-/// written, as `C:\dir` rather than the verbatim `\\?\C:\dir` Windows gives, so that it shares its prefix with the
-/// paths it is compared with, unless it is only valid as a verbatim path, such as one longer than Windows otherwise
-/// takes.
+/// Returns the canonical path of a file, as [`std::fs::canonicalize`] does, except on Windows. There the standard
+/// function gives a verbatim path, `\\?\C:\dir`, which shares no prefix with the paths it is compared with. This
+/// returns the usual form, `C:\dir`, unless the path is only valid as a verbatim path, such as one longer than
+/// Windows otherwise accepts.
 ///
 /// # Errors
 ///

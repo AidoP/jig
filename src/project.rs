@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, hash_map::Entry}, path::{Path, PathBuf}};
+use std::collections::hash_map::Entry;
+use std::path::{Path, PathBuf};
+
+// The maps are keyed by the configuration's own names and paths, so they use rig's fast hasher.
+use rig::hash::Map as HashMap;
 
 mod clippy;
 mod codegen;
@@ -36,16 +40,16 @@ use value::Ref;
 
 use customs::{Custom, Runner};
 
-/// Whether text has a line break, which a path cannot have, as a depfile lists each path on a line, with no escape for
-/// one.
+/// Whether text has a line break. A path cannot have one: a depfile lists each path on a line, and has no way to
+/// escape a line break.
 pub fn has_line_break(text: &str) -> bool {
     text.contains(['\n', '\r'])
 }
 
-/// The greatest depth of files being processed, each used by the one before, beyond which a `use` is an error, so that
-/// a file which uses itself with `force` stops before the stack overflows, which the stack the configuration is
-/// evaluated on, `CONFIGURE_STACK`, is made for, unoptimized. An optimized `jig` processes files about twice as deep
-/// within 8 MiB.
+/// The greatest depth to which files may use one another. A `use` any deeper is an error, so that a file which uses
+/// itself with `force` stops before the stack overflows. The stack the configuration is evaluated on,
+/// `CONFIGURE_STACK`, is sized for this depth in an unoptimized `jig`. An optimized `jig` could process files about
+/// twice as deep within 8 MiB.
 pub const MAX_USE_DEPTH: usize = 2048;
 
 pub struct Project {
@@ -87,11 +91,11 @@ pub struct Project {
     pub fatal: bool,
     /// The directory of what is built, from the `build-dir` property, once it has been used.
     build_dir: Option<PathBuf>,
-    /// The values given by `@with` which it has restored, which are no longer the values of their properties, but are
-    /// checked by a later declaration, as other values set before it are.
+    /// The values which `@with` gave and has since restored. They are no longer the values of their properties, but
+    /// a later declaration of the property still checks them, as it checks the other values set before it.
     reverted: Vec<usize>,
-    /// The start of the statement or meta-statement being processed, where a meta-statement can be inserted to apply to
-    /// it, unless it is an `@else`, which must be first.
+    /// The start of the statement or meta-statement being processed. A diagnostic can suggest inserting a
+    /// meta-statement there to apply to it, unless it is an `@else`, which must come first.
     meta_insertion: Option<Span>,
     /// The targets supported by the compiler, followed by those declared by `target` statements, in the order they were
     /// declared.
@@ -123,18 +127,18 @@ impl Project {
             root,
             files: Vec::new(),
             dependencies: Vec::new(),
-            linkers: HashMap::new(),
+            linkers: HashMap::default(),
             missing: Vec::new(),
             env: Vec::new(),
-            files_idx: HashMap::new(),
+            files_idx: HashMap::default(),
             later_declared: Vec::new(),
             clippy_lints: std::collections::BTreeSet::default(),
             use_depth: 0,
             properties: Vec::new(),
-            properties_idx: HashMap::new(),
+            properties_idx: HashMap::default(),
             values: Vec::new(),
-            property_values: HashMap::new(),
-            values_idx: HashMap::new(),
+            property_values: HashMap::default(),
+            values_idx: HashMap::default(),
             diagnostics: Vec::new(),
             overridden: 0,
             fatal: false,
@@ -143,18 +147,18 @@ impl Project {
             build_dir: None,
             targets: targets.into_iter().map(Target::builtin).collect(),
             targets_listed: false,
-            crates: HashMap::new(),
-            natives: HashMap::new(),
+            crates: HashMap::default(),
+            natives: HashMap::default(),
             customs: Vec::new(),
-            commands_idx: HashMap::new(),
+            commands_idx: HashMap::default(),
             generated: Vec::new(),
-            generated_idx: HashMap::new(),
-            tests_idx: HashMap::new(),
+            generated_idx: HashMap::default(),
+            tests_idx: HashMap::default(),
             runners: Vec::new(),
             toolchain: None,
             cache: None,
             cache_settings: crate::cache::Settings::default(),
-            can_run: HashMap::new(),
+            can_run: HashMap::default(),
         }
     }
     pub fn file(&self, idx: usize) -> &File {
@@ -168,15 +172,15 @@ impl Project {
     }
     /// Process a file, unless it has already been processed and `force` is false.
     ///
-    /// Returns the index of the file if it is not processed, which is that of the latest time it was processed. A file
-    /// which is forced is processed again with a new index, even while it is still being processed, which recurses
-    /// until it stops using itself, or the depth of the files being processed reaches [`MAX_USE_DEPTH`].
+    /// Returns `None` if the file is processed, and otherwise the index it has from the latest time it was processed.
+    /// A forced file is processed again, under a new index, even while it is still being processed. That recursion
+    /// ends when the file stops using itself, or when the depth of files reaches [`MAX_USE_DEPTH`].
     fn parse_forced(&mut self, file: File, force: bool) -> Option<usize> {
-        // a file can be referred to by many paths, so identify it by its device and inode, which takes a single `stat`
-        // rather than reading every symbolic link in its path, as finding its canonical path would
+        // A file can be reached by many paths, so it is identified by its device and inode. That takes one `stat`,
+        // where finding its canonical path would read every symbolic link along the path.
         let idx = self.files.len();
-        // the time the file was processed before, which is the latest again once this one has finished, so that using it
-        // without `force` while that time is still being processed is found to be a cycle
+        // The index this file had when it was processed before. It is put back once this processing has finished, so
+        // that using the file without `force` while the earlier processing is still going on is seen as a cycle.
         let mut previous = None;
         // a builtin file, such as a profile, is processed each time it is used
         if !file.builtin {
@@ -285,15 +289,15 @@ impl Project {
         }
         Some(&self.values[*idx?])
     }
-    /// The directory of what is built, from the `build-dir` property, relative to the project root.
-    ///
-    /// The property is read-only once this is used, so that everything is built in the same directory.
     /// Returns the names of the properties which are declared, in no order.
     #[cfg(test)]
     pub fn declared(&self) -> Vec<&str> {
         let declared = self.properties_idx.iter().filter(|&(_, &id)| self.properties[id].is_some());
         declared.map(|(name, _)| name.as_str()).collect()
     }
+    /// The directory of what is built, from the `build-dir` property, relative to the project root.
+    ///
+    /// The property is read-only once this is used, so that everything is built in the same directory.
     pub fn build_dir(&mut self) -> PathBuf {
         if let Some(dir) = &self.build_dir {
             return dir.clone();
@@ -315,7 +319,6 @@ impl Project {
         };
         self.values[value].data.coerce_string()
     }
-    /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.
     /// Returns `change-detection`, the way rig finds that the files of an edge have changed, which is `timestamp` or
     /// `hash` if it is valid.
     pub fn change_detection(&self) -> String {
@@ -360,6 +363,7 @@ impl Project {
             download: string("download"),
         }
     }
+    /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.
     pub fn install_prefix(&self) -> String {
         let Some(&value) = self.values_idx.get("install-prefix") else {
             return String::new();
@@ -370,15 +374,10 @@ impl Project {
     ///
     /// The crates declared by one statement, for several targets or with `@for`, are ordered by name and target.
     pub(super) fn crate_keys(&self) -> Vec<(String, String)> {
-        let mut keys = Vec::new();
-        for key in self.crates.keys() {
-            keys.push(key.clone());
-        }
-        keys.sort_by(|lhs, rhs| {
-            let (lhs_span, rhs_span) = (self.crates[lhs].name_span, self.crates[rhs].name_span);
-            (lhs_span.file, lhs_span.offset, lhs).cmp(&(rhs_span.file, rhs_span.offset, rhs))
-        });
-        keys
+        let position = |c: &rust::Crate| (c.name_span.file, c.name_span.offset);
+        let mut keys: Vec<_> = self.crates.iter().map(|(key, c)| (position(c), key)).collect();
+        keys.sort_unstable();
+        keys.into_iter().map(|(_, key)| key.clone()).collect()
     }
     /// Check for various conditions that cannot be evaluated as errors until reading has completed.
     /// - Unknown targets for crates, as a `target` statement may come later.
@@ -407,10 +406,10 @@ impl Project {
                 undeclared.push(UndeclaredValue { name: name.clone(), value: idx });
             }
         }
-        // a value `@with` gave a property, and restored, needs no declaration, as it is only for the statements after it
+        // a value which `@with` gave and restored needs no declaration, as it only applied to the statements after it
         undeclared.sort_by_key(|undeclared| undeclared.value);
-        // the names which `defined` or `select` were given before they were declared, unless they were set, which is
-        // reported where they were, once for where each was given, as a call in a loop is evaluated several times
+        // Report the names given to `defined` or `select` which were never declared or set. Each is reported once for
+        // each place it was given, as a call inside a loop is evaluated several times.
         let mut reported = std::collections::HashSet::new();
         for (name, span) in std::mem::take(&mut self.later_declared) {
             let declared = self.properties_idx.get(&name).is_some_and(|&id| self.properties[id].is_some());
@@ -546,7 +545,7 @@ impl File {
     }
     /// A file with its contents, which need not exist.
     pub fn new(path: PathBuf, data: String) -> Self {
-        Self { data, path, locals: HashMap::new(), active: false, used: None, builtin: false }
+        Self { data, path, locals: HashMap::default(), active: false, used: None, builtin: false }
     }
     /// The builtin file with the name, such as `msrv` or `profile/<name>`, if there is one.
     pub fn builtin(name: &str) -> Option<Self> {

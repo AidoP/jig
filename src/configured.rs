@@ -22,19 +22,19 @@ pub struct Configured {
 impl Configured {
     /// Find the project which contains the working directory, which must have been configured.
     ///
-    /// The configuration is brought up to date, as the build directory may change, where the output of regenerating
-    /// it is written to `output`.
+    /// The configuration is brought up to date first, which may change the build directory. What regenerating it
+    /// shows is written to `output`.
     pub fn find(output: Output) -> Result<Self, Error> {
         let mut project = Self::locate()?;
         project.check_jig()?;
         project.reconfigure(output, false)?;
         Ok(project)
     }
-    /// Find the project which contains the working directory, as [`Self::find`] does, without bringing the
-    /// configuration up to date, so that the build directory may be changed by [`Self::reconfigure`].
+    /// Find the project which contains the working directory, as [`Self::find`] does, but without bringing the
+    /// configuration up to date. [`Self::reconfigure`] does that, and may change the build directory.
     ///
-    /// A path which the configuration found was missing, or an environment variable it read, regenerates the graph
-    /// when it is created or changes, as the graph's depfile lists them, which rig's plan of the graph finds.
+    /// The graph's depfile lists the paths the configuration found missing and the environment variables it read, so
+    /// rig's plan regenerates the graph when one of those is created or changes.
     pub fn locate() -> Result<Self, Error> {
         let root = ensure(None)?;
         let bytes = read(&root)?;
@@ -43,8 +43,8 @@ impl Configured {
         let toolchain = toolchain(&database);
         Ok(Self { root, build_dir, toolchain, cache: cache_settings(&database) })
     }
-    /// Report `other-jig` if the running `jig` is not the one which configured the project, which regenerates its
-    /// graph.
+    /// Report `other-jig` if the running `jig` is not the one which configured the project, which is the one that
+    /// regenerates its graph.
     ///
     /// The wrappers installed by `jig install --proxy` are not reported, as they run the `jig` they were installed by.
     fn check_jig(&self) -> Result<(), Error> {
@@ -124,13 +124,14 @@ fn toolchain(database: &database::Database) -> Option<String> {
     (!database.toolchain.is_empty()).then(|| database.toolchain.into())
 }
 
-/// Configure the project which contains the working directory if it has not been, or cannot be built as it was, and
-/// with a toolchain if one is given which it is not configured with, returning its root.
+/// Configure the project which contains the working directory, if needed, and return its root. It is configured
+/// if it never has been, if it can no longer be built as it was configured, or if `toolchain` is given and is not
+/// the one it is configured with.
 ///
-/// The project root is the closest directory to the working directory, or it itself, with a database, or without one,
-/// with a `Jig` file. It is configured again from the root file it was configured with, and with its toolchain unless
-/// another is given, when its database is of another version, or its graph is missing, such as when the build
-/// directory has been removed.
+/// The project root is the closest directory, starting from the working directory, which has a database, or
+/// failing that, a `Jig` file. A project "can no longer be built" when its database is of another version, or its
+/// graph is missing, such as after the build directory was removed. It is then configured again from the root file
+/// it was configured with, and with the same toolchain unless another is given.
 pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     let root = if let Some(root) = database::root() {
         root
@@ -164,9 +165,9 @@ pub fn ensure(toolchain: Option<&str>) -> Result<PathBuf, Error> {
     Ok(root)
 }
 
-/// Returns the path of the running `jig`, which is the path it was run by if that is absolute, as a wrapper installed
-/// by `jig install --proxy` runs it, rather than the path of the running executable, which `jig build --proxy` may
-/// have replaced by building it.
+/// Returns the path of the running `jig`. If it was run by an absolute path, as a wrapper installed by
+/// `jig install --proxy` runs it, that path is used. The path of the running executable is not reliable there, as
+/// `jig build --proxy` may have replaced the file by building it.
 pub fn jig() -> std::io::Result<PathBuf> {
     match std::env::args_os().next() {
         Some(path) if Path::new(&path).is_absolute() => Ok(path.into()),

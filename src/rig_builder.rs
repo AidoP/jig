@@ -1,8 +1,8 @@
-//! rig, which builds the graph from `graph` in the build directory, as [`crate::rig_graph`] writes it, keeping the
-//! state of the build in `.rig` beside it.
+//! Runs rig on the graph [`crate::rig_graph`] writes, `graph` in the build directory. The state of the build is kept
+//! in `.rig` beside it.
 //!
-//! `jig build` takes its options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge would
-//! run, `-v` to show commands rather than descriptions, and `--quiet`.
+//! `jig build` passes on its options: `-j <jobs>`, `-k <failures>`, `-n` for a dry run, which shows why each edge
+//! would run, `-v` to show commands rather than descriptions, and `--quiet`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -80,20 +80,21 @@ impl Args {
     }
 }
 
-/// The graph and state which bringing the graph up to date loaded, while the graph is as it was, which the build which
-/// follows it in the same process takes, rather than loading them again, as loading a large graph takes most of a build
-/// which has nothing to do.
+/// The graph and state loaded while bringing the graph up to date, kept for the build which follows in the same
+/// process when that left the graph unchanged. Loading a large graph takes most of the time of a build with nothing
+/// to do, so it is not loaded twice.
 static LOADED: std::sync::Mutex<Option<Loaded>> = std::sync::Mutex::new(None);
 
 struct Loaded {
-    /// The graph's file, and what it was when it was loaded, by which it is known not to have changed.
+    /// The graph's file, and what it was when it was loaded, from which it is known not to have changed since.
     path: PathBuf,
     file: Option<FileId>,
     graph: rig::Graph,
     state: rig::state::State,
 }
 
-/// What a file is: its inode, size and modification time, which change when it is replaced or written.
+/// The identity of a file's contents: its inode, size and modification time, which change when the file is
+/// replaced or written.
 type FileId = (u64, u64, std::time::SystemTime);
 
 fn file_id(path: &Path) -> Option<FileId> {
@@ -101,8 +102,8 @@ fn file_id(path: &Path) -> Option<FileId> {
     Some((crate::platform::inode(&metadata), metadata.len(), metadata.modified().ok()?))
 }
 
-/// Close the state which was left loaded, if it was, which unlocks it for another build, as a program which runs may
-/// start one.
+/// Close the state which was kept loaded, if any. That unlocks it, which matters before running a program, as the
+/// program may start a build of its own.
 pub fn release() {
     if let Ok(mut loaded) = LOADED.lock()
         && let Some(loaded) = loaded.take()
@@ -116,8 +117,8 @@ impl Rig<'_> {
     fn graph(&self) -> Result<rig::Graph, Error> {
         rig::Graph::load(&self.build_dir.join(rig_graph::FILE)).map_err(Error::Rig)
     }
-    /// Returns the graph and state, as they were left loaded if the graph has not changed since, or loaded, with what
-    /// the graph's file was when it was loaded.
+    /// Returns the graph and state, with what the graph's file was when it was loaded. Those which were kept loaded
+    /// are reused if the graph's file has not changed since, and otherwise they are loaded.
     fn loaded(&self) -> Result<(rig::Graph, rig::state::State, Option<FileId>), Error> {
         let path = self.build_dir.join(rig_graph::FILE);
         let left = LOADED.lock().ok().and_then(|mut loaded| loaded.take());
@@ -131,21 +132,22 @@ impl Rig<'_> {
         let file = file_id(&path);
         Ok((self.graph()?, self.state()?, file))
     }
-    /// The variables a build gives what it runs, beside those it inherits, by which it stamps the variables an edge
-    /// read: the toolchain the project is configured with.
+    /// The variables a build gives what it runs, beside those inherited: the toolchain the project is configured
+    /// with. The variables an edge read are stamped with these applied.
     fn env(&self) -> Vec<(String, String)> {
         self.toolchain.map(|toolchain| ("RUSTUP_TOOLCHAIN".into(), toolchain.into())).into_iter().collect()
     }
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }
-    /// The options of a build, with the cache, unless it is off, as the project was configured.
+    /// The options of a build, with the cache the project was configured with, unless it is off.
     fn options(&self) -> Result<rig::exec::Options, Error> {
         let mut options = rig::exec::Options::new(self.build_dir);
         options.env.extend(self.env());
-        // rustup's proxies, such as `rustc`, find the toolchain with these, and `RUSTUP_TOOLCHAIN` chooses it, which is
-        // identified by its contents instead, as it was when the project was configured, which it is again when the
-        // variable changes, so that a cached command runs the toolchain it is identified by, rather than rustup's default
+        // Cached edges inherit these as well as the default locating variables. rustup's proxies, such as `rustc`, need
+        // these to find a toolchain, and `RUSTUP_TOOLCHAIN` chooses it. The toolchain's identity is its contents as
+        // they were when the project was configured, and the project is configured again when the variable changes.
+        // A cached command therefore always runs the toolchain it is identified by, not rustup's default.
         options.locating.extend(["RUSTUP_HOME", "CARGO_HOME", "RUSTUP_TOOLCHAIN"].map(String::from));
         options.cache = self.cache.open(true)?;
         // workers run cached edges, whose outputs are fetched into the cache
@@ -171,14 +173,14 @@ impl Rig<'_> {
         output: Output,
     ) -> Result<bool, Error> {
         let (graph, mut state, file) = self.loaded()?;
-        // rustc and clippy print in colour, which is left out where the output is not in colour
+        // rustc and clippy always print in colour; the colour is removed if the output does not take it
         let (mut out, colour, fd): (Box<dyn std::io::Write>, bool, i32) = match output {
             Output::Stdout => (Box::new(std::io::stdout()), crate::colour(&std::io::stdout()), 1),
             Output::Stderr => (Box::new(std::io::stderr()), crate::colour(&std::io::stderr()), 2),
         };
         let (quiet, verbose) = (console.quiet, console.verbose);
         let mut console = rig::exec::Console::new(&mut out, quiet, verbose, colour);
-        // with escape sequences, on a terminal, what is running is listed in place
+        // on a terminal which takes escape sequences, what is running is shown in place
         if colour && let Some(width) = rig::exec::terminal_width(fd) {
             console = console.in_place(width);
         }
@@ -188,7 +190,7 @@ impl Rig<'_> {
         } else {
             rig::exec::build(&graph, &mut state, options, targets, &mut console)
         };
-        // what ran elsewhere is told, as it is not otherwise shown
+        // say how many edges ran on workers, which nothing else shows
         if let Ok(report) = &built
             && report.remote > 0
             && !quiet
@@ -203,13 +205,13 @@ impl Rig<'_> {
         }
         let path = self.build_dir.join(rig_graph::FILE);
         if targets == [rig_graph::FILE] && file.is_some() && file == file_id(&path) {
-            // what brought the graph up to date, without changing it, leaves it for the build which follows
+            // bringing the graph up to date did not change it, so keep it loaded for the build which follows
             if let Ok(mut loaded) = LOADED.lock() {
                 *loaded = Some(Loaded { path, file, graph, state });
             }
         } else {
-            // the state is closed, which unlocks it for another build, while the graph, which may be large, is not
-            // freed, as the process ends soon after
+            // Close the state, which unlocks it for another build. The graph, which may be large, is deliberately not
+            // freed, as the process ends soon and freeing it takes time.
             drop(state);
             std::mem::forget(graph);
         }
@@ -222,11 +224,11 @@ impl Rig<'_> {
             Err(error) => Err(Error::Rig(error)),
         }
     }
-    /// Returns whether targets are up to date, from a plan, which runs nothing.
+    /// Returns whether targets are up to date, by planning, which runs nothing.
     fn planned(&self, targets: &[&str]) -> Result<bool, Error> {
         let (graph, state, file) = match self.loaded() {
             Ok(loaded) => loaded,
-            // a build is running, so they may not be
+            // the state is locked by a running build, so the targets may not be up to date
             Err(Error::Rig(rig::Error::Locked(_))) => return Ok(false),
             Err(error) => return Err(error),
         };
@@ -236,7 +238,7 @@ impl Rig<'_> {
             Err(rig::Error::UnknownTarget(_) | rig::Error::MissingInput { .. } | rig::Error::Cycle(_)) => Ok(false),
             Err(error) => Err(Error::Rig(error)),
         };
-        // what was left loaded is left for what follows, as planning changes neither
+        // planning changed neither the graph nor the state, so keep them loaded for what follows
         drop(stamps);
         if let Ok(mut loaded) = LOADED.lock() {
             *loaded = Some(Loaded { path: self.build_dir.join(rig_graph::FILE), file, graph, state });
@@ -251,7 +253,8 @@ struct Console {
     verbose: bool,
 }
 
-/// What times each command of a build, for `--timings`, from when it starts until it finishes, before what shows it.
+/// An observer which times each command of a build, for `--timings`, from when it starts until it finishes, and
+/// passes everything on to the observer which shows the build.
 struct Timed<'a> {
     inner: &'a mut dyn rig::exec::Observer,
     started: HashMap<rig::EdgeId, std::time::Instant>,
@@ -303,7 +306,7 @@ impl Rig<'_> {
             options.jobs = jobs.max(1);
         }
         options.keep_going = args.keep_going.unwrap_or(usize::from(!request.keep_going));
-        // as the graph has them, with `/`, which a path on Windows may be written without
+        // in the form the graph has them, with `/`, which a path written on Windows may not use
         let given = args.targets.iter().map(|target| crate::rig_graph::path_string(Path::new(target)));
         let given: Vec<String> = given.collect();
         let mut targets: Vec<&str> = given.iter().map(String::as_str).collect();
@@ -314,8 +317,8 @@ impl Rig<'_> {
         let console = Console { quiet: request.quiet || args.quiet, verbose: args.verbose };
         self.run(&targets, &options, console, request.output)
     }
-    /// Generate the graph again if it is out of date, which writes what it shows to `output`, unless it is `quiet`,
-    /// except that nothing was out of date.
+    /// Generate the graph again if it is out of date. What that shows is written to `output`, unless `quiet`.
+    /// Nothing is shown if the graph was up to date.
     pub fn regenerate(&self, quiet: bool, output: Output) -> Result<(), Error> {
         crate::timings::step("configure", || self.regenerate_untimed(quiet, output))
     }
@@ -337,12 +340,13 @@ impl Rig<'_> {
 }
 
 impl Rig<'_> {
-    /// Bring the graph up to date in this process, rather than by running `jig generate`, if it is only the edge which
-    /// generates it which is out of date, and its configure tool is the `jig` which is running, returning whether it
-    /// did. Otherwise, as when the project builds the tool which configures it, which is built first, rig builds it.
+    /// Bring the graph up to date within this process, without running `jig generate`, and return whether that was
+    /// done. It is only done if the edge which generates the graph is the only one out of date, and its configure
+    /// tool is the `jig` which is running. Otherwise rig builds the graph: a project which builds the tool that
+    /// configures it, for example, must have the tool built first.
     ///
-    /// The graph and state which were loaded to plan it are left for the build which follows, with the edge recorded as
-    /// up to date in the state, as rig records an edge it runs.
+    /// The graph and state loaded to plan this are kept for the build which follows. The edge is recorded as up to
+    /// date in the state, as rig would record an edge it ran.
     fn regenerate_here(&self, quiet: bool, output: Output) -> Result<bool, Error> {
         let (graph, mut state, file) = match self.loaded() {
             Ok(loaded) => loaded,
@@ -382,16 +386,16 @@ impl Rig<'_> {
                 Output::Stderr => std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes()),
             };
         }
-        // the graph is not freed, as the process ends soon after, and is loaded again once it is written
+        // the old graph is deliberately not freed, as the process ends soon; it is loaded again once it is written
         std::mem::forget(graph);
-        // from the project root, as the edge runs it, which the configuration's paths are relative to
+        // configure from the project root, as the edge would, since the configuration's paths are relative to it
         let cwd = std::env::current_dir().map_err(|error| Error::Read(".".into(), error))?;
         std::env::set_current_dir(&dir).map_err(|error| Error::Read(dir.clone(), error))?;
         let generated = crate::generate(input, toolchain.as_deref());
         let restored = std::env::set_current_dir(&cwd).map_err(|error| Error::Read(cwd, error));
         generated?;
         restored?;
-        // the edge is recorded as up to date, unless the graph was written elsewhere, as the build directory changed
+        // record the edge as up to date, unless the build directory changed, so that the graph was written elsewhere
         let written = file_id(&path);
         if written == file {
             drop(state);
@@ -404,8 +408,8 @@ impl Rig<'_> {
     }
     /// Show what would run, and why, without running it.
     ///
-    /// The graph and state are those bringing the graph up to date left loaded, which hold the state's lock, as a
-    /// build takes them, and the variables are stamped as the build would give them.
+    /// The graph and state are those kept loaded from bringing the graph up to date, which hold the state's lock, as
+    /// a build would. Variables are stamped as the build would give them.
     fn dry_run(&self, targets: &[&str], output: Output) -> Result<bool, Error> {
         use std::io::Write;
         let (graph, state, _) = self.loaded()?;
@@ -429,22 +433,23 @@ impl Rig<'_> {
     }
 }
 
-/// Record the edge which generates the graph as up to date, once `jig generate` has written it, so that the first
-/// build does not generate it again, as rig would otherwise, without a record of it.
+/// Record the edge which generates the graph as up to date, once `jig generate` has written the graph. Without a
+/// record, rig would run the edge on the first build, and generate the graph a second time.
 ///
-/// Nothing is recorded if the state is in use, as when rig runs the edge itself, and records it once it has run.
+/// Nothing is recorded if the state is in use. That is the case when rig itself is running the edge, and rig then
+/// records it once it has run.
 pub fn record_generator(graph: &rig::Graph, build_dir: &Path) -> Result<(), Error> {
     let mut state = match rig::state::State::open(&build_dir.join(STATE)) {
         Ok(state) => state,
         Err(rig::Error::Locked(_)) => return Ok(()),
         Err(error) => return Err(Error::Rig(error)),
     };
-    // as the edge which ran `jig generate` gives it its variables, which it inherits then
+    // stamp the variables as the edge which runs `jig generate` would see them
     record_generator_in(graph, build_dir, &mut state, &[])
 }
 
-/// Returns how the edge which generates the graph runs the configure tool, if it is the `jig` which is running: the
-/// directory it runs in, the root build file, and the toolchain, if it is given one.
+/// Returns how the edge which generates the graph runs its configure tool, if the tool is the `jig` which is
+/// running: the directory it runs in, the root build file, and the toolchain, if one is given.
 fn generated_by(graph: &rig::Graph, edge: rig::EdgeId) -> Option<(PathBuf, PathBuf, Option<String>)> {
     let data = graph.edge(edge);
     let rig::EdgeKind::Command(exec) = data.kind() else {
@@ -458,8 +463,8 @@ fn generated_by(graph: &rig::Graph, edge: rig::EdgeId) -> Option<(PathBuf, PathB
     Some((PathBuf::from(exec.dir.as_ref()?), input.into(), toolchain))
 }
 
-/// Returns the toolchain and the root build file of the arguments of `jig [+<toolchain>] generate <input>`, or `None`
-/// if they are not those.
+/// Parses the arguments of `jig [+<toolchain>] generate <input>` into the toolchain and the root build file.
+/// Returns `None` if the arguments are not of that form.
 fn generate_args(args: &[String]) -> Option<(Option<String>, &str)> {
     let (toolchain, args) = match args.split_first()? {
         (first, rest) if first.starts_with('+') => (Some(first[1..].to_string()), rest),

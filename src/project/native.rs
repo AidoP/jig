@@ -1,6 +1,8 @@
-//! Static libraries of C and assembly, which are compiled by a C compiler, archived, and linked into the crates which
-//! use them, and the properties which give their compilers, archivers and flags, `c/<name>` and `asm/<name>`, and
-//! `c/<target>/<name>` for a target.
+//! Libraries and executables of C, C++ and assembly. Their sources are compiled by a C compiler, then archived or
+//! linked, and the libraries are linked into the crates which use them.
+//!
+//! Also the properties which give their compilers, archivers and flags: `c/<name>` and `asm/<name>`, and
+//! `c/<target>/<name>` for a single target.
 
 use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,7 @@ use super::Project;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Language {
     C,
-    /// Assembly, which is preprocessed, by `.S` and `.sx`, or is not, by `.s`.
+    /// Assembly: preprocessed for `.S` and `.sx`, and not for `.s`.
     Assembly,
     /// C++, by `.cc`, `.cpp` and `.cxx`.
     Cxx,
@@ -42,12 +44,12 @@ pub struct Source {
     pub language: Language,
 }
 
-/// What is built from C and assembly, the objects of whose sources are archived or linked.
+/// The kind of thing built from C and assembly, which decides whether its objects are archived or linked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NativeKind {
     /// A static library, `lib<name>.a`, which crates, shared libraries and executables link.
     StaticLibrary,
-    /// A shared library, linked by the C compiler, which crates, shared libraries and executables link, and load as
+    /// A shared library, linked by the C compiler. Crates, shared libraries and executables link it, and load it as
     /// they run.
     SharedLibrary,
     /// A program, linked by the C compiler.
@@ -68,7 +70,7 @@ impl NativeKind {
     }
 }
 
-/// A static library or an executable, of objects compiled from C and assembly, for a target.
+/// A library or an executable for a target, made of objects compiled from C, C++ and assembly.
 pub struct Native {
     pub kind: NativeKind,
     pub name: String,
@@ -79,7 +81,7 @@ pub struct Native {
     pub sources: Vec<Source>,
     /// The directories passed with `-I`.
     pub include: Vec<PathBuf>,
-    /// The directories which what uses the library is compiled with too.
+    /// The include directories which are also passed when compiling whatever uses the library.
     pub public_include: Vec<PathBuf>,
     /// The macros passed with `-D`, as `<name>` or `<name>=<value>`.
     pub defines: Vec<String>,
@@ -89,8 +91,8 @@ pub struct Native {
     pub uses: Vec<rust::Use>,
     /// Whether every object is linked, even one nothing refers to.
     pub whole_archive: bool,
-    /// Whether a static library is linked as its objects, in the order of its sources, rather than from an archive,
-    /// which is not made.
+    /// Whether a static library is linked as its objects, in the order of its sources, rather than from an archive.
+    /// No archive is then made.
     pub link_objects: bool,
     /// What is built before the library's sources are compiled, but is not an input.
     pub depends: Vec<PathBuf>,
@@ -100,16 +102,16 @@ pub struct Native {
     pub default: bool,
     /// The compiler, and its first arguments.
     pub compiler: Vec<String>,
-    /// What identifies the compiler in rig's cache, if rig caches and it is found, as
-    /// [`Project::identify_static_libraries`] finds it once the configuration is evaluated.
+    /// The identity of the compiler in rig's cache, if rig caches and the compiler is found.
+    /// [`Project::identify_static_libraries`] sets it once the configuration is evaluated.
     pub cache: Option<String>,
     /// The C++ compiler, and its first arguments, if it has C++ sources.
     pub cxx: Vec<String>,
-    /// What identifies the C++ compiler in rig's cache, as `cache` does the C compiler.
+    /// The identity of the C++ compiler in rig's cache, as `cache` is that of the C compiler.
     pub cxx_cache: Option<String>,
     /// The arguments for C++ sources, from `cxx/flags`, after those derived from the codegen options.
     pub cxx_flags: Vec<String>,
-    /// The library of the C++ runtime, from `cxx/runtime`, which what links a static library with C++ sources links.
+    /// The library of the C++ runtime, from `cxx/runtime`. Whatever links a static library with C++ sources links it.
     pub cxx_runtime: String,
     /// The archiver, and its first arguments.
     pub archiver: Vec<String>,
@@ -117,12 +119,12 @@ pub struct Native {
     pub c_flags: Vec<String>,
     /// The arguments for assembly sources, from `asm/flags`, after those derived from the codegen options.
     pub asm_flags: Vec<String>,
-    /// The arguments of the compiler as it links an executable, from `c/link-flags`, followed by its own.
+    /// The arguments the compiler is given when it links, from `c/link-flags`, followed by the executable's own.
     pub link_flags: Vec<String>,
     /// The linker script of an executable or shared library, which replaces that of its target.
     pub link_script: Option<PathBuf>,
-    /// The directories an executable or shared library looks for the shared libraries it uses in as it runs, as
-    /// `-Wl,-rpath,<dir>`.
+    /// The directories where an executable or shared library looks, as it runs, for the shared libraries it uses,
+    /// passed as `-Wl,-rpath,<dir>`.
     pub rpath: Vec<String>,
     /// Where `jig install` installs an executable, if it does.
     pub install: Install,
@@ -133,12 +135,13 @@ impl Native {
     pub fn has_cxx(&self) -> bool {
         self.sources.iter().any(|source| source.language == Language::Cxx)
     }
-    /// The archive of a static library, `lib<name>.a`, in its own directory, so that the linker finds it only where it
-    /// is used, or the program of an executable, `<build-dir>/<target>/<name>`, as a binary crate's is.
+    /// What is built. For a static library it is the archive, `lib<name>.a`, in the library's own directory, so that
+    /// the linker only finds it where it is used. For an executable it is the program, `<build-dir>/<target>/<name>`,
+    /// as for a binary crate.
     pub fn output(&self) -> PathBuf {
         match self.kind {
             NativeKind::StaticLibrary => self.dir.join(format!("lib{}.a", self.name)),
-            // as the platform's linker finds it by its name
+            // named as the platform's linker looks for it
             NativeKind::SharedLibrary if self.target.contains("-windows") => self.dir.join(format!("{}.dll", self.name)),
             NativeKind::SharedLibrary if self.target.contains("-apple-") => self.dir.join(format!("lib{}.dylib", self.name)),
             NativeKind::SharedLibrary => self.dir.join(format!("lib{}.so", self.name)),
@@ -148,9 +151,9 @@ impl Native {
             },
         }
     }
-    /// Whether its objects are compiled with `-fPIC`: those of a shared library, and of a static library for a target
-    /// with an operating system, which a shared library may link, as Rust's are for such a target, but not for Windows,
-    /// whose code is independent of where it is loaded without it.
+    /// Whether its objects are compiled with `-fPIC`. Those of a shared library are. So are those of a static library
+    /// for a target with an operating system, as a shared library may link it; Rust's own objects are built the same
+    /// way for such targets. Windows is the exception, as its code is position-independent without the flag.
     pub fn position_independent(&self) -> bool {
         let hosted = has_shared_libraries(&self.target) && !self.target.contains("-windows");
         match self.kind {
@@ -158,29 +161,30 @@ impl Native {
             NativeKind::Executable => false,
         }
     }
-    /// What is built of it, which is what links it: its objects, for a static library linked as them, or else its
-    /// output, or its import library for a shared library for Windows.
+    /// The files which whatever links it is given: its objects, for a static library linked as its objects, its
+    /// import library, for a shared library for Windows, and otherwise its output.
     pub fn linked_files(&self) -> Vec<PathBuf> {
         if self.link_objects {
             return self.sources.iter().map(|source| self.object(&source.path)).collect();
         }
         vec![self.link_output()]
     }
-    /// What links a library: its output, but for a shared library for Windows, which is linked by its import library,
-    /// `lib<name>.dll.a`, which its link writes beside it.
+    /// The file a library is linked by: its output, except for a shared library for Windows, which is linked by its
+    /// import library, `lib<name>.dll.a`. Linking the shared library writes the import library beside it.
     pub fn link_output(&self) -> PathBuf {
         match self.kind {
             NativeKind::SharedLibrary if self.target.contains("-windows") => self.dir.join(format!("lib{}.dll.a", self.name)),
             _ => self.output(),
         }
     }
-    /// The name of an executable for `jig run`, with its target if it is not the host target, as a crate's test is.
+    /// The name `jig run` knows an executable by: its name, with its target if that is not the host target, as for a
+    /// crate's test.
     pub fn short_name(&self, host: &str) -> String {
         if self.target == host { self.name.clone() } else { format!("{}@{}", self.name, self.target) }
     }
-    /// The object compiled from a source, in the library's directory, named by its path, so that sources with the same
-    /// name in different directories are different objects, and are different members of the archive, which are named
-    /// by their file names.
+    /// The object compiled from a source, in the library's directory. It is named after the source's whole path, not
+    /// only its file name, as members of an archive are named by file name alone: two sources with the same name in
+    /// different directories must give different objects and different members.
     pub fn object(&self, source: &Path) -> PathBuf {
         let mut name = String::new();
         for component in source.components() {
@@ -259,12 +263,12 @@ pub(super) const TOOLS: &[Tool] = &[
     },
 ];
 
-/// The number of [`TOOLS`] which every library or executable needs, which are before those of C++, which only one with
-/// C++ sources needs, so that `CXX` is not read for one without.
+/// The number of [`TOOLS`] which every library or executable needs. They come first. Those after them are for C++,
+/// and are only read for something with C++ sources, so that `CXX` is not read otherwise.
 const C_TOOLS: usize = 5;
 
-/// Returns the target and the tool of the name of a property for a target, `c/<target>/<name>` or `asm/<target>/<name>`,
-/// whether or not the target is known.
+/// Parses the name of a tool's property for a target, `c/<target>/<name>` or `asm/<target>/<name>`, into the target
+/// and the tool. The target need not be a known one.
 pub(super) fn target_tool(name: &str) -> Option<(&str, &'static Tool)> {
     let (namespace, rest) = name.split_once('/')?;
     let (target, tool) = rest.split_once('/')?;
@@ -284,21 +288,21 @@ fn target_variable(variable: &str, target: &str) -> String {
     format!("{variable}_{target}")
 }
 
-/// The names of libraries which the standard library of a target links, which a project's library replaces where it is
-/// used.
+/// The names of the libraries which the standard library of a target links. A project's library with one of these
+/// names replaces it wherever it is used.
 const SYSTEM_LIBRARIES: &[&str] = &["c", "m", "dl", "rt", "pthread", "util", "gcc", "gcc_s", "unwind"];
 
 impl Project {
-    /// Declare the properties of the tools and flags for C and assembly, which have no value until they are set, as their
-    /// defaults are read from the environment only when a library needs them.
+    /// Declare the properties of the tools and flags for C and assembly. They have no value until they are set: their
+    /// defaults are only read from the environment when a library needs them.
     pub fn declare_native_properties(&mut self) {
         for tool in TOOLS {
             let property = Property::new(tool.property.into(), Type::Any).info(tool.info);
             self.declare(tool.property.into(), Some(property));
         }
     }
-    /// Declare the property of a tool for a target, `c/<target>/<name>`, if it is the name of one for a target which is
-    /// builtin or has been declared, and it has not been declared. Returns whether it is the name of one.
+    /// Declare the property of a tool for a target, `c/<target>/<name>`, if `name` is the name of one, its target is
+    /// builtin or has been declared, and it is not declared yet. Returns whether `name` is the name of one.
     pub(super) fn declare_target_tool(&mut self, name: &str) -> bool {
         let Some((target, tool)) = target_tool(name) else {
             return false;
@@ -313,9 +317,15 @@ impl Project {
         self.declare(name.into(), Some(Property::new(name.into(), Type::Any).info(&info)));
         true
     }
-    /// Returns the arguments a tool or flags property gives for a target where `span` is: those of
-    /// `c/<target>/<name>`, or `c/<name>`, if set, or else of the variable for the target, `<variable>_<target>`, or,
-    /// for the host target, of the variable, or the fallback, where a variable's value is split at whitespace.
+    /// Returns the arguments which a tool or flags property gives for a target, as seen from `span`. The first of
+    /// these which is set is used:
+    ///
+    /// 1. the property for the target, `c/<target>/<name>`;
+    /// 2. the property, `c/<name>`;
+    /// 3. the environment variable for the target, `<variable>_<target>`;
+    /// 4. for the host target only, the environment variable, and then the fallback.
+    ///
+    /// The value of a variable is split at whitespace.
     fn tool_arguments(&mut self, tool: &Tool, target: &str, span: Span) -> Option<Vec<String>> {
         for name in [target_property(target, tool), tool.property.to_string()] {
             if let Some(value) = self.value(&name, span.file) {
@@ -323,7 +333,7 @@ impl Project {
                 return self.arguments(&operand);
             }
         }
-        // one which is not read from the environment, as `cxx/runtime`
+        // a property with no variable, such as `cxx/runtime`, is not read from the environment
         if tool.variable.is_empty() {
             return None;
         }
@@ -341,7 +351,8 @@ impl Project {
         }
         tool.fallback.map(|program| vec![program.to_string()])
     }
-    /// Returns the arguments of a value, a `str`, which is one, or a list of them, reporting another value.
+    /// Returns the arguments a value gives: a `str` is one argument, and a list is one for each item. Any other value
+    /// is reported.
     fn arguments(&mut self, operand: &Operand) -> Option<Vec<String>> {
         match &operand.data {
             Data::List(items) if items.iter().all(|item| !matches!(item, Data::List(_) | Data::Dict(_) | Data::None)) => {
@@ -354,9 +365,9 @@ impl Project {
             data => Some(vec![data.coerce_string()]),
         }
     }
-    /// Take a `static-library` or `executable` statement, with `source`, `target`, `include`, `public-include`,
-    /// `define`, `flags`, `use`, `depends`, `pass-env` and `default` attributes, and `whole-archive` for a static
-    /// library, or `link-flags`, `link-script` and the install attributes for an executable.
+    /// Take a `static-library`, `shared-library` or `executable` statement. All take the `source`, `target`,
+    /// `include`, `public-include`, `define`, `flags`, `use`, `depends`, `pass-env` and `default` attributes. A static
+    /// library also takes `whole-archive`, and an executable `link-flags`, `link-script` and the install attributes.
     pub(super) fn parse_native(&mut self, parser: &mut Parser, kind: NativeKind) {
         if !self.parse_space(parser) {
             parser.skip_statement();
@@ -366,7 +377,7 @@ impl Project {
             parser.skip_statement();
             return;
         };
-        // the name is part of the file the linker finds, `lib<name>.a`, and of the property `<target>/<name>`
+        // the name becomes part of a file name, `lib<name>.a`, and of a property's name, `<target>/<name>`
         if let Some((i, character)) = name.char_indices().find(|&(_, c)| matches!(c, '/' | '.')) {
             let span = if literal { Span { file: span.file, offset: span.offset + i, len: 1 } } else { span };
             parser.skip_statement();
@@ -394,7 +405,7 @@ impl Project {
         let mut link_flags = Vec::new();
         let mut link_script = None;
         let mut rpath = Vec::new();
-        // a shared library is executable, as a procedural macro is
+        // a shared library is installed as executable, as a procedural macro is
         let mut install = if kind == NativeKind::Executable { Install::executable() } else { Install::library(0o755) };
         let mut targets: Option<(Vec<String>, Span)> = None;
         while parser.indent().is_some() {
@@ -426,7 +437,7 @@ impl Project {
                         _ => depends.extend(paths),
                     }
                 },
-                // the names of libraries, as a crate's `use` takes the names of crates
+                // `use` takes the names of libraries, as a crate's `use` takes the names of crates
                 "use" => {
                     let names = if self.parse_space(parser) { self.parse_crate_names(parser) } else { None };
                     let Some((data, span)) = names else {
@@ -512,7 +523,8 @@ impl Project {
             let target = self.property("target", span).map(|target| target.data.coerce_string());
             (vec![target.unwrap_or_default()], span)
         });
-        // `-O` and `-g` from the codegen options where the library is declared, so that a profile reaches C too
+        // derive `-O` and `-g` from the codegen options in effect where the library is declared, so that a profile
+        // applies to C too
         let codegen = self.codegen_options(span, rust::Kind::Lib, &[], &targets);
         let build_dir = self.build_dir();
         for (i, target) in targets.iter().enumerate() {
@@ -529,7 +541,7 @@ impl Project {
                 tools.push(self.tool_arguments(tool, target, span));
             }
             let [compiler, archiver, c_flags, asm_flags, c_link_flags] = <[_; C_TOOLS]>::try_from(tools).ok().unwrap();
-            // C++'s, only for C++
+            // the C++ tools are only read for a library with C++ sources
             let has_cxx = sources.iter().any(|source| source.language == Language::Cxx);
             let (mut cxx, mut cxx_flags, mut cxx_runtime) = (Vec::new(), Vec::new(), String::new());
             if has_cxx {
@@ -547,7 +559,7 @@ impl Project {
                 let runtime = self.tool_arguments(runtime, target, span).and_then(|runtime| runtime.into_iter().next());
                 cxx_runtime = runtime.unwrap_or_else(|| default_cxx_runtime(target).into());
             }
-            // what is linked by the compiler, or as its objects, needs no archiver
+            // something linked by the compiler, or linked as its objects, needs no archiver
             let unarchived = kind.is_linked() || link_objects;
             let archiver = if unarchived { Some(archiver.unwrap_or_default()) } else { archiver };
             let archiver = archiver.filter(|a| !a.is_empty() || unarchived);
@@ -657,8 +669,8 @@ impl Project {
             }),
         }
     }
-    /// Returns the macros of a `define` attribute, which is a name, a list of them, or a dict of names to values, as
-    /// `<name>` or `<name>=<value>`.
+    /// Returns the macros of a `define` attribute, each as `<name>` or `<name>=<value>`. The attribute is a name, a
+    /// list of names, or a dict from names to values.
     fn defines(&mut self, operand: &Operand) -> Option<Vec<String>> {
         let scalar = |data: &Data| matches!(data, Data::Str(_) | Data::Unsigned(_) | Data::Signed(_) | Data::Bool(_));
         match &operand.data {
@@ -675,10 +687,13 @@ impl Project {
             },
         }
     }
-    /// Find what identifies the compiler of each static library in rig's cache, if rig caches, so that what it compiled
-    /// is fetched only for the same compiler: the contents of its program, and what the command prints of its version,
-    /// as with `ccache gcc` it is gcc's. The configuration depends on the program, so that it is configured again when
-    /// the compiler is replaced. A compiler which is not found is not cached, and its compiles fail as they run.
+    /// Find the identity in rig's cache of the compiler of each library, if rig caches, so that what one compiler
+    /// compiled is never fetched for another.
+    ///
+    /// The identity is made from the contents of the compiler's program and what the command prints as its version.
+    /// With `ccache gcc`, for example, the version printed is gcc's. The configuration is made to depend on the
+    /// program, so that the project is configured again when the compiler is replaced. A compiler which is not found
+    /// gets no identity, so it is not cached, and its compiles fail when they run.
     pub fn identify_static_libraries(&mut self) {
         if self.cache.is_none() {
             return;
@@ -706,10 +721,10 @@ impl Project {
             native.cxx_cache = cxx_compiler;
         }
     }
-    /// Returns what identifies a compiler, a program and its first arguments, if its program is found.
+    /// Returns the identity of a compiler, given as its program and first arguments, if the program is found.
     fn compiler_identity(&mut self, compiler: &[String]) -> Option<String> {
         let program = if compiler[0].contains('/') || (cfg!(windows) && compiler[0].contains('\\')) {
-            // relative to the project root, as rig runs it from the build directory rebased
+            // a path is relative to the project root; rig runs it from the build directory, with the path rebased
             Some(self.root.join(&compiler[0]))
         } else {
             self.which(&compiler[0]).ok()
@@ -736,8 +751,8 @@ impl Project {
     pub fn native(&self, name: &str, target: &str) -> Option<&Native> {
         self.natives.get(&(name.to_string(), target.to_string()))
     }
-    /// Returns the diagnostic of what a crate, library or executable uses which is not a library for its target: an
-    /// executable, which cannot be used, or nothing.
+    /// Returns the diagnostic for a `use` of something which is not a library for the target. It says whether the
+    /// name is an executable, which cannot be used, a Rust crate, or nothing at all.
     pub(super) fn unknown_library(&self, name: &str, target: &str, span: Span) -> Diagnostic {
         let rust = self.crates.get(&(name.to_string(), target.to_string()));
         let message = match self.native(name, target) {
@@ -747,8 +762,9 @@ impl Project {
         };
         Diagnostic { span: Some(span), message, severity: Severity::Error }
     }
-    /// Report what the libraries and executables use which is not a library for their target, libraries which use
-    /// each other, and shared libraries for a target without an operating system.
+    /// Report three kinds of error: a library or executable which uses something that is not a library for its
+    /// target, libraries which use each other in a cycle, and a shared library for a target without an operating
+    /// system.
     pub(super) fn check_libraries(&mut self) {
         let mut keys: Vec<_> = self.natives.keys().cloned().collect();
         keys.sort_unstable();
@@ -769,7 +785,7 @@ impl Project {
                 });
             }
         }
-        // a library which reaches itself through those it uses
+        // report a library which reaches itself through the libraries it uses
         for key in &keys {
             let library = &self.natives[key];
             let mut stack: Vec<&str> = library.uses.iter().map(|used| used.name.as_str()).collect();
@@ -794,9 +810,12 @@ impl Project {
     pub fn crate_for_c(&self, name: &str, target: &str) -> Option<&rust::Crate> {
         self.crates.get(&(name.to_string(), target.to_string())).filter(|c| c.kind.is_for_c())
     }
-    /// Returns the names of what a library or executable links which is not a library of C, and so is a crate for C, as
-    /// is checked: what it uses, and what the static libraries it links use, each once, after them. The crates are
-    /// looked up by those who have them, as generating the graph takes them from the project.
+    /// Returns the names of the crates for C which a library or executable links. Those are whatever it uses, or the
+    /// static libraries it links use, which is not a library of C: `check_libraries` has checked that such a name is
+    /// a crate for C. Each name is returned once, its own before those of its static libraries.
+    ///
+    /// Only names are returned, as the caller looks the crates up: generating the graph takes the crates out of the
+    /// project.
     pub fn linked_crates<'a>(&'a self, native: &'a Native) -> Vec<&'a str> {
         let statics = self.link_libraries(&native.uses, &native.target);
         let statics = statics.into_iter().filter(|library| library.kind == NativeKind::StaticLibrary);
@@ -812,7 +831,8 @@ impl Project {
     pub fn used_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> impl Iterator<Item = &'a Native> {
         uses.iter().filter_map(move |used| self.library(&used.name, target))
     }
-    /// Returns every library used by these, through each other too, each once, as for the directories of their headers.
+    /// Returns every library these `uses` reach, directly or through other libraries, each once. Their public
+    /// include directories are needed, for example.
     pub fn reachable_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
         let mut found: Vec<&Native> = Vec::new();
         let mut stack: Vec<&Native> = self.used_libraries(uses, target).collect();
@@ -825,10 +845,12 @@ impl Project {
         }
         found
     }
-    /// Returns the libraries which what uses these links, each once, in an order where each comes before those it uses,
-    /// as a single-pass linker needs: the libraries used through each other, but for the static libraries a shared
-    /// library uses, which are linked into it, while the shared libraries it uses are needed by what links it, to
-    /// resolve what it refers to.
+    /// Returns the libraries to link for something with these `uses`, each once, ordered so that each library comes
+    /// before the libraries it uses, as a single-pass linker needs.
+    ///
+    /// Those are the libraries reached directly or through other libraries, with one exception: the static libraries
+    /// which a shared library uses are already linked into it, so they are left out. The shared libraries which a
+    /// shared library uses are kept, as the linker needs them to resolve what it refers to.
     pub fn link_libraries<'a>(&'a self, uses: &'a [rust::Use], target: &'a str) -> Vec<&'a Native> {
         fn visit<'a>(
             project: &'a Project,
@@ -852,26 +874,26 @@ impl Project {
         }
         let mut order = Vec::new();
         let mut visited = std::collections::HashSet::new();
-        // in reverse, as the order is reversed, so that libraries which do not use each other are in the order they
-        // are used in
+        // The order is built with each library after those it uses, and reversed at the end. So the direct uses are
+        // visited in reverse here, which leaves libraries that do not use each other in the order they were used.
         let direct: Vec<_> = self.used_libraries(uses, target).collect();
         for library in direct.into_iter().rev() {
             visit(self, library, false, &mut visited, &mut order);
         }
-        // each after those it uses, reversed, so that each comes before them
+        // reverse the order, so that each library comes before those it uses
         order.reverse();
         order
     }
 }
 
-/// Returns the library of the C++ runtime of a target, which links libc++ on Apple's and the BSDs' targets, whose
-/// compilers are clang, and libstdc++ elsewhere, as GCC does.
+/// Returns the default library of the C++ runtime for a target: libc++ on Apple's and the BSDs' targets, whose
+/// compilers are clang, and libstdc++ elsewhere, as with GCC.
 fn default_cxx_runtime(target: &str) -> &'static str {
     let llvm = ["-apple-", "freebsd", "openbsd", "netbsd"].iter().any(|system| target.contains(system));
     if llvm { "c++" } else { "stdc++" }
 }
 
-/// Whether a target has shared libraries, as one with an operating system does, while one without, such as
+/// Whether a target has shared libraries. One with an operating system does, and one without, such as
 /// `riscv64gc-unknown-none-elf`, does not.
 fn has_shared_libraries(target: &str) -> bool {
     !target.split('-').any(|part| part == "none")
@@ -895,8 +917,8 @@ fn library_name(data: &Data) -> String {
     }
 }
 
-/// Returns the flags of the C compiler derived from codegen options, `<option>=<value>`: `-O<level>` from `opt-level`
-/// and `-g` from a `debuginfo` which is not none.
+/// Returns the C compiler flags derived from codegen options, which are given as `<option>=<value>`: `-O<level>`
+/// from `opt-level`, and `-g` from any `debuginfo` but none.
 fn derived_flags(codegen: &[String]) -> Vec<String> {
     let mut flags = Vec::new();
     for option in codegen {

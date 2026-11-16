@@ -143,9 +143,9 @@ unsafe extern "system" fn on_event(event: u32) -> Bool {
     1
 }
 
-/// Catches the console control events which interrupt a build while it is held, rather than letting them end the
-/// process, so that the build can stop the commands it is running and wait for them. The handler is removed when it
-/// is dropped.
+/// While this is held, the console control events which interrupt a build are caught, rather than ending the
+/// process, so that the build can stop the commands it is running and wait for them. Dropping it removes the
+/// handler.
 pub struct Interrupts {
     installed: bool,
 }
@@ -274,8 +274,8 @@ unsafe impl Send for Tokens {}
 unsafe impl Sync for Tokens {}
 
 impl Tokens {
-    /// Make a jobserver's semaphore with a name, holding a number of tokens, returning it and what gives it to a
-    /// command, its name.
+    /// Make a jobserver's semaphore, with the given name, holding a number of tokens. Returns the semaphore and the
+    /// value which hands it to a command, which is its name.
     ///
     /// # Errors
     ///

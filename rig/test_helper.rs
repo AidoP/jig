@@ -1,36 +1,56 @@
-//! A program which tests run as an edge's action, so that they need neither a shell nor coreutils, and run on every
-//! platform: the test's own executable, run again with [`FLAG`], which does what its arguments say, and exits, before
-//! the test harness's `main` runs. [`register`](crate::register_test_helper) registers it in a test executable, and
-//! [`exec`] returns the program which runs its steps.
+//! A program for tests to run as an edge's action, so that they need neither a shell nor coreutils, and run on every
+//! platform. It is the test's own executable, run again with [`FLAG`]: it then does what its arguments say and
+//! exits, before the test harness's `main` runs. [`register`](crate::register_test_helper) registers it in a test
+//! executable, and [`exec`] returns the program which runs its steps.
 //!
-//! Its arguments after the flag are steps, separated by `&&`, each of which runs only if those before it succeeded. A
-//! step is an operation and its words, and what it writes to stdout goes to a file if it ends in `> <file>`, or is
-//! appended to one if it ends in `>> <file>`:
+//! Its arguments after the flag are steps, separated by `&&`. Each step runs only if those before it succeeded. A
+//! step is an operation and its words. What it writes to stdout goes to a file if the step ends in `> <file>`, and
+//! is appended to a file if it ends in `>> <file>`.
 //!
-//! - `cat <file> ...`, the contents of the files, `echo <word> ...`, the words, with a space between them and a newline
-//!   after them, and a `$<name>` at the start of one replaced by the variable's value, or nothing, `printf <text>`, the
-//!   text with `\n`, `\e` and `\x<hex>` as a newline, an escape and a byte, `eecho <word> ...`, as `echo`, to stderr,
-//!   and `pwd`, the working directory.
-//! - `touch <file> ...`, `cp <from> <to>`, `mkdir <dir>` and `rmdir <dir>`, as their commands do, and `chmod-x <file>`,
-//!   which makes a file executable, on Unix.
-//! - `true`, `test-dir <dir>`, which fails unless the directory is there, and `cwd-is <dir>`, unless it is the
-//!   working directory, as the system gives it.
-//! - `sleep <seconds>` and `sleep-for <file>`, for as many seconds as the file gives, and `wait-for <path> <seconds>`,
-//!   until the path exists, failing if it doesn't within the seconds.
-//! - `exit <code> [<word> ...]` and `false`, which fail.
-//! - `restat <output> <input> ...`, which writes the inputs to the output only if they are not what it has already.
-//! - `getenv <name>`, the variable's value, or `unset`, with a newline, `env`, every variable, as `<name>=<value>`
-//!   lines, and `args <word> ...`, each word followed by `|`.
-//! - `zeros <count>`, as many zero bytes, `size <file>`, its size in bytes, with a newline, `first <file>`, the first
-//!   character of each of its lines, and `strip <text> <prefix>`, the text without the prefix.
-//! - `run <program> <argument> ...`, which runs a program, whose stdout is the step's, and fails as it does.
-//! - `cc <argument> ...`, or `cxx`, which stands in for a C or C++ compiler: it writes the object of `-o`, which is
-//!   its arguments on a line, then the source of `-c`, with each line `#include "<header>"` replaced by the header,
-//!   found beside the source or in a directory of `-I`, and the depfile of `-MF`, listing the source and the headers.
-//! - `ar <flags> <archive> <member> ...`, which stands in for an archiver: it adds each member to the archive, by its
-//!   file name, replacing one of the same name, as `ar r` does, each as `--- <name> <size>` on a line, then its contents.
-//! - `spawn <seconds> <file>`, which runs the helper again to sleep, writing its process ID to the file, and waits for
-//!   it, and `tokens`, which takes two of the jobserver's tokens, prints them, and gives them back, on Unix.
+//! Printing:
+//!
+//! - `cat <file> ...`: the contents of the files.
+//! - `echo <word> ...`: the words, separated by spaces, then a newline. A word starting with `$<name>` has that
+//!   replaced by the variable's value, or by nothing if it is unset.
+//! - `eecho <word> ...`: as `echo`, but to stderr.
+//! - `printf <text>`: the text, with `\n`, `\e` and `\x<hex>` giving a newline, an escape and a byte.
+//! - `pwd`: the working directory.
+//! - `getenv <name>`: the variable's value, or `unset`, then a newline.
+//! - `env`: every variable, as `<name>=<value>` lines.
+//! - `args <word> ...`: each word followed by `|`.
+//! - `zeros <count>`: that many zero bytes.
+//! - `size <file>`: the file's size in bytes, then a newline.
+//! - `first <file>`: the first character of each line of the file.
+//! - `strip <text> <prefix>`: the text without the prefix.
+//!
+//! Files:
+//!
+//! - `touch <file> ...`, `cp <from> <to>`, `mkdir <dir>` and `rmdir <dir>`: as the commands of those names.
+//! - `chmod-x <file>`: makes the file executable, on Unix.
+//! - `restat <output> <input> ...`: writes the inputs to the output, unless the output already holds exactly that.
+//!
+//! Succeeding, failing and waiting:
+//!
+//! - `true`: succeeds.
+//! - `false` and `exit <code> [<word> ...]`: fail.
+//! - `test-dir <dir>`: fails unless the directory exists.
+//! - `cwd-is <dir>`: fails unless the directory is the working directory, as the system reports it.
+//! - `sleep <seconds>`, and `sleep-for <file>`, which sleeps for the number of seconds the file holds.
+//! - `wait-for <path> <seconds>`: waits until the path exists, and fails if it does not within that many seconds.
+//!
+//! Standing in for other programs:
+//!
+//! - `run <program> <argument> ...`: runs the program, with the step's stdout, and fails if it does.
+//! - `cc <argument> ...`, or `cxx`: stands in for a C or C++ compiler. It writes the object named by `-o`: its own
+//!   arguments on one line, then the source named by `-c`, with each `#include "<header>"` line replaced by the
+//!   header, which is looked for beside the source and in the directories of `-I`. It writes the depfile named by
+//!   `-MF`, listing the source and the headers.
+//! - `ar <flags> <archive> <member> ...`: stands in for an archiver. It adds each member to the archive under its
+//!   file name, replacing any member of that name, as `ar r` does. A member is stored as a line
+//!   `--- <name> <size>` followed by its contents.
+//! - `spawn <seconds> <file>`: runs the helper again to sleep, writes that process's ID to the file, and waits
+//!   for it.
+//! - `tokens`: takes two tokens from the jobserver, prints them, and gives them back, on Unix.
 
 use std::io::Write as _;
 use std::path::Path;

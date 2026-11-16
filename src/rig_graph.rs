@@ -63,10 +63,14 @@ impl RigGraph {
     }
     /// Returns the nodes of paths, each once, adding those which are not in the graph.
     fn nodes(&mut self, paths: &[&Path]) -> Vec<rig::NodeId> {
+        // a short list is searched for repeats, while a long one, such as every lint, would take quadratic time
+        const SEARCHED: usize = 16;
         let mut nodes = Vec::with_capacity(paths.len());
+        let mut seen = rig::hash::Set::default();
         for path in paths {
             let node = self.graph.file(&path_string(path));
-            if !nodes.contains(&node) {
+            let repeated = if paths.len() <= SEARCHED { nodes.contains(&node) } else { !seen.insert(node) };
+            if !repeated {
                 nodes.push(node);
             }
         }

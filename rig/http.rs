@@ -1,12 +1,14 @@
 //! An HTTP/1.1 client, for a remote cache which is a store of files served over HTTP, such as a directory served by
-//! nginx with `WebDAV`'s `PUT`, laid out as a cache's directory is, as [`crate::remote`] describes.
+//! nginx with `WebDAV`'s `PUT`. The files are laid out as in a cache's directory, as [`crate::remote`] describes.
 //!
-//! Only `http://` is spoken, as `std` has no TLS, so a cache which is not on the machine or a trusted network is put
-//! behind a proxy which speaks TLS to it, such as stunnel. Connections are kept alive, and are pooled, so that requests
-//! from several threads go at once on connections of their own. A body is sent with its length, and read by its
-//! `Content-Length`, in chunks with `Transfer-Encoding: chunked`, or until the connection is closed. A request on a
-//! connection which was pooled, which the server may have closed meanwhile, is sent again once on a new one if it
-//! fails before its response starts.
+//! - Only `http://` is spoken, as `std` has no TLS. A cache which is not on this machine or a trusted network
+//!   belongs behind a proxy which speaks TLS, such as stunnel.
+//! - Connections are kept alive and pooled, so that requests from several threads are sent at once, each on a
+//!   connection of its own.
+//! - A request's body is sent with its length. A response's body is read by its `Content-Length`, in chunks with
+//!   `Transfer-Encoding: chunked`, or else until the connection closes.
+//! - The server may have closed a pooled connection in the meantime. So a request on a pooled connection which
+//!   fails before its response starts is sent again, once, on a new connection.
 
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Seek, Write};
@@ -100,8 +102,8 @@ impl Client {
     pub fn url(&self) -> &Url {
         &self.url
     }
-    /// Send a request for a path under the URL's, returning its status once its body is given to `sink`, as it is
-    /// read, in parts.
+    /// Send a request for a path under the URL's path. The body of the response is given to `sink` in parts, as it is
+    /// read, and then the status is returned.
     ///
     /// # Errors
     ///
@@ -295,9 +297,9 @@ fn base64(bytes: &[u8]) -> String {
     encoded
 }
 
-/// A server of the files in a directory, for tests: `GET`, `HEAD` and `PUT`, which keeps connections alive, sends
-/// bodies in chunks if `chunked`, and refuses a request without the `Authorization` header `authorization`, if one is
-/// given. It returns the address it listens at, and serves until the process ends.
+/// A server of the files in a directory, for tests. It handles `GET`, `HEAD` and `PUT`, and keeps connections
+/// alive. It sends bodies in chunks if `chunked`. If `authorization` is given, it refuses requests whose
+/// `Authorization` header is not that. It returns the address it listens at, and serves until the process ends.
 #[cfg(test)]
 pub(crate) fn serve_directory(dir: std::path::PathBuf, chunked: bool, authorization: Option<String>) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

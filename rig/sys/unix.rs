@@ -65,9 +65,8 @@ extern "C" fn on_signal(signal: c_int) {
     INTERRUPTED.store(signal, Ordering::SeqCst);
 }
 
-/// Catches the signals which interrupt a build while it is held, rather than letting them end the process, so that
-/// the build can stop the commands it is running and wait for them. The previous handlers are restored when it is
-/// dropped.
+/// While this is held, the signals which interrupt a build are caught, rather than ending the process, so that the
+/// build can stop the commands it is running and wait for them. Dropping it restores the previous handlers.
 pub struct Interrupts {
     previous: Vec<(c_int, usize)>,
 }
@@ -157,8 +156,8 @@ pub struct Tokens {
     created: Option<std::path::PathBuf>,
 }
 impl Tokens {
-    /// Make a jobserver's FIFO with a name, in the temporary directory, holding a number of tokens, returning it and
-    /// what gives it to a command, `fifo:<path>`.
+    /// Make a jobserver's FIFO, with the given name, in the temporary directory, holding a number of tokens. Returns
+    /// the FIFO and the value which hands it to a command, `fifo:<path>`.
     ///
     /// # Errors
     ///
@@ -241,8 +240,8 @@ fn make_fifo(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Make a file share the contents of another, as a reflink, which the file system copies only once one of them is
-/// written, as Btrfs, XFS and others can.
+/// Make a file share the contents of another, as a reflink: the file system only copies the contents when one of
+/// the files is written to. Btrfs, XFS and some others support it.
 ///
 /// # Errors
 ///
