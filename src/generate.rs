@@ -1,15 +1,20 @@
-//! Generation of the files which build a project: the specifications of its custom targets, and rig's graph, `graph`,
-//! with its depfile, in the build directory, and `.rust-project.json` and the database, read by `jig build`,
-//! `jig check`, `jig test` and `jig install`, at the project root.
+//! Generation of the files which build a project.
 //!
-//! rig builds in the build directory, so the paths of the graph are relative to it, while the project's paths are
+//! - In the build directory: the specifications of the project's custom targets, and rig's graph, `graph`, with its
+//!   depfile.
+//! - At the project root: `.rust-project.json`, and the database which `jig build`, `jig check`, `jig test` and
+//!   `jig install` read.
+//!
+//! rig builds in the build directory, so the paths in the graph are relative to it. The project's own paths are
 //! relative to the project root.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::project::rust::{Crate, Kind};
-use crate::project::{CustomKind, NativeKind, GeneratedFile, Installed, Project, Severity, Target, TargetKind, has_line_break};
+use crate::project::{
+    CustomKind, GeneratedFile, Installed, Native, NativeKind, Project, Severity, Target, TargetKind, has_line_break,
+};
 use crate::rig_graph::{self, Edge, RigGraph};
 use crate::{Error, database, rust_analyzer, target_spec};
 
@@ -30,7 +35,7 @@ pub fn write(mut project: Project, input: &Path, rustc: &crate::rustc::Answers) 
     let installed = project.installed();
     let mut crates: Vec<_> = std::mem::take(&mut project.crates).into_values().collect();
     crates.sort_unstable_by(|lhs, rhs| (&lhs.name, &lhs.target).cmp(&(&rhs.name, &rhs.target)));
-    // the linkers are identified, and depended on, before the depfile is written
+    // identifying the linkers adds to what the configuration depends on, so it comes before writing the depfile
     identify_linkers(&mut project, &crates);
     write_depfile(&project, &at, &build_dir)?;
     let units = units(&project, &crates, sysroot, &build_dir);
@@ -40,47 +45,50 @@ pub fn write(mut project: Project, input: &Path, rustc: &crate::rustc::Answers) 
     write_database(&project, &units, &installed, input, &at, &build_dir, rustc)
 }
 
-/// Rebases the paths of a project, relative to its root, for rig, which runs in the build directory.
+/// Rebases the paths of a project, which are relative to its root, for rig, which runs in the build directory.
 ///
-/// Every path is relative to the build directory, so that what rustc, which also runs there, is given and writes does
-/// not depend on where the project is: a path within the build directory is relative to it, and any other leads out of
-/// it with `..`, from where the build directory is once symbolic links are followed, so that it leads to the same file
-/// when the build directory is a link. rustc writes the paths of sources in its dep-info as it is given them, which
-/// rig reads, while what it writes elsewhere, such as in diagnostics and debug info, is remapped to be relative to the
-/// project root, by [`Rebase::remap`].
+/// Every rebased path is relative to the build directory, so that what rustc, which also runs there, is given and
+/// writes does not depend on where the project is. A path within the build directory is relative to it. Any other
+/// path leads out of it with `..`, starting from where the build directory really is once symbolic links are
+/// followed, so that it reaches the same file when the build directory is a link.
+///
+/// rustc writes the paths of sources in its dep-info exactly as it is given them, which is what rig needs to read.
+/// What it writes elsewhere, such as in diagnostics and debug info, is remapped to be relative to the project root,
+/// by [`Rebase::remap`].
 struct Rebase {
     /// The project root, which is absolute.
     root: PathBuf,
     /// The build directory, which is absolute.
     build_dir: PathBuf,
-    /// The build directory once symbolic links are followed, which `..` leaves.
+    /// The build directory with symbolic links followed, which is the directory `..` actually leaves.
     physical: PathBuf,
 }
 impl Rebase {
     fn new(build_dir: &Path) -> Self {
-        let root = normalize(&std::env::current_dir().unwrap_or_default());
-        let build_dir = normalize(&root.join(build_dir));
+        let root = normalize(Path::new(""), &std::env::current_dir().unwrap_or_default());
+        let build_dir = normalize(&root, build_dir);
         let physical = rig::canonicalize(&build_dir).unwrap_or_else(|_| build_dir.clone());
         Self { root, build_dir, physical }
     }
     fn path(&self, path: &Path) -> PathBuf {
-        let path = normalize(&self.root.join(path));
+        let path = normalize(&self.root, path);
         match path.strip_prefix(&self.build_dir) {
             Ok(relative) if relative.as_os_str().is_empty() => PathBuf::from("."),
             Ok(relative) => relative.to_path_buf(),
             Err(_) => relative_to(&self.physical, &path),
         }
     }
-    /// Returns the arguments of rustc, rustdoc and clippy which remap the paths they write, other than in dep-info, to be
-    /// relative to the project root, rather than the build directory, as its sources are, given the root module of the
-    /// crate, rebased.
+    /// Returns the arguments which make rustc, rustdoc and clippy write paths relative to the project root, rather
+    /// than the build directory. They apply to everything but dep-info. `root_module` is the root module of the crate,
+    /// rebased.
     ///
-    /// - The build directory, which rustc writes as the working directory of debug info, is the project root, `.`.
-    /// - The path from the build directory to the root is removed from the paths of sources outside the build directory.
-    /// - A root module in the build directory, as one which is generated, has the build directory before it, by the first
-    ///   component of its path, which its modules share.
+    /// - The build directory, which rustc writes as the working directory in debug info, becomes the project root, `.`.
+    /// - The path from the build directory to the root is removed from the paths of sources outside the build
+    ///   directory.
+    /// - A root module inside the build directory, such as a generated one, gets the build directory put before it.
+    ///   The prefix remapped is the first component of its path, which its modules share.
     ///
-    /// rustc takes the last of the prefixes which match a path.
+    /// rustc applies the last prefix which matches a path.
     fn remap(&self, root_module: &Path) -> Vec<String> {
         let mut remap = vec![format!("--remap-path-prefix={}=.", self.build_dir.display())];
         let up = self.path(&self.root);
@@ -100,24 +108,34 @@ impl Rebase {
     }
 }
 
-/// Returns a path relative to a directory, both of which are absolute and normalized, with a `..` for each component of
-/// the directory which the path does not share, or `.` if they are the same.
+/// Returns `path` relative to `dir`, which must both be absolute and normalized: a `..` for each component of `dir`
+/// which the path does not share, then the rest of the path. Returns `.` if they are the same.
 fn relative_to(dir: &Path, path: &Path) -> PathBuf {
-    let (dir, path): (Vec<_>, Vec<_>) = (dir.components().collect(), path.components().collect());
-    let shared = dir.iter().zip(&path).take_while(|(lhs, rhs)| lhs == rhs).count();
-    let mut relative: PathBuf = std::iter::repeat_n(std::path::Component::ParentDir, dir.len() - shared).collect();
-    relative.extend(&path[shared..]);
+    let (mut dir, mut path) = (dir.components(), path.components());
+    // skip the components they share
+    loop {
+        let (mut dir_rest, mut path_rest) = (dir.clone(), path.clone());
+        match (dir_rest.next(), path_rest.next()) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => (dir, path) = (dir_rest, path_rest),
+            _ => break,
+        }
+    }
+    let mut relative = PathBuf::with_capacity(dir.as_path().as_os_str().len() + path.as_path().as_os_str().len());
+    relative.extend(dir.map(|_| std::path::Component::ParentDir));
+    relative.extend(path);
     if relative.as_os_str().is_empty() { PathBuf::from(".") } else { relative }
 }
 
-/// Returns a path with its `.` and `..` components resolved, for rig's graph.
+/// Returns a path, joined to `base` if it is relative, with its `.` and `..` components resolved, for rig's graph.
+/// `base` must already be resolved.
 ///
-/// A `..` is removed with the component before it, without following symbolic links, but a `..` after a symbolic
-/// link leaves the directory the link points to, rather than the one containing the link. So a symbolic link followed
-/// by `..` is resolved first, and the path is otherwise left as it is, including the paths which do not exist yet.
-fn normalize(path: &Path) -> PathBuf {
+/// A `..` removes the component before it. If that component is a symbolic link, the link is followed first, as `..`
+/// leaves the directory the link points to, not the one which contains the link. The path is otherwise left as it
+/// is, so it need not exist yet.
+fn normalize(base: &Path, path: &Path) -> PathBuf {
     use std::path::Component;
-    let mut normal = PathBuf::new();
+    let mut normal = PathBuf::with_capacity(base.as_os_str().len() + path.as_os_str().len() + 1);
+    normal.push(base);
     for component in path.components() {
         match component {
             Component::CurDir => (),
@@ -175,8 +193,8 @@ pub struct Unit {
     pub lint: Option<String>,
     /// The flags which give clippy's lints their levels.
     pub lints: Vec<String>,
-    /// Whether the crate has a test harness, as which it is linted, so that its tests are, while a library is checked
-    /// without them, as the crates which use it use its metadata.
+    /// Whether the crate has a test harness. If so it is linted as the harness, so that its tests are linted too. A
+    /// library is still checked without its tests, as the crates which use it use the metadata of that check.
     pub harness: bool,
 }
 impl Unit {
@@ -186,8 +204,8 @@ impl Unit {
     fn check_rmeta(&self) -> PathBuf {
         self.check_dir().join(format!("lib{}.rmeta", self.name))
     }
-    /// The directory of the documentation of the crates for the target, where each crate's is in a directory named
-    /// after it, which rustdoc writes their shared files beside.
+    /// The directory of the documentation of the crates for the target. Each crate's documentation is in a directory
+    /// named after it, beside the files rustdoc shares between crates.
     fn doc_dir(&self) -> PathBuf {
         self.dir.join("doc")
     }
@@ -248,7 +266,7 @@ fn write_target_specs(targets: &[Target], build_dir: &Path, toolchain: Option<&s
             Ok(spec) => spec,
             Err(error) => return Err(Error::TargetSpec(target.name.clone(), error)),
         };
-        // every crate for the target depends on its specification, so it is only written when it changes
+        // only written when it changes, as every crate for the target depends on it
         if std::fs::read_to_string(&path).is_ok_and(|current| current == spec) {
             continue;
         }
@@ -260,8 +278,8 @@ fn write_target_specs(targets: &[Target], build_dir: &Path, toolchain: Option<&s
     Ok(())
 }
 
-/// Write the files generated by `file` statements, each only when it changes, so that what uses it is not built again
-/// otherwise, and give each its permissions, which are set again if they have been changed.
+/// Write the files generated by `file` statements. Each is only written when its contents change, so that what
+/// uses it is not rebuilt needlessly. Each is given its permissions, which are set again if they were changed.
 fn write_generated_files(files: &[GeneratedFile]) -> Result<(), Error> {
     for file in files {
         let text = file.text();
@@ -283,9 +301,10 @@ fn write_generated_files(files: &[GeneratedFile]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Write the depfile of the graph, `graph.d`, which is regenerated when a file the configuration read changes, or one
-/// it found missing is created, or an environment variable it read changes, which it lists as `# env-dep:` lines, as
-/// rustc writes them, which rig takes as inputs of the edge which generates the graph.
+/// Write the depfile of the graph, `graph.d`, which says when the graph must be regenerated: when a file the
+/// configuration read changes, when a file it found missing is created, or when an environment variable it read
+/// changes. Variables are listed as `# env-dep:` lines, as rustc writes them, and rig treats them all as inputs of
+/// the edge which generates the graph.
 fn write_depfile(project: &Project, at: &Rebase, build_dir: &Path) -> Result<(), Error> {
     let graph = rig_graph::FILE;
     let path = build_dir.join(format!("{graph}.d"));
@@ -311,11 +330,11 @@ fn write_dependencies(
     at: &Rebase,
 ) -> Result<(), std::io::Error> {
     write!(w, "{graph}:")?;
-    // builtin files change with jig, which the configuration already depends on, and a file processed again is listed
-    // once
+    // Builtin files are left out, as they only change with jig, which the configuration already depends on. A file
+    // which was processed more than once is listed once.
     let mut seen = std::collections::HashSet::new();
     let files = project.files.iter().filter(|file| !file.builtin && seen.insert(&file.path)).map(|file| &file.path);
-    // as are the files generated by `file` statements, so that one which is removed is written again
+    // the files generated by `file` statements are listed too, so that one which is removed is written again
     let generated = project.generated.iter().map(|file| &file.output);
     let paths = files.chain(&project.dependencies).chain(generated).chain(&project.missing);
     for path in at.paths(paths) {
@@ -378,7 +397,7 @@ fn write_graph(
 ) -> Result<(), Error> {
     // the file which the graph is written to, which its generator edge regenerates
     let generated = rig_graph::FILE;
-    // the specifications of custom targets are found in the build directory, and rebased
+    // custom targets' specifications are in the build directory, and their paths are rebased from it
     let build_dir = &at.build_dir;
     // whether rig stamps the files of an edge by their contents
     let hashed = match project.change_detection().as_str() {
@@ -386,14 +405,14 @@ fn write_graph(
         "hash" => true,
         other => return Err(Error::ChangeDetection(other.into())),
     };
-    // rig caches the results of rustc and clippy, by the identity of the toolchain, when it caches, but not of rustdoc,
-    // which writes a directory
+    // When caching is on, rig caches the results of rustc and clippy, by the identity of the toolchain. It does not
+    // cache rustdoc, which writes a directory.
     let cache = project.cache.as_deref();
-    // the graph regenerates itself with the configure tool which generated it, and again when the tool changes, so a
-    // project which builds the tool, such as its own, has it built first
+    // The graph is regenerated by the same `jig` which generated it, and again when that `jig` changes. A project
+    // which builds its own `jig`, as this one does, therefore has it built first.
     let exe = std::env::current_exe().ok();
     let configure = exe.clone().unwrap_or_else(|| "jig".into());
-    // with the toolchain it was configured with, from the project root, as its arguments are relative to it
+    // it runs with the toolchain it was configured with, from the project root, as its arguments are relative to that
     let toolchain = project.toolchain.as_deref();
     let exe = at.paths(&exe);
     let mut args: Vec<String> = toolchain.map(|toolchain| format!("+{toolchain}")).into_iter().collect();
@@ -411,18 +430,18 @@ fn write_graph(
         ..Default::default()
     })?;
 
-    // the targets built without any, which are all targets if there are none
+    // the targets built when none are named; if there are none of these, `everything` is built
     let mut defaults: Vec<PathBuf> = Vec::new();
-    // what is built without defaults, which is all but the checks, which are for rust-analyzer
+    // every target but the checks, which are only for rust-analyzer
     let mut everything: Vec<PathBuf> = Vec::new();
     // the documentation of the crates
     let mut docs: Vec<PathBuf> = Vec::new();
-    // the lints of the crates, which are not built without targets, like the checks
+    // the lints of the crates, which like the checks are not built unless they are named
     let mut lints: Vec<PathBuf> = Vec::new();
 
     let mut tests = Vec::new();
     for custom in &project.customs {
-        // a test is run by `jig test`, which builds its inputs and program with this target first
+        // a test is run by `jig test`, which first builds this alias of the test's inputs and program
         let CustomKind::Command { outputs, default, .. } = &custom.kind else {
             let alias = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
@@ -432,8 +451,8 @@ fn write_graph(
             continue;
         };
         let outputs = at.paths(outputs);
-        // from the project root, as a path relative to the build directory, so that the action does not depend on where
-        // the project is, as for the key of the cache
+        // It runs from the project root, given as a path relative to the build directory, so that the action does not
+        // depend on where the project is, which matters for its cache key.
         let root = at.path(&at.root);
         let exec = program(&custom.command[0], custom.command[1..].to_vec(), Some(&root), toolchain_env(toolchain));
         graph.edge(Edge {
@@ -447,7 +466,7 @@ fn write_graph(
             pass_env: &custom.pass_env,
             ..Default::default()
         })?;
-        // so that the outputs can be built by name
+        // an alias, so that the outputs can be built by the command's name
         let alias = Path::new("custom").join(&custom.name);
         graph.alias(&alias, &as_paths(&outputs))?;
         everything.push(alias.clone());
@@ -456,7 +475,7 @@ fn write_graph(
         }
     }
 
-    // what clangd reads to compile each source of C as it is built, as rust-analyzer reads `.rust-project.json`
+    // the entries of `compile_commands.json`, which clangd reads as rust-analyzer reads `.rust-project.json`
     let mut compile_commands = Vec::new();
     for library in project.natives() {
         let built = native_edges(&mut graph, project, crates, library, at, &mut compile_commands)?;
@@ -466,12 +485,15 @@ fn write_graph(
         }
     }
 
-    // a library built with `panic=abort` is built again without it for the test harnesses and procedural macros which
-    // link it, which unwind
+    // A library built with `panic=abort` cannot be linked into test harnesses and procedural macros, which unwind, so
+    // it is built a second time without it for them.
     let unwind = unwind_copies(crates, units);
+    // the native libraries each crate links by its own `use`s, found once, as every crate which links it needs them
+    let own_libraries: Vec<Vec<&Native>> = crates.iter().map(|c| project.link_libraries(&c.uses, &c.target)).collect();
     for (index, (c, unit)) in crates.iter().zip(units).enumerate() {
-        // a dependency is a library, so it has an output, or its copy which unwinds, for what must unwind, or its
-        // metadata, for a library, which is compiled against it, so that it starts once it is written
+        // Returns the file of each dependency to pass with `--extern`: its copy which unwinds, if `unwinds` and it has
+        // one; its metadata, if `metadata` and it is a library, so that this crate can start as soon as the metadata is
+        // written; and otherwise its output.
         let externs = |unwinds: bool, metadata: bool| -> Vec<Extern> {
             let mut deps = Vec::new();
             for &index in &unit.deps {
@@ -489,7 +511,7 @@ fn write_graph(
         let spec = at.paths(&target.spec);
         let input = at.path(&c.path);
         let codegen = codegen(c, project);
-        // the crates which copies depend on are found among the copies, when any is linked
+        // when a copy is linked, the crates the copies depend on are searched for among the copies
         let unwind_search = format!("dependency={}", at.path(&c.dir.join("unwind")).display());
         let copies = unit.deps.iter().any(|&index| unwind[index]);
         let flags_with = |deps: &[Extern], codegen: &[String], unwinds: bool| {
@@ -509,9 +531,12 @@ fn write_graph(
         let deps: Vec<_> = as_paths(&built_deps);
         let harness_externs = externs(true, false);
         let mut harness_flags = flags_with(&harness_externs, &harness_codegen(&codegen), true);
-        // the static libraries the crate uses, which a library records in its metadata, and what links finds and depends
-        // on, with those of the libraries it links
-        let native = NativeLinks::new(project, crates, units, index, at);
+        // Only a crate which links, as a program or a test harness does, needs the libraries of the crates it uses
+        // through others: a library is compiled against metadata alone. Finding them for every library would take
+        // time quadratic in the length of a chain of crates.
+        let needs_libraries = c.kind != Kind::Lib || c.test;
+        let transitive = if needs_libraries { transitive_libraries(crates, units, index) } else { Vec::new() };
+        let native = NativeLinks::new(&own_libraries, &transitive, index, at);
         let mut flags = flags;
         if c.kind == Kind::Lib {
             flags.extend(&native.recorded);
@@ -519,13 +544,13 @@ fn write_graph(
             flags.extend(&native.linked);
         }
         let harness_deps = deps_of(&harness_externs);
-        // the linker script of the crate, or else of its target, which is passed to rustc where it links, for the
-        // test harness and any crate but a library, which then depends on it
+        // The linker script of the crate, or failing that of its target. It is passed to rustc wherever it links, which
+        // is for the test harness and for any crate but a library, and what links then depends on it.
         let link_script = c.link_script.as_ref().or_else(|| project.target(&c.target)?.link_script.as_ref());
         let link_script = link_script.map(|path| at.path(path));
-        // Apple's linker writes the absolute paths of the object files into what it links, as the map by which debug
-        // info is found in them, which `--remap-path-prefix` does not reach, so they are made relative to its working
-        // directory, the build directory, by `-oso_prefix .`, as `cc`, the linker of the host, takes it
+        // Apple's linker writes the absolute paths of the object files into its output, as the map by which debug info
+        // is found in them. `--remap-path-prefix` does not reach those, so `-oso_prefix .` makes them relative to the
+        // linker's working directory, the build directory. It is passed in the form `cc`, the host's linker, takes.
         let host = project.host();
         let default_linker = !codegen.iter().any(|option| option.starts_with("linker="));
         let link = |flags: &Flags| {
@@ -536,26 +561,24 @@ fn write_graph(
             if c.target == host && host.contains("-apple-") && default_linker {
                 linked_flags.codegen("link-arg=-Wl,-oso_prefix,.");
             }
-            // what links a shared library for C on ELF records it by its soname, rather than the path it was given,
-            // which is relative to the build directory, while rustc gives one on Apple's targets an install name
+            // On ELF, give a shared library for C a soname: what links it then records the soname, rather than the path
+            // it
+            // was given, which is relative to the build directory. On Apple's targets rustc gives it an install name
+            // itself.
             if c.kind == Kind::CDylib && !c.target.contains("-apple-") && !c.target.contains("-windows") {
                 linked_flags.codegen(&format!("link-arg=-Wl,-soname,lib{}.so", c.name));
             }
             linked_flags
         };
         let linked_flags = link(&flags);
-        // what links needs the library of every crate it uses, through others too, as a library which uses another is
-        // built once the other's metadata is written, before its library is
+        // Linking depends on the library of every crate used, directly or not: a library only waits for the metadata
+        // of the crates it uses, so their libraries may not have been written when it finishes.
         let libraries = |unwinds: bool| -> Vec<PathBuf> {
-            let path = |index: usize| {
+            let path = |&index: &usize| {
                 let d = &crates[index];
                 at.path(&if unwinds && unwind[index] { d.unwind_output() } else { d.output() })
             };
-            // which only what links needs, as a library which is not tested does not
-            if c.kind == Kind::Lib && !c.test {
-                return Vec::new();
-            }
-            transitive_libraries(crates, units, index).into_iter().map(path).collect()
+            transitive.iter().map(path).collect()
         };
         let (libraries, harness_libraries) = (libraries(proc_macro), libraries(true));
         let link_deps: Vec<_> = deps.iter().copied().chain(as_paths(&libraries)).chain(as_paths(&native.archives)).collect();
@@ -564,8 +587,8 @@ fn write_graph(
             .chain(as_paths(&harness_libraries))
             .chain(as_paths(&native.archives))
             .collect();
-        // what rustc reads: the crate's root, which finds its other sources, its target's specification, and its linker
-        // script, where it links
+        // What rustc reads: the crate's root, from which it finds the other sources, its target's specification, and
+        // where it links, its linker script.
         let inputs: Vec<&Path> = [input.as_path()].into_iter().chain(as_paths(&spec)).collect();
         let linked_inputs: Vec<&Path> = inputs.iter().copied().chain(link_script.as_deref()).collect();
         let depends = at.paths(&c.depends);
@@ -575,16 +598,16 @@ fn write_graph(
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
         let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
-        // a library writes its metadata too, which rig is told of as rustc writes it, with JSON
+        // a library also writes its metadata, as an early output, which rustc reports to rig in JSON as it writes it
         let metadata = (c.kind == Kind::Lib).then(|| at.path(&c.metadata()));
         let mut leading = rustc_emit(&tmpdir, &output).to_vec();
         if let Some(path) = &metadata {
-            // rustc colours what it renders in JSON as it would have printed it, taking no `--color` with JSON
+            // rustc takes no `--color` with JSON, and its rendered diagnostics are coloured by `--json` instead
             leading.retain(|arg| arg != "--color=always");
             leading.push(format!("--emit=metadata={}", path.display()));
             leading.extend(["--error-format=json", "--json=artifacts,diagnostic-rendered-ansi"].map(String::from));
         }
-        // a static library for C writes the libraries of the system it needs, which what links it reads
+        // a static library for C also writes the list of system libraries it needs, which whatever links it reads
         let native_static_libs = (c.kind == Kind::StaticLib).then(|| at.path(&c.native_static_libs()));
         if let Some(path) = &native_static_libs {
             leading.push(format!("--print=native-static-libs={}", path.display()));
@@ -664,10 +687,10 @@ fn write_graph(
         }
     }
 
-    // each check is an ordinary edge which saves its diagnostics, so that a flycheck can replay them when it is up to
-    // date, as rust-analyzer only shows the diagnostics from the latest flycheck
+    // Each check is an ordinary edge which saves its diagnostics to a file. rust-analyzer only shows the diagnostics
+    // of the latest flycheck, so when a check is up to date, the flycheck replays the saved ones.
     for unit in units {
-        // a procedural macro is run by rustc, even when checking, so its own output is used rather than its metadata
+        // rustc runs a procedural macro even when checking, so its real output is passed rather than its metadata
         let mut deps = Vec::new();
         for &index in &unit.deps {
             let dep = &units[index];
@@ -681,7 +704,7 @@ fn write_graph(
         let spec = at.paths(&target.spec);
         let outdir = at.path(&unit.check_dir());
         let root = at.path(&unit.root);
-        // a crate with tests is checked or linted with `--test`, so with the codegen options of its test harness
+        // a crate with tests is checked or linted with `--test`, so it takes its test harness's codegen options
         let codegen = if unit.harness { harness_codegen(&unit.codegen) } else { unit.codegen.clone() };
         let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &codegen, &root, at);
         flags.cfg(&unit.cfg);
@@ -692,17 +715,16 @@ fn write_graph(
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).collect();
         let inputs: Vec<&Path> = [root.as_path()].into_iter().chain(as_paths(&spec)).collect();
         let output = at.path(&unit.check_rmeta());
-        // the documentation is of the crate as it is built, rather than its tests, with the metadata of the crates it
-        // uses
+        // the crate is documented as it is built, not as its tests, against the metadata of the crates it uses
         if let Some(name) = &unit.doc {
             let index = at.path(&unit.doc_index());
             let dependencies: Vec<_> = deps.iter().copied().chain([output.as_path()]).collect();
             let doc_dir = at.path(&unit.doc_dir()).display().to_string();
             let leading = ["--color=always".to_string(), format!("--out-dir={doc_dir}")];
             let exec = rust.exec("rustdoc", &leading, &flags, None);
-            // rustdoc only writes dep-info with unstable options, so the documentation depends on the crate's check
-            // instead, which is built again when its sources change, and the crates for a target are documented
-            // together, as rustdoc locks the files they share
+            // rustdoc only writes dep-info with unstable options. So the documentation depends on the crate's check
+            // instead, which is rebuilt when the crate's sources change. The crates for a target are documented into
+            // one directory, as rustdoc locks the files they share.
             graph.edge(Edge {
                 description: describe("RUSTDOC", &index),
                 outputs: &[&index],
@@ -721,12 +743,12 @@ fn write_graph(
         if unit.test {
             flags.plain(&["--test"]);
         }
-        // linted as it is checked, with the metadata of the crates it uses from their checks
+        // it is linted with the flags it is checked with, against the metadata from the checks of the crates it uses
         if let Some(name) = &unit.lint {
             let output = at.path(&unit.lint_rmeta());
             let diagnostics = at.path(&unit.lint_diagnostics());
             let outdir = at.path(&unit.lint_dir());
-            // each flag is a level and a lint, such as `-W clippy::pedantic`, which are separate arguments
+            // each flag is a level and a lint, such as `-W clippy::pedantic`, which are two arguments
             let mut lint_flags = flags.clone();
             for flag in &unit.lints {
                 lint_flags.plain(&flag.split(' ').collect::<Vec<_>>());
@@ -736,12 +758,13 @@ fn write_graph(
             }
             let emit = metadata_emit(&outdir, &output, true);
             let mut exec = rust.exec("clippy-driver", &emit, &lint_flags, Some(&diagnostics));
-            // clippy suggests only what the minimum supported Rust version has, which it is given as cargo gives it
+            // clippy only suggests what the minimum supported Rust version has; it reads the version as cargo gives it
             if let Some(version) = project.rust_version() {
                 exec.env.push(("CARGO_PKG_RUST_VERSION".into(), version));
             }
-            // a lint is a check by clippy, whose diagnostics are saved, so that `jig lint` shows them when it is up to
-            // date
+            // A lint is a check run by clippy. Its diagnostics are saved, so that `jig lint` can show them when the
+            // lint
+            // is up to date.
             graph.edge(Edge {
                 description: describe("CLIPPY", &output),
                 outputs: &[&output, &diagnostics],
@@ -797,12 +820,12 @@ fn write_graph(
     graph.finish()
 }
 
-/// Returns the entry of `compile_commands.json` of a source, as clangd reads it: the build directory, which the compiler
-/// runs in, absolute, the source, absolute, and the program and its arguments, with the object.
+/// Returns the entry of `compile_commands.json` for a source, as clangd reads it: the absolute build directory,
+/// where the compiler runs, the absolute path of the source, the object, and the program with its arguments.
 fn compile_command(at: &Rebase, program: &str, args: &[String], source: &Path, object: &Path) -> String {
     use crate::rust_analyzer::string;
     let directory = at.build_dir.display().to_string();
-    let file = normalize(&at.build_dir.join(source)).display().to_string();
+    let file = normalize(&at.build_dir, source).display().to_string();
     let arguments: Vec<String> = std::iter::once(program).chain(args.iter().map(String::as_str)).map(string).collect();
     format!(
         "  {{\"directory\": {}, \"file\": {}, \"output\": {}, \"arguments\": [{}]}}",
@@ -813,8 +836,8 @@ fn compile_command(at: &Rebase, program: &str, args: &[String], source: &Path, o
     )
 }
 
-/// Write `compile_commands.json` to the build directory, where clangd finds it for a build directory named `build`, of
-/// the sources of C and assembly, or remove one which is there if there are none, as they have been removed.
+/// Write `compile_commands.json`, for the sources of C, C++ and assembly, to the build directory, where clangd looks
+/// for it when the build directory is named `build`. If there are no such sources, any old file is removed.
 fn write_compile_commands(build_dir: &Path, commands: &[String]) -> Result<(), Error> {
     let path = build_dir.join("compile_commands.json");
     if commands.is_empty() {
@@ -822,7 +845,7 @@ fn write_compile_commands(build_dir: &Path, commands: &[String]) -> Result<(), E
         return Ok(());
     }
     let contents = format!("[\n{}\n]\n", commands.join(",\n"));
-    // only when it changes, as clangd reloads it when it is written
+    // only written when it changes, as clangd reloads it whenever it is written
     if std::fs::read_to_string(&path).is_ok_and(|written| written == contents) {
         return Ok(());
     }
@@ -831,24 +854,26 @@ fn write_compile_commands(build_dir: &Path, commands: &[String]) -> Result<(), E
 
 /// The arguments of rustc which give a crate the static libraries it uses, and the archives it depends on.
 struct NativeLinks {
-    /// What a library crate records in its metadata, that what links it needs the libraries, without copying them into
-    /// its rlib, so that it depends on neither, as `-l static:-bundle=<name>`.
+    /// The arguments for a library crate, `-l static:-bundle=<name>`. They record in its metadata that whatever links
+    /// it needs the libraries, without copying them into its rlib, so the crate does not depend on the archives.
     recorded: Vec<String>,
-    /// What links: its own libraries, as `-l static=<name>`, or `-l dylib=<name>` for a shared library, and the directory of each library which it or a library
-    /// crate it links uses, as `-L native=<dir>`, as each library has its own, so that it is only found where it is used.
+    /// The arguments for a crate which links. Its own libraries are given as `-l static=<name>`, or
+    /// `-l dylib=<name>` for a shared library. The directory of each library which it, or a library crate it links,
+    /// uses is given as `-L native=<dir>`. Each library has a directory of its own, so that a library is only found
+    /// where it is used.
     linked: Vec<String>,
-    /// The archives of the libraries which what links uses, through the crates it links too.
+    /// The archives of the libraries used by a crate which links, whether directly or through the crates it links.
     archives: Vec<PathBuf>,
 }
 impl NativeLinks {
-    fn new(project: &Project, crates: &[Crate], units: &[Unit], index: usize, at: &Rebase) -> Self {
-        let c = &crates[index];
-        let own = project.link_libraries(&c.uses, &c.target);
+    /// `own_libraries` is what each crate links by its own `use`s, and `transitive` the library crates this one links.
+    fn new(own_libraries: &[Vec<&Native>], transitive: &[usize], index: usize, at: &Rebase) -> Self {
+        let own = &own_libraries[index];
         let link = |bundle: bool| -> Vec<String> {
             let mut args = Vec::new();
-            for library in &own {
-                // one linked as its objects is not recorded, as its objects are linked by `link-arg`, as rustc has no
-                // native library of objects
+            for library in own {
+                // A library linked as its objects is not recorded. rustc has no kind of native library for objects, so
+                // they are passed with `link-arg` instead.
                 if library.link_objects {
                     continue;
                 }
@@ -869,24 +894,24 @@ impl NativeLinks {
             }
             args
         };
-        // the libraries of each library crate which is linked, in the order of the crates, each once
-        let mut libraries: Vec<&crate::project::Native> = own.clone();
-        for dep in transitive_libraries(crates, units, index) {
-            let d = &crates[dep];
-            for library in project.link_libraries(&d.uses, &d.target) {
+        // add the libraries of each library crate which is linked, in the order of the crates, each library once
+        let mut libraries: Vec<&Native> = own.clone();
+        for &dep in transitive {
+            for &library in &own_libraries[dep] {
                 if !libraries.iter().any(|known| std::ptr::eq(*known, library)) {
                     libraries.push(library);
                 }
             }
         }
         let mut linked = link(true);
-        // the C++ runtime, if a static library which is linked has C++ sources, which rustc's linker does not link
+        // rustc's linker does not link the C++ runtime, so name it if a static library being linked has C++ sources
         let cxx = libraries.iter().filter(|library| library.kind == NativeKind::StaticLibrary).find(|library| library.has_cxx());
         if let Some(cxx) = cxx {
             linked.extend(["-l".to_string(), format!("dylib={}", cxx.cxx_runtime)]);
         }
         for library in &libraries {
-            // the objects of one linked as them, which rustc gives the linker after what it links, as they are
+            // the objects of a library linked as its objects; rustc passes `link-arg`s to the linker after what it
+            // links
             if library.link_objects {
                 for object in library.linked_files() {
                     linked.extend(["-C".to_string(), format!("link-arg={}", at.path(&object).display())]);
@@ -900,26 +925,26 @@ impl NativeLinks {
     }
 }
 
-/// Add the edges which compile each source of a library or an executable to an object, and archive or link them,
-/// returning what is built of it, rebased: its archive, or its objects, for a static library linked as them, or its
-/// output.
+/// Add the edges which compile each source of a library or an executable to an object, and then archive or link
+/// the objects. Returns what is built, rebased: the archive, the objects of a static library which is linked as its
+/// objects, or the linked output.
 fn native_edges(
     graph: &mut RigGraph,
     project: &Project,
     crates: &[Crate],
-    library: &crate::project::Native,
+    library: &Native,
     at: &Rebase,
     compile_commands: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, Error> {
-    // the directories it is compiled with: its own, and the public ones of those it uses, through each other too
+    // its include directories: its own, then the public ones of the libraries it uses, directly or not
     let mut include: Vec<PathBuf> = library.include.iter().chain(&library.public_include).cloned().collect();
     for used in project.reachable_libraries(&library.uses, &library.target) {
         include.extend(used.public_include.iter().cloned());
     }
     let mut seen = std::collections::HashSet::new();
     include.retain(|dir| seen.insert(dir.clone()));
-    // the paths the compiler writes, in debug info and `__FILE__`, relative to the project root, as rustc's are: the
-    // build directory, where it runs, is the root, and the way from it to the root is removed from the sources' paths
+    // Make the paths the compiler writes, in debug info and `__FILE__`, relative to the project root, as rustc's
+    // are: the build directory, where it runs, maps to the root, and the path from there to the root is removed.
     let mut remap = vec![format!("-ffile-prefix-map={}=.", at.build_dir.display())];
     let up = at.path(&at.root);
     if up != Path::new(".") {
@@ -934,7 +959,7 @@ fn native_edges(
         let object = at.path(&library.object(&source.path));
         let input = at.path(&source.path);
         let depfile = depfile_of(&object);
-        // C++ by its own compiler, which is identified in the cache by itself
+        // C++ has its own compiler, which has its own identity in the cache
         let (compiler, cache, language_flags, action) = match source.language {
             crate::project::Language::C => (&library.compiler, &library.cache, &library.c_flags, "CC"),
             crate::project::Language::Assembly => (&library.compiler, &library.cache, &library.asm_flags, "AS"),
@@ -963,10 +988,11 @@ fn native_edges(
             after: &as_paths(&depends),
             depfile: Some(&depfile),
             exec: program_in_build_dir(&program(compiler), args, Vec::new()),
-            // a header which is touched, but not changed, rebuilds nothing
+            // stamped by contents, so that a header which is touched but not changed rebuilds nothing
             hashed: true,
-            // fetched from rig's cache by the identity of the compiler, as rustc is by the toolchain's, as its depfile
-            // gives every header it read
+            // Cached by the identity of the compiler, as rustc's edges are by the toolchain's. That is sound because
+            // the
+            // depfile lists every header which was read.
             cache: cache.as_deref(),
             pass_env: &library.pass_env,
             ..Default::default()
@@ -999,24 +1025,29 @@ fn native_edges(
 /// Add the edge which links an executable or a shared library from its objects and the libraries it uses, with the
 /// compiler, returning its output, rebased.
 ///
-/// Each library is given by the path of its archive, or of a shared library, or its import library on Windows, after the
-/// objects and before those it uses, as a linker which reads each archive once needs, and a static library which is
-/// `whole-archive` is wrapped in the flags which link every object of it, which are `-force_load` on Apple's targets
-/// and `--whole-archive` on others. The link flags follow them, then the directories of `rpath`, the linker script, of
-/// the executable or else of its target, and what names a shared library: its soname, as `lib<name>.so`, which what
-/// links it records to load it by, its install name, `@rpath/lib<name>.dylib`, on Apple's targets, or its import
-/// library on Windows.
+/// The arguments are, in order:
+///
+/// - the objects;
+/// - each library, as the path of its archive, its shared library, or on Windows its import library. A library
+///   comes before those it uses, as a linker which reads each archive once needs. A static library which is
+///   `whole-archive` is wrapped in the flags which link every object of it: `-force_load` on Apple's targets, and
+///   `--whole-archive` elsewhere;
+/// - the link flags;
+/// - the directories of `rpath`;
+/// - the linker script, of the executable or failing that of its target;
+/// - for a shared library, what names it: its soname, `lib<name>.so`, by which whatever links it records and loads
+///   it; on Apple's targets its install name, `@rpath/lib<name>.dylib`; or on Windows its import library.
 fn link_native(
     graph: &mut RigGraph,
     project: &Project,
     crates: &[Crate],
-    native: &crate::project::Native,
+    native: &Native,
     objects: &[PathBuf],
     at: &Rebase,
 ) -> Result<PathBuf, Error> {
     let output = at.path(&native.output());
     let libraries = project.link_libraries(&native.uses, &native.target);
-    // each library's files, which are its objects for one linked as them
+    // the files of each library, which are its objects if it is linked as them
     let linked: Vec<Vec<PathBuf>> = libraries
         .iter()
         .map(|library| library.linked_files().iter().map(|path| at.path(path)).collect())
@@ -1043,7 +1074,7 @@ fn link_native(
             () => args.extend(["-Wl,--whole-archive".to_string(), path, "-Wl,--no-whole-archive".to_string()]),
         }
     }
-    // the libraries for C of Rust, each after what uses it, and a static library with the libraries of the system it needs
+    // Rust's libraries for C, each after what uses it; a static one is followed by the system libraries it needs
     let mut rust_inputs = Vec::new();
     let for_c = project.linked_crates(native).into_iter().filter_map(|name| {
         crates.iter().find(|c| c.name == name && c.target == native.target && c.kind.is_for_c())
@@ -1058,13 +1089,13 @@ fn link_native(
             rust_inputs.push(libs);
         }
     }
-    // the C++ runtime, after what needs it, if it or a static library it links has C++ sources, as it is linked by the C
-    // compiler, which does not link it
+    // The C compiler links here, and does not link the C++ runtime, so name it, after what needs it, if this or a
+    // static library it links has C++ sources.
     let static_cxx = libraries.iter().filter(|library| library.kind == NativeKind::StaticLibrary).find(|library| library.has_cxx());
     if let Some(runtime) = native.has_cxx().then_some(native).or(static_cxx.copied()).map(|cxx| &cxx.cxx_runtime) {
         args.push(format!("-l{runtime}"));
     }
-    // after what they may name, as `-l` finds only what is needed by what comes before it
+    // these come last, as `-l` only resolves what is needed by something before it
     args.extend(native.link_flags.iter().cloned());
     for dir in &native.rpath {
         args.push(format!("-Wl,-rpath,{dir}"));
@@ -1103,7 +1134,7 @@ fn link_native(
         after: &as_paths(&at.paths(&native.depends)),
         exec: program_in_build_dir(&program, args, Vec::new()),
         hashed: true,
-        // fetched from rig's cache by the identity of the compiler, which links, as it compiled
+        // cached by the identity of the compiler, which does the linking as it did the compiling
         cache: native.cache.as_deref(),
         pass_env: &native.pass_env,
         ..Default::default()
@@ -1111,10 +1142,10 @@ fn link_native(
     Ok(output)
 }
 
-/// The flags of the archiver, which creates the archive, adds the objects to it, replacing those of the same name, and
-/// writes its index, and on all but Apple's hosts, `D`, leaves out the time, owner and mode of each object, so that the
-/// archive depends only on them, as llvm-ar does by default. Apple's `ar` does not take `D`, but does the same with
-/// `ZERO_AR_DATE`, as [`archive_env`] gives it.
+/// The flags of the archiver: create the archive, add the objects to it, replacing any of the same name, and write
+/// its index. On all but Apple's hosts, `D` also zeroes the time, owner and mode of each object, as llvm-ar does by
+/// default, so that the archive depends only on the objects' contents. Apple's `ar` does not take `D`, but does the
+/// same when `ZERO_AR_DATE` is set, which [`archive_env`] does.
 const ARCHIVE_FLAGS: &str = if cfg!(target_vendor = "apple") { "crs" } else { "crsD" };
 
 /// Returns the environment of the archiver, which on Apple's hosts makes `ar` deterministic.
@@ -1122,11 +1153,11 @@ fn archive_env() -> Vec<(String, String)> {
     if cfg!(target_vendor = "apple") { vec![("ZERO_AR_DATE".into(), "1".into())] } else { Vec::new() }
 }
 
-/// Remove the archive of each static library whose objects have changed since it was archived, as recorded beside it in
-/// `lib<name>.a.members`, as `ar` adds to an archive which is there, so that one whose source was removed keeps no
-/// object of it.
+/// Remove the archive of each static library whose list of objects has changed since it was archived. The list is
+/// recorded beside the archive, in `lib<name>.a.members`. `ar` adds to an archive which already exists, so without
+/// this, an archive would keep the object of a source which was removed.
 fn forget_stale_archives(project: &Project) -> Result<(), Error> {
-    let archived = |native: &&crate::project::Native| native.kind == NativeKind::StaticLibrary && !native.link_objects;
+    let archived = |native: &&Native| native.kind == NativeKind::StaticLibrary && !native.link_objects;
     for library in project.natives().into_iter().filter(archived) {
         let archive = library.output();
         let mut record = archive.clone().into_os_string();
@@ -1215,13 +1246,14 @@ fn write_database(
             let command = custom.command(&project.runners);
             let (name, libtest, tags) = (&custom.name, custom.is_libtest(), &custom.tags);
             let on_workers = custom.on_workers().unwrap_or_default();
-            // what a test which runs on a worker is sent, relative to the project root, where it runs
+            // the files sent to a worker which runs the test, relative to the project root, where the test runs
             let inputs = if on_workers.is_empty() {
                 Vec::new()
             } else {
                 let paths = custom.inputs.iter().chain(&custom.depends);
                 let relative = |path: &PathBuf| {
-                    if path.is_absolute() { relative_to(&at.root, &normalize(path)) } else { normalize(path) }
+                    let path = normalize(Path::new(""), path);
+                    if path.is_absolute() { relative_to(&at.root, &path) } else { path }
                 };
                 paths.map(|path| relative(path).display().to_string()).collect()
             };
@@ -1236,7 +1268,7 @@ fn write_database(
         let name = if unit.target == host { unit.name.clone() } else { format!("{}@{}", unit.name, unit.target) };
         let runner = project.target(&unit.target).and_then(|target| target.runner);
         let runner = runner.map(|runner| project.runners[runner].command.clone()).unwrap_or_default();
-        // a target as the graph has it, which is built by it
+        // the path as the graph has it, which is the target to build
         let (path, target) = (unit.output.display().to_string(), rig_graph::path_string(&at.path(&unit.output)));
         programs.push((name, path, target, runner, unit.default));
     }
@@ -1249,10 +1281,10 @@ fn write_database(
         programs.push((native.short_name(&host), path, target, runner, native.default));
     }
 
-    // the directories of the shared libraries, which what links them finds them in as `jig run` and `jig test` run it
+    // the directories of the shared libraries, where programs run by `jig run` and `jig test` find them
     let shared = project.natives().into_iter().filter(|native| native.kind == NativeKind::SharedLibrary);
     let mut library_path: Vec<String> = shared.map(|native| native.dir.display().to_string()).collect();
-    // and of the shared libraries for C of Rust, in the directories of their targets
+    // and those of Rust's shared libraries for C, which are the directories of their targets
     for unit in units.iter().filter(|unit| unit.kind == Kind::CDylib) {
         let dir = unit.dir.display().to_string();
         if !library_path.contains(&dir) {
@@ -1328,8 +1360,8 @@ fn write_database(
 /// Returns the flags for compiling a crate of a kind with the flag for its target, the crates passed to it and its
 /// codegen options.
 ///
-/// The outputs for a target share a directory, `search`, for the dependencies of `--extern` crates. A linker given as a
-/// path, which is relative to the project root, is rebased like the other paths.
+/// `search` is the directory the outputs for the target share, where rustc finds the dependencies of the `--extern`
+/// crates. A linker given as a path is relative to the project root, and is rebased like the other paths.
 fn rustc_flags(
     target: &TargetFlag,
     search: &Path,
@@ -1363,11 +1395,12 @@ fn rustc_flags(
     flags
 }
 
-/// Returns whether each crate is built again without `panic`, as `<target>/unwind/lib<name>.rlib`, for the test
-/// harnesses and procedural macros which link it, which unwind, while a library built with `panic=abort` cannot be
-/// linked into them: a library built with it, or which depends on one which is copied, as `panic` changes the hash of
-/// a crate, so a crate built against the library cannot use its copy. Only those which are linked by a test harness or
-/// a procedural macro are copied.
+/// Returns whether each crate is built a second time without `panic=abort`, as `<target>/unwind/lib<name>.rlib`.
+///
+/// Test harnesses and procedural macros unwind, and a library built with `panic=abort` cannot be linked into them.
+/// So such a library is copied. A library which depends on a copied one is copied too: `panic` changes the hash of a
+/// crate, so a crate built against the original cannot use the copy. Only libraries which a test harness or a
+/// procedural macro actually links are copied.
 fn unwind_copies(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
     let aborts = library_aborts(crates, units);
     let mut copied = vec![false; crates.len()];
@@ -1387,8 +1420,8 @@ fn unwind_copies(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
     copied
 }
 
-/// Returns the libraries a crate uses, through others too, by their indices, each once, without the procedural macros,
-/// which are not linked, nor what they use.
+/// Returns the indices of the library crates a crate uses, directly or through other libraries, each once, in
+/// ascending order. Procedural macros are left out, with what only they use, as they are not linked.
 fn transitive_libraries(crates: &[Crate], units: &[Unit], index: usize) -> Vec<usize> {
     let mut found = Vec::new();
     let mut seen = vec![false; crates.len()];
@@ -1415,14 +1448,14 @@ fn library_aborts(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
     }
     let mut state = vec![State::Unvisited; crates.len()];
     let mut aborts = vec![false; crates.len()];
-    // depth first, deciding each crate after the crates it uses, as they may be declared after it
+    // depth first, so that each crate is decided after the crates it uses, which may be declared after it
     let mut stack = Vec::new();
     for root in 0..crates.len() {
         stack.push((root, false));
         while let Some((index, used)) = stack.pop() {
             if used {
                 let c = &crates[index];
-                // a crate which uses itself, through others, which is still being visited, does not abort here
+                // a crate still being visited is reached through a cycle, and is not counted as aborting here
                 aborts[index] = c.kind == Kind::Lib
                     && (c.codegen.iter().any(|option| option == "panic=abort")
                         || units[index].deps.iter().any(|&d| state[d] == State::Done && aborts[d]));
@@ -1437,13 +1470,13 @@ fn library_aborts(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
     aborts
 }
 
-/// Returns the codegen options of a crate for its test harness, without `panic`, as the harness must unwind on stable
-/// rustc, which catches each test's panic.
+/// Returns the codegen options of a crate for its test harness: the same, without `panic`. On stable rustc the
+/// harness must unwind, as it catches the panic of each test.
 fn harness_codegen(codegen: &[String]) -> Vec<String> {
     codegen.iter().filter(|option| !option.starts_with("panic=")).cloned().collect()
 }
 
-/// The flags of rustc, rustdoc or clippy, as the arguments of the program, which rig runs directly, without a shell.
+/// The flags of rustc, rustdoc or clippy, as arguments. rig runs the program directly, so they need no quoting.
 #[derive(Clone, Default)]
 struct Flags {
     args: Vec<String>,
@@ -1480,8 +1513,8 @@ struct Rust<'a> {
     toolchain: Option<&'a str>,
 }
 impl Rust<'_> {
-    /// Returns the program which runs rustc, rustdoc or clippy for the crate, with arguments before those of the crate,
-    /// then its flags, then its root, writing stderr to a file if one is given.
+    /// Returns the command which runs `program` (rustc, rustdoc or clippy) for the crate. Its arguments are `leading`,
+    /// then the crate's flags, then its root. stderr is written to `stderr`, if that is given.
     fn exec(&self, program: &str, leading: &[String], flags: &Flags, stderr: Option<&Path>) -> rig::Exec {
         let mut args = leading.to_vec();
         args.extend([format!("--crate-type={}", self.crate_type), format!("--crate-name={}", self.name)]);
@@ -1496,8 +1529,8 @@ impl Rust<'_> {
     }
 }
 
-/// Returns a command of rustc or clippy which writes its dep-info alone, as the command does, without compiling the
-/// crate, by which rig finds the sources of a crate which has not been built, to send it to a worker.
+/// Returns a variant of a rustc or clippy command which only writes its dep-info, without compiling the crate. rig
+/// uses it to find the sources of a crate which has not been built, in order to send the crate to a worker.
 fn discovery(exec: &rig::Exec) -> rig::Exec {
     let emits = |arg: &&String| {
         (arg.starts_with("--emit=") && !arg.starts_with("--emit=dep-info=")) || arg.starts_with("--print=")
@@ -1516,8 +1549,8 @@ fn rustc_emit(tmpdir: &Path, output: &Path) -> [String; 4] {
     ]
 }
 
-/// Returns the arguments of rustc or clippy which check a crate, to its metadata, `output`, with JSON diagnostics,
-/// unless it is linted, when they are coloured as clippy shows them.
+/// Returns the arguments which make rustc or clippy check a crate, writing its metadata to `output`. Diagnostics
+/// are JSON, unless the crate is being linted, when they are coloured text, as clippy shows them.
 fn metadata_emit(outdir: &Path, output: &Path, lint: bool) -> [String; 4] {
     [
         if lint { "--color=always".into() } else { "--error-format=json".into() },
@@ -1532,7 +1565,7 @@ fn toolchain_env(toolchain: Option<&str>) -> Vec<(String, String)> {
     toolchain.map(|toolchain| ("RUSTUP_TOOLCHAIN".to_string(), toolchain.to_string())).into_iter().collect()
 }
 
-/// Returns a program, run from a directory, which is the build directory without one.
+/// Returns a program run from `dir`, or from the build directory if `dir` is `None`.
 fn program(program: &str, args: Vec<String>, dir: Option<&Path>, env: Vec<(String, String)>) -> rig::Exec {
     let dir = dir.map(|dir| dir.display().to_string());
     rig::Exec { program: program.into(), args, env, dir, stderr: None }
@@ -1543,13 +1576,16 @@ fn program_in_build_dir(name: &str, args: Vec<String>, env: Vec<(String, String)
     program(name, args, None, env)
 }
 
-/// Returns which workers rig may send a crate's commands to, beside those with its toolchain: those of the same release
-/// on another host, unless what it writes depends on the host, and those with the standard library of its target, if
-/// the target is builtin, which have the tags the crate gives.
+/// Returns which workers rig may send a crate's commands to, beside those which have its exact toolchain.
 ///
-/// What a crate writes depends on the host if it is a procedural macro, which is linked for the host, if it uses one,
-/// which rustc loads, as it is of the host which built it, or if it is linked, as `linked` says, by the linker of the
-/// host, rather than `rust-lld`, which rustc has on every host.
+/// - A worker must have the tags the crate gives.
+/// - If the crate's target is builtin, a worker must have the standard library for it.
+/// - A worker on another host, with the same release of the toolchain, may run the commands unless what they write
+///   depends on the host.
+///
+/// What a crate writes depends on the host if any of these holds: it is a procedural macro, which is linked for the
+/// host; it uses a procedural macro, which rustc loads, and which only loads on the host it was built on; or it is
+/// linked, as `linked` says, by the host's linker rather than by `rust-lld`, which rustc has on every host.
 fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> rig::Placement {
     let uses_proc_macro = unit.deps.iter().any(|&dep| units[dep].kind == Kind::ProcMacro);
     let lld = unit.codegen.iter().filter_map(|option| option.strip_prefix("linker=")).any(|linker| {
@@ -1560,18 +1596,19 @@ fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> ri
     rig::Placement { any_host, target: builtin.then(|| unit.target.clone()), tags: unit.worker_tags.clone() }
 }
 
-/// The variable which gives a command which links what identifies its linker, so that its result in the cache, whose
-/// key the command is part of, is not that of another linker. rustc does not read it.
+/// The environment variable through which a command which links is given its linker's identity. rustc does not read
+/// it: it is there to be part of the command, and so of its cache key, so that the result of one linker is never
+/// fetched for another.
 const LINKER_VARIABLE: &str = "JIG_LINKER";
 
-/// Whether a program is given by its path, relative to the file which gives it, rather than found by its name, as it
-/// has a separator, which on Windows may be `\` as well as `/`, as a path joined there has.
+/// Whether a program is given as a path, relative to the file which gives it, rather than as a name to find. It is a
+/// path if it has a separator, which on Windows may be `\` as well as `/`.
 fn is_path(program: &str) -> bool {
     program.contains('/') || (cfg!(windows) && program.contains('\\'))
 }
 
-/// Returns the linker a crate is linked by, by its name as its codegen options give it, `cc` by default, or `None` if
-/// it is `rust-lld`, which is part of the toolchain, and so of its identity.
+/// Returns the name of the linker a crate is linked by: the one its codegen options give, or the default for its
+/// target. Returns `None` for `rust-lld`, which is part of the toolchain, and so already part of its identity.
 fn linker_of(codegen: &[String], target: &str) -> Option<String> {
     let given = codegen.iter().rev().find_map(|option| option.strip_prefix("linker="));
     let linker = given.unwrap_or(if target.contains("-msvc") { "link.exe" } else { "cc" });
@@ -1579,9 +1616,9 @@ fn linker_of(codegen: &[String], target: &str) -> Option<String> {
     (!lld).then(|| linker.to_string())
 }
 
-/// Find what identifies the linker of each crate which links, as a program or a test harness: the file it is, and
-/// what it prints of its version, which the configuration depends on, so that it is configured again when the linker
-/// changes.
+/// Find the identity of the linker of each crate which links, as a program or a test harness. The identity is made
+/// from the linker's file and what it prints as its version. The configuration is made to depend on the file, so
+/// that the project is configured again when the linker changes.
 fn identify_linkers(project: &mut Project, crates: &[Crate]) {
     for c in crates.iter().filter(|c| c.kind != Kind::Lib || c.test) {
         let Some(linker) = linker_of(&codegen(c, project), &c.target) else {
@@ -1593,7 +1630,8 @@ fn identify_linkers(project: &mut Project, crates: &[Crate]) {
         let path = if is_path(&linker) {
             Some(PathBuf::from(&linker))
         } else {
-            // without depending on `PATH`, which would configure the project again whenever it changes
+            // searched for here, without recording `PATH` as read, which would reconfigure the project whenever it
+            // changes
             let search = std::env::var_os("PATH").unwrap_or_default();
             std::env::split_paths(&search).find_map(|dir| crate::platform::program_in(&dir, &linker))
         };
@@ -1612,7 +1650,7 @@ fn identify_linkers(project: &mut Project, crates: &[Crate]) {
     }
 }
 
-/// Returns the variable which gives a command which links what identifies its linker, if it has one which is not part
+/// Returns the environment variable which gives a linking command its linker's identity, if the linker is not part
 /// of the toolchain.
 fn linker_env(codegen: &[String], target: &str, project: &Project) -> Option<(String, String)> {
     let linker = linker_of(codegen, target)?;
@@ -1620,8 +1658,8 @@ fn linker_env(codegen: &[String], target: &str, project: &Project) -> Option<(St
     Some((LINKER_VARIABLE.to_string(), format!("{linker} {identity}")))
 }
 
-/// Returns the codegen options of a crate, followed by the linker of its target, unless the crate sets its own linker or
-/// linker flavor, as the two go together.
+/// Returns the codegen options of a crate, followed by the linker options of its target. The target's are left out
+/// if the crate sets its own linker or linker flavor, as the two go together.
 fn codegen(c: &Crate, project: &Project) -> Vec<String> {
     let mut codegen = c.codegen.clone();
     let own_linker = c.codegen.iter().any(|option| option.starts_with("linker=") || option.starts_with("linker-flavor="));
@@ -1637,8 +1675,8 @@ fn codegen(c: &Crate, project: &Project) -> Vec<String> {
 /// Builtin crates are passed to every other crate for the same target, but not to each other as that would be a cycle,
 /// so a builtin crate must `use` the others it depends on.
 ///
-/// The crates are looked up by name, and the builtin crates by target, rather than each crate being compared with every
-/// other, which would grow with the square of their number.
+/// The crates are looked up by name, and the builtin crates by target. Comparing every crate with every other
+/// would take time quadratic in their number.
 fn externs(crates: &[Crate]) -> Vec<Vec<usize>> {
     let mut named: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut builtins: HashMap<&str, Vec<usize>> = HashMap::new();
@@ -1670,10 +1708,11 @@ fn externs(crates: &[Crate]) -> Vec<Vec<usize>> {
     all
 }
 
-/// Returns the specification of a builtin target, `base`, which a custom target inherits, which is unstable, so it
-/// needs a nightly toolchain.
+/// Returns the specification of a builtin target, `base`, for a custom target to inherit. Printing it is unstable, so
+/// this needs a nightly toolchain.
 ///
-/// It fails if rustc does, or prints no specification, as it may not exit unsuccessfully, with what rustc reported.
+/// It fails, with what rustc reported, if rustc fails or prints no specification. Both are checked, as rustc does
+/// not always exit unsuccessfully.
 fn target_spec_json(target: &str, base: &str, toolchain: Option<&str>) -> Result<String, Error> {
     let target_flag = format!("--target={base}");
     let mut cmd = crate::rustc::command(&["-Zunstable-options", "--print=target-spec-json", &target_flag], toolchain);
@@ -1748,7 +1787,7 @@ mod benches {
         let _ = std::os::unix::fs::symlink("real/inner", dir.join("link"));
         let path = |n: usize| dir.join("link/../inner/../".repeat(n)).join("Jig");
         assert_linear("normalize", 50, path, |path| {
-            std::hint::black_box(normalize(path));
+            std::hint::black_box(normalize(Path::new(""), path));
         });
         let _ = std::fs::remove_dir_all(&dir);
     }

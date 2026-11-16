@@ -1,11 +1,12 @@
-//! The user's configuration, `$XDG_CONFIG_HOME/jig/config`, or on Windows, `%APPDATA%\jig\config`, or
-//! `~/.config/jig/config`, or the file `JIG_CONFIG` gives, unless it is empty or `off`.
+//! The user's configuration. It is the file `JIG_CONFIG` names, unless that is empty or `off`, which turn it off,
+//! and otherwise `$XDG_CONFIG_HOME/jig/config`, or failing that, on Windows, `%APPDATA%\jig\config`, or failing
+//! that `~/.config/jig/config`.
 //!
-//! It is a file of the same statements as `Jig`, which is processed before a project's own, as if the project began
-//! with a `use` of it, so that it sets what belongs to the user or the machine rather than the project, such as rig's
-//! cache, with `cache/dir`, `cache/remote` and the other builtin properties of the cache. A project's configuration
-//! depends on it, so that it is configured again when it changes, or once it is created. `jig cache` and `jig serve`,
-//! which have no project, process it alone.
+//! It holds the same statements as a `Jig` file, and is processed before a project's own files, as if the project
+//! began with a `use` of it. It is for settings which belong to the user or the machine rather than to a project,
+//! such as rig's cache: `cache/dir`, `cache/remote` and the other builtin properties of the cache. A project's
+//! configuration depends on it, so the project is configured again when it changes, or when it is first created.
+//! `jig cache` and `jig serve`, which have no project, process it on its own.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -16,11 +17,12 @@ use crate::project::{File, Project};
 /// The environment variable which gives the user's configuration, or turns it off.
 pub const VARIABLE: &str = "JIG_CONFIG";
 
-/// Returns the path of the user's configuration, absolute, from environment variables as `env` gives them, or `None`
-/// if it is turned off, or there is nowhere for it, without `XDG_CONFIG_HOME`, `APPDATA` on Windows, and `HOME`.
+/// Returns the absolute path of the user's configuration, from environment variables as `env` gives them. Returns
+/// `None` if it is turned off, or if there is nowhere for it, as none of `XDG_CONFIG_HOME`, `APPDATA` on Windows,
+/// and `HOME` is set.
 ///
-/// A variable is only read if the one before it is not set, so that the configuration depends only on those which
-/// decide where it is.
+/// Each variable is only read if the one before it is not set, so that the configuration depends on no more
+/// variables than those which decide where the file is.
 pub fn path(mut env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
     let set = |value: Option<OsString>| value.filter(|value| !value.is_empty());
     let path = match env(VARIABLE) {
@@ -36,8 +38,8 @@ pub fn path(mut env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
     std::path::absolute(&path).ok()
 }
 
-/// Process the user's configuration in a project, before the project's own files, if there is one, which the project
-/// then depends on, or, while it is missing, is configured again once it exists.
+/// Process the user's configuration in a project, before the project's own files. The project then depends on
+/// it. If the file does not exist, nothing is processed, and the project is configured again once it does.
 ///
 /// # Errors
 ///

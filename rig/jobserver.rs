@@ -1,15 +1,16 @@
-//! A GNU make jobserver, which shares the jobs of a build with the commands it runs, such as rustc's codegen threads,
-//! and `make` and `cargo` run as commands, so that together they run no more at once than the build allows.
+//! A GNU make jobserver, through which a build shares its jobs with the commands it runs, such as rustc's codegen
+//! threads, or `make` and `cargo` run as commands. Together they then run no more at once than the build allows.
 //!
-//! A jobserver holds a token for each job beyond the first: on Unix a byte in a FIFO, and on Windows a count of a
-//! named semaphore, as GNU make has them. Each command holds one job without a token, and takes a token for each other
-//! job it runs, which it gives back once the job is done. rig takes a token for each edge it runs beyond the first, and
-//! gives the commands the jobserver in `MAKEFLAGS` and `CARGO_MAKEFLAGS`, as `--jobserver-auth=fifo:<path>` on Unix,
-//! as GNU make 4.4 does, or `--jobserver-auth=<name>` on Windows.
+//! A jobserver holds a token for each job beyond the first. On Unix a token is a byte in a FIFO, and on Windows a
+//! count of a named semaphore, as in GNU make. Each command has one job without a token, and takes a token for
+//! every further job it runs, giving it back when the job is done. rig likewise takes a token for each edge it runs
+//! beyond the first. It hands the jobserver to its commands in `MAKEFLAGS` and `CARGO_MAKEFLAGS`, as
+//! `--jobserver-auth=fifo:<path>` on Unix, which is the form GNU make 4.4 uses, or `--jobserver-auth=<name>` on
+//! Windows.
 //!
-//! When rig is itself run by a jobserver which it can join, it takes its tokens from that one instead, and leaves the
-//! environment of its commands as it is. A jobserver of file descriptors, which older versions of make give on Unix,
-//! is not joined, and rig creates its own.
+//! If rig is itself run under a jobserver it can join, it takes its tokens from that one, and leaves the environment
+//! of its commands alone. It cannot join a jobserver of file descriptors, which older versions of make provide on
+//! Unix, and creates its own instead.
 
 use std::process::Command;
 

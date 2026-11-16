@@ -1,16 +1,28 @@
 //! The format a [`Graph`] is saved in.
 //!
-//! It is the magic bytes and the version, then the paths of the nodes, then the edges, then the defaults, followed by a
-//! checksum of all that precedes it, the 64-bit FNV-1a hash. Numbers are little-endian `u32`s, strings are their length
-//! followed by their UTF-8 bytes, and a list of nodes is its length followed by each node's index.
+//! Numbers are little-endian `u32`s. A string is its length followed by its UTF-8 bytes, a list is its length followed
+//! by its items, a node is its index, and an optional value is `0`, or `1` followed by the value.
 //!
-//! An edge is its kind, `0` for an alias, `1` for a shell command followed by the command, or `2` for a program
-//! followed by the program, its arguments as a list of strings, its environment variables as their number followed by
-//! each name and value, then its working directory and the file of its stderr, each as `0`, or `1` followed by the
-//! path, then its description, its depfile as `0`, or `1` followed by the path, its pool, `0` or `1` for the console,
-//! its flags, `1` if it is a generator, `2` if it is restat and `4` if it is hashed, then what identifies it in the
-//! cache as `0` if it is not cached, or `1` followed by the string, then the environment variables it passes on, as a
-//! list of strings, then its lists of nodes: outputs, inputs, dependencies and what it is built after.
+//! A graph is the magic bytes, the version, the paths of the nodes as a list of strings, the edges as a list, and the
+//! default targets as a list of nodes. A checksum follows, the 64-bit FNV-1a hash of everything before it.
+//!
+//! An edge is, in order:
+//!
+//! - its kind: `0` for an alias, or `1` followed by its program;
+//! - its description;
+//! - its depfile, an optional string;
+//! - its pool: `0`, or `1` for the console;
+//! - its flags: the sum of `1` if it is a generator, `2` if it is restat and `4` if it is hashed;
+//! - its cache identity, an optional string;
+//! - the environment variables it passes on, a list of strings;
+//! - its placement: `1` if it may run on any host or else `0`, its target as an optional string, and its tags as a
+//!   list of strings;
+//! - the program which discovers its inputs, an optional program;
+//! - its early outputs, a list of nodes;
+//! - its outputs, inputs, dependencies and what it is built after, each a list of nodes.
+//!
+//! A program is its name, its arguments as a list of strings, its environment variables as a list of names each
+//! followed by its value, then its working directory and the file its stderr is written to, each an optional string.
 
 use std::path::Path;
 
@@ -18,8 +30,8 @@ use crate::graph::{Edge, EdgeKind, Exec, Graph, NodeId, Pool};
 use crate::Error;
 
 const MAGIC: &[u8; 4] = b"RIGG";
-/// The version of the format, which jig's database changes with, so that jig configures a project again, rather than
-/// failing to load its graph.
+/// The version of the format. Change the version of jig's database with it, so that jig configures a project again
+/// rather than failing to load a graph of the old version.
 const VERSION: u32 = 10;
 
 const GENERATOR: u32 = 1;
@@ -47,39 +59,21 @@ impl Graph {
                 },
             }
             w.str(edge.description());
-            match edge.depfile() {
-                None => w.u32(0),
-                Some(depfile) => {
-                    w.u32(1);
-                    w.str(depfile);
-                },
-            }
+            w.optional(edge.depfile());
             w.u32(match edge.pool() {
                 Pool::Default => 0,
                 Pool::Console => 1,
             });
             let flags = [(edge.generator(), GENERATOR), (edge.restat(), RESTAT), (edge.hashed_flag(), HASHED)];
             w.u32(flags.into_iter().filter(|&(set, _)| set).fold(0, |flags, (_, flag)| flags | flag));
-            match edge.cache() {
-                None => w.u32(0),
-                Some(cache) => {
-                    w.u32(1);
-                    w.str(cache);
-                },
-            }
+            w.optional(edge.cache());
             w.len(edge.pass_env().len());
             for name in edge.pass_env() {
                 w.str(name);
             }
             let placement = edge.placement();
             w.u32(u32::from(placement.any_host));
-            match &placement.target {
-                None => w.u32(0),
-                Some(target) => {
-                    w.u32(1);
-                    w.str(target);
-                },
-            }
+            w.optional(placement.target.as_deref());
             w.len(placement.tags.len());
             for tag in &placement.tags {
                 w.str(tag);
@@ -125,13 +119,13 @@ impl Graph {
         // each path takes at least 4 bytes, so a corrupted count does not reserve more than the file holds
         graph.reserve(count.min(body.len() / 4));
         for node in 0..count {
-            // a path seen before is the node it was, rather than the next
+            // a repeated path gives the node it already has, rather than a new one
             if graph.file(r.str()?).0 as usize != node {
                 return Err(Error::Format("duplicate path"));
             }
         }
         let nodes = graph.nodes();
-        // the lists of each edge are read into the same vectors, which the graph copies its nodes from
+        // every edge's lists are read into the same four vectors, which the graph copies from
         let mut lists: [Vec<NodeId>; crate::graph::LISTS] = Default::default();
         for _ in 0..r.u32()? {
             let kind = match r.u32()? {
@@ -207,7 +201,8 @@ impl Graph {
         }
         Ok(graph)
     }
-    /// Save the graph to a file, which is replaced once it is written, so that it is never seen half written.
+    /// Save the graph to a file. It is written beside the file and renamed over it, so that the file is never seen
+    /// half written.
     ///
     /// # Errors
     ///
@@ -286,8 +281,9 @@ struct Reader<'a> {
     pos: usize,
 }
 impl<'a> Reader<'a> {
-    // the error is made only when it is returned, as making it for each read, to drop it, is most of reading a graph
-    #[allow(clippy::unnecessary_lazy_evaluations, reason = "an error which is made is dropped, which is not cheap")]
+    // The error is built lazily: building and dropping one for every successful read took most of the time of
+    // loading a graph.
+    #[allow(clippy::unnecessary_lazy_evaluations, reason = "building an error to drop it is not cheap")]
     #[inline]
     fn take(&mut self, len: usize) -> Result<&'a [u8], Error> {
         let range = self.pos..self.pos.saturating_add(len);
@@ -323,8 +319,8 @@ impl<'a> Reader<'a> {
         self.nodes_into(nodes, &mut list)?;
         Ok(list)
     }
-    /// Read a list of nodes into a vector, in place of what it held, as [`Self::nodes`] does.
-    #[allow(clippy::unnecessary_lazy_evaluations, reason = "an error which is made is dropped, which is not cheap")]
+    /// Read a list of nodes, as [`Self::nodes`] does, into a vector, replacing what it held.
+    #[allow(clippy::unnecessary_lazy_evaluations, reason = "building an error to drop it is not cheap")]
     fn nodes_into(&mut self, nodes: usize, list: &mut Vec<NodeId>) -> Result<(), Error> {
         list.clear();
         let len = self.u32()? as usize;

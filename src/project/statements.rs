@@ -302,9 +302,9 @@ impl Project {
         let span = location.or((!quiet).then_some(operand.span));
         self.diagnostics.push(Diagnostic { span, message, severity });
     }
-    /// Returns where a statement which a name refers to is: the one which gave a property its value, or declared it,
-    /// as for a crate or a custom command, or the declaration of a target or a test, reporting a name which refers to
-    /// none of them, or to one without a location, as it is builtin.
+    /// Returns the location of the statement a name refers to: the one which gave a property its value, or declared
+    /// it, as for a crate or a custom command, or the declaration of a target or a test. A name which refers to
+    /// none of those, or to something builtin, which has no location, is reported.
     fn location(&mut self, name: &str, span: Span) -> Option<Span> {
         let value = self.referenced_value(name, span.file).map(|value| (value.span, value.property));
         let declared = |this: &Self, property: usize| this.properties.get(property)?.as_ref()?.span;
@@ -471,8 +471,8 @@ impl Project {
         self.check_path(&path, span)?;
         Some((path, span))
     }
-    /// Take the optional value of an attribute after its name, which is at the parser, as an operand which is `none`
-    /// without a value.
+    /// Take the optional value of an attribute, with the parser just after the attribute's name. Without a value,
+    /// the operand is `none`.
     ///
     /// Returns [`None`] if the value could not be taken, which has been reported.
     pub(super) fn parse_attribute_value(&mut self, parser: &mut Parser, name_span: Span) -> Option<Operand> {
@@ -488,9 +488,9 @@ impl Project {
         }
         self.bool_operand(operand)
     }
-    /// Take the crates named by an attribute, such as `use`, as a name, which may be computed, as a `str`, or a list of
-    /// them, written as a list or computed in `{}`, as a list of `str`, so that the crates can be chosen by the
-    /// configuration.
+    /// Take the crates named by an attribute, such as `use`. The value is a name, or a list of names. A name may be
+    /// computed in `{}`, as a `str`, and so may the whole list, as a list of `str`, so that the configuration can
+    /// choose the crates.
     ///
     /// The items of a list are names, or references to crates which have been declared.
     pub(super) fn parse_crate_names(&mut self, parser: &mut Parser) -> Option<(Data, Span)> {

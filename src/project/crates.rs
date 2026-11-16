@@ -419,9 +419,9 @@ impl Project {
             pass_env: Vec::new(),
         });
     }
-    /// Complete the tests of the crates with a `test` attribute, which were forward declared, with the runner of their
-    /// target. Tests run for a target which allows them, which a builtin target does by default if the host can run
-    /// what is built for it, and the others are removed.
+    /// Complete the tests of the crates with a `test` attribute, which were forward declared, now that the runner of
+    /// each target is known. A test is kept if its target allows tests, which a builtin target does by default if the
+    /// host can run what is built for it. The others are removed.
     pub(super) fn add_crate_tests(&mut self) {
         let host = self.host();
         // removed once the others are complete, so that the indices of the others stay the same until then

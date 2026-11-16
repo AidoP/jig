@@ -1,5 +1,5 @@
-//! A cache of the results of edges, shared between builds, so that an edge which has already run with the same action
-//! and inputs, in any build which shares the cache, has its outputs fetched rather than running again.
+//! A cache of the results of edges, shared between builds. An edge which has already run with the same action and
+//! inputs, in any build sharing the cache, has its outputs fetched instead of running again.
 //!
 //! The cache is a directory of three stores:
 //!
@@ -10,23 +10,25 @@
 //! - `ac`, the results, by the second key of an edge, each of which lists the edge's outputs, with the blob of each,
 //!   and the blob of what its command printed.
 //!
-//! An edge is found by two keys, as the inputs it discovers are known only once it has run, as ccache's manifests find
-//! a compilation: the first, by [`first_key`], is of its action and the contents of the inputs it declares, and leads
-//! to the sets of inputs it discovered when it ran with them before. The second, by [`second_key`], is of the first and
-//! the contents of the inputs of one of those sets, as they are now, and leads to a result.
+//! An edge is found in two steps, because the inputs it discovers are only known once it has run. ccache's manifests
+//! work the same way.
 //!
-//! A hit makes its result and manifest the latest used, by their modification times, so that [`Cache::gc`] removes
-//! the results which were used longest ago first, then the blobs which no result refers to, and the manifests which
-//! were not used since.
+//! 1. The first key, from [`first_key`], is made from the edge's action and the contents of the inputs it declares. It
+//!    leads to a manifest: the sets of inputs the edge discovered when it ran with that key before.
+//! 2. The second key, from [`second_key`], is made from the first key and the contents, as they are now, of the inputs
+//!    in one of those sets. It leads to a result.
 //!
-//! A cache can have a [`Remote`] behind it, another cache which it is in front of: what is not found in it is looked
-//! for there, and a blob which is not in it is fetched from there when it is needed, while what is added to it is
-//! pushed there if the remote takes pushes.
+//! A hit sets the modification times of its result and manifest to now. [`Cache::gc`] uses those times to remove the
+//! results used longest ago first, then the blobs no remaining result refers to, and the manifests not used since.
 //!
-//! A file is written to `tmp` and renamed into place, so that a build which reads the cache while another writes to
-//! it never sees a file half written, and builds need not lock it. A blob is checked against its hash when it is read,
-//! and a manifest or result against the hash which ends it, so that a cache which is corrupted is a miss, and the file
-//! is removed, rather than a build which is wrong.
+//! A cache can have a [`Remote`] cache behind it. What is not found locally is looked for there, a blob which is not
+//! held locally is fetched from there when it is needed, and what is added locally is pushed there, if the remote
+//! takes pushes.
+//!
+//! Every file is written to `tmp` and renamed into place, so a build reading the cache never sees a file another
+//! build has half written, and builds need not lock the cache. A blob is checked against its hash when it is read,
+//! and a manifest or result against the hash which ends it. A corrupted file is removed and counts as a miss, so
+//! corruption never leads to a wrong build.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,28 +44,29 @@ use crate::remote::Remote;
 pub type Hash = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"RIGC";
-/// The version of the format of manifests and results, which is 2 since results compiled by another toolchain than
-/// the one they were identified by, which the hermetic environment chose before `RUSTUP_TOOLCHAIN` was passed on, were
-/// kept, so that they are not found.
+/// The version of the format of manifests and results.
+///
+/// It became 2 to discard results stored under the wrong toolchain's identity: before `RUSTUP_TOOLCHAIN` was passed
+/// on, the hermetic environment could run a different toolchain from the one a result was identified by.
 const VERSION: u32 = 2;
 pub(crate) const MANIFEST: u8 = 1;
 pub(crate) const RESULT: u8 = 2;
 
-/// The most sets of discovered inputs a manifest keeps, the latest first, so that one which is looked up is not read
-/// in full after many changes.
+/// The most sets of discovered inputs a manifest keeps, latest first. The limit bounds the cost of a lookup for an
+/// edge whose inputs have changed many times.
 const MANIFEST_MAX: usize = 16;
 
-/// How long a blob which no result refers to, or a file in `tmp`, is kept, as a build may be adding the result which
-/// refers to it, or writing it.
+/// How long collection leaves a blob which no result refers to, or a file in `tmp`. A build may still be writing the
+/// file, or about to add the result which refers to the blob.
 const GRACE: std::time::Duration = std::time::Duration::from_hours(1);
 
-/// How long an edge which failed on a worker, and not here, is marked to run here.
+/// How long an edge which failed on a worker but succeeded here stays marked to run here.
 const LOCAL_FOR: std::time::Duration = std::time::Duration::from_hours(24 * 30);
 
-/// The file whose modification time is when the cache was last collected, by [`Cache::gc_if_due`].
+/// The file whose modification time records when [`Cache::gc_if_due`] last collected the cache.
 const COLLECTED: &str = "collected";
 
-/// The files written to `tmp`, so that each is named differently from others the process writes at once.
+/// Counts the files this process has written to `tmp`, to give each a different name.
 static WRITTEN: AtomicU64 = AtomicU64::new(0);
 
 /// The cache in a directory, and the remote cache behind it, if it has one.
@@ -96,8 +99,8 @@ pub struct Output {
     pub executable: bool,
 }
 
-/// A blob being written in parts, as it is received, hashed as it is written, to a file in `tmp`, which is removed
-/// unless it is finished.
+/// A blob being written in parts, as it is received, to a file in `tmp`. It is hashed as it is written, and the file
+/// is removed if the blob is never finished.
 pub struct BlobWriter {
     cache: Cache,
     tmp: PathBuf,
@@ -173,7 +176,7 @@ fn stored(dir: &Path) -> Vec<Stored> {
     files.collect()
 }
 
-/// Make a file the latest used, as its modification time.
+/// Mark a file as used just now, by setting its modification time.
 fn touch(path: &Path) {
     if let Ok(file) = std::fs::File::options().write(true).open(path) {
         let _ = file.set_modified(std::time::SystemTime::now());
@@ -214,7 +217,7 @@ impl Cache {
     fn keyed(&self, store: &str, key: &Hash) -> PathBuf {
         self.dir.join(store).join(hex(key))
     }
-    /// Returns a path in `tmp` which no other file which is written at once has.
+    /// Returns a path in `tmp` which no other file being written has.
     fn tmp(&self) -> PathBuf {
         let count = WRITTEN.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
@@ -238,7 +241,7 @@ impl Cache {
     pub fn has_blob(&self, hash: &Hash) -> bool {
         self.blob_path(hash).is_file()
     }
-    /// Whether the cache has a blob, which is made the latest used if it does, so that it is kept from collection.
+    /// Whether the cache has a blob. If it does, the blob is marked as used just now, which keeps it from collection.
     pub(crate) fn use_blob(&self, hash: &Hash) -> bool {
         let path = self.blob_path(hash);
         let has = path.is_file();
@@ -247,12 +250,12 @@ impl Cache {
         }
         has
     }
-    /// Add a file to the cache as a blob, whose contents have the hash, unless the cache has it.
+    /// Add a file to the cache as a blob, unless the cache already has it. `hash` is the hash of the file's contents.
     ///
     /// # Errors
     ///
-    /// If the file cannot be copied into the cache, or its contents do not have the hash, as it changed since it was
-    /// hashed.
+    /// If the file cannot be copied into the cache, or its contents no longer have the hash, as it changed after it
+    /// was hashed.
     pub fn put_file(&self, path: &Path, hash: &Hash) -> std::io::Result<()> {
         if self.has_blob(hash) {
             return Ok(());
@@ -283,7 +286,7 @@ impl Cache {
     ///
     /// # Errors
     ///
-    /// If the cache does not have the blob, or it is corrupted, when it is removed.
+    /// If the cache does not have the blob, or the blob is corrupted, in which case it is removed.
     pub fn read_blob(&self, hash: &Hash) -> std::io::Result<Vec<u8>> {
         self.fetch_blob(hash);
         let path = self.blob_path(hash);
@@ -294,12 +297,13 @@ impl Cache {
         }
         Ok(bytes)
     }
-    /// Write a blob to a file, replacing it, once the copy is checked against its hash, by a reflink where the file
-    /// system can, and otherwise by copying it.
+    /// Write a blob to a file, replacing the file. The blob is copied, by a reflink where the file system supports
+    /// one, and the copy is checked against the hash before it replaces the file.
     ///
     /// # Errors
     ///
-    /// If the cache does not have the blob, it is corrupted, when it is removed, or the file cannot be written.
+    /// If the cache does not have the blob, the file cannot be written, or the blob is corrupted, in which case it is
+    /// removed.
     pub fn restore(&self, hash: &Hash, path: &Path, executable: bool) -> std::io::Result<()> {
         self.fetch_blob(hash);
         let blob = self.blob_path(hash);
@@ -319,14 +323,14 @@ impl Cache {
         }
         restored
     }
-    /// Fetch a blob from the remote cache if this one does not have it, once it is checked against its hash, returning
-    /// whether this one has it then.
+    /// Fetch a blob from the remote cache if this one does not have it, checking it against its hash. Returns whether
+    /// this cache has the blob afterwards.
     fn fetch_blob(&self, hash: &Hash) -> bool {
         self.fetch_blobs(std::slice::from_ref(hash));
         self.has_blob(hash)
     }
-    /// Fetch the blobs this cache does not have from the remote cache, asking for them at once, each checked against
-    /// its hash.
+    /// Fetch the blobs this cache does not have from the remote cache, in one request, checking each against its
+    /// hash.
     pub fn fetch_blobs(&self, blobs: &[Hash]) {
         let Some(remote) = self.remote() else {
             return;
@@ -337,11 +341,12 @@ impl Cache {
         }
         remote.fetch_blobs(self, &missing);
     }
-    /// Add a blob which was sent, if it has its hash, returning whether it was added.
+    /// Add a blob which was sent to this cache, if its contents have the hash. Returns whether it was added.
     pub(crate) fn accept_blob(&self, hash: &Hash, bytes: &[u8]) -> bool {
         blake3::hash(bytes) == *hash && self.put_bytes(bytes).is_ok()
     }
-    /// Returns what writes a blob in parts, as it is received, which is added once it is finished, if it has its hash.
+    /// Returns a writer for a blob which is received in parts. When it is finished, the blob is added if its contents
+    /// have the hash.
     ///
     /// # Errors
     ///
@@ -361,7 +366,7 @@ impl Cache {
         let size = file.metadata()?.len();
         Ok((file, size))
     }
-    /// Remove a blob, as one which was found to be corrupted.
+    /// Remove a blob, such as one found to be corrupted.
     pub(crate) fn remove_blob(&self, hash: &Hash) {
         let _ = std::fs::remove_file(self.blob_path(hash));
     }
@@ -376,7 +381,8 @@ impl Cache {
     }
     /// Returns the sets of inputs an edge discovered when it ran with a first key, the latest first.
     ///
-    /// Those of the remote cache follow those of this one, as it may have run with other inputs elsewhere.
+    /// The sets from the remote cache follow those from this one, as the edge may have run with other inputs
+    /// elsewhere.
     #[must_use]
     pub fn manifest(&self, key: &Hash) -> Vec<Discovery> {
         let mut manifest = self.local_manifest(key);
@@ -394,8 +400,8 @@ impl Cache {
     }
     /// Add a set of inputs which an edge discovered when it ran with a first key to its manifest, as the latest.
     ///
-    /// A build which adds to the same manifest at once may replace this one, which loses one set or the other, and
-    /// so makes a miss rather than a build which is wrong.
+    /// Two builds adding to the same manifest at the same time may overwrite each other, losing one of the sets. That
+    /// only causes a later miss, never a wrong build.
     ///
     /// # Errors
     ///
@@ -410,8 +416,9 @@ impl Cache {
         std::fs::write(&tmp, &bytes)?;
         Self::place(&tmp, &self.keyed("mf", key))
     }
-    /// Returns the result of an edge by its second key, if the cache has it and every blob it needs, or else the
-    /// remote cache has it, when it is added to this one, and its blobs are fetched when they are restored.
+    /// Returns the result of an edge by its second key. It is taken from this cache if it has the result and every
+    /// blob the result needs, and otherwise from the remote cache. A result from the remote cache is added to this
+    /// one, and its blobs are fetched later, when they are restored.
     #[must_use]
     pub fn result(&self, key: &Hash) -> Option<Entry> {
         if let Some(entry) = self.local_result(key) {
@@ -432,11 +439,13 @@ impl Cache {
         self.accept_raw(&self.keyed("ac", key), bytes).ok()?;
         Some(entry)
     }
-    /// Returns the result of an edge by its first key, and its second, which `second` finds from a set of inputs the
-    /// edge discovered: by each set in this cache's manifest, the latest first, then, if none of them leads to a result
-    /// here, by every set in this one's and the remote's, asked for at once. A result found in the remote cache is
-    /// added to this one, with its set of inputs, and its blobs are fetched when they are restored. The result found is
-    /// made the latest used.
+    /// Finds the result of an edge from its first key. Returns the second key it was found under, and the result.
+    ///
+    /// `second` computes the second key for a set of inputs the edge discovered. Each set in this cache's manifest is
+    /// tried first, latest first. If none leads to a result here, every set in this cache's and the remote's
+    /// manifests is tried against the remote cache, in one request. A result found in the remote cache is added to
+    /// this one, with its set of inputs, and its blobs are fetched later, when they are restored. The result found is
+    /// marked as used just now.
     #[must_use]
     pub fn find(&self, first: &Hash, second: impl Fn(&Discovery) -> Hash) -> Option<(Hash, Entry)> {
         let mut discoveries = self.local_manifest(first);
@@ -462,8 +471,8 @@ impl Cache {
         let _ = self.add_to_manifest(first, discoveries[index].clone());
         Some((keys[index], entry))
     }
-    /// Returns a result as it is stored, by its second key, if it is valid and the cache has every blob it needs, as a
-    /// remote cache sends it.
+    /// Returns the stored bytes of a result, by its second key, if it is valid and the cache has every blob it needs.
+    /// A remote cache serves these.
     pub(crate) fn raw_result(&self, key: &Hash) -> Option<Vec<u8>> {
         let path = self.keyed("ac", key);
         let bytes = std::fs::read(&path).ok()?;
@@ -473,7 +482,7 @@ impl Cache {
             bytes
         })
     }
-    /// Returns a manifest as it is stored, by its first key, if it is valid, as a remote cache sends it.
+    /// Returns the stored bytes of a manifest, by its first key, if it is valid. A remote cache serves these.
     pub(crate) fn raw_manifest(&self, key: &Hash) -> Option<Vec<u8>> {
         let path = self.keyed("mf", key);
         let bytes = std::fs::read(&path).ok()?;
@@ -481,7 +490,8 @@ impl Cache {
         touch(&path);
         Some(bytes)
     }
-    /// Add a result which was sent as it is stored, by its second key, if it is valid, returning whether it was added.
+    /// Add a result which was sent as its stored bytes, under its second key, if it is valid. Returns whether it was
+    /// added.
     pub(crate) fn accept_result(&self, key: &Hash, bytes: &[u8]) -> bool {
         let valid = valid(RESULT, bytes).and_then(read_result).is_some();
         valid && self.accept_raw(&self.keyed("ac", key), bytes).is_ok()
@@ -500,8 +510,9 @@ impl Cache {
     pub fn is_local(&self, first: &Hash) -> bool {
         self.keyed("local", first).is_file()
     }
-    /// Push the result of an edge, by its keys, and the inputs it discovered, to the remote cache, if it takes pushes,
-    /// in the background, returning whether it is to be pushed. [`Self::wait_for_pushes`] waits for it.
+    /// Push the result of an edge, with its keys and the inputs it discovered, to the remote cache, if that takes
+    /// pushes. The push happens in the background, and [`Self::wait_for_pushes`] waits for it. Returns whether a push
+    /// was queued.
     #[must_use]
     pub fn push(&self, first: &Hash, second: &Hash, discovery: &Discovery) -> bool {
         let Some(remote) = self.remote() else {
@@ -517,7 +528,7 @@ impl Cache {
     pub fn put_result(&self, key: &Hash, entry: &Entry) -> std::io::Result<()> {
         self.write_bytes(&self.keyed("ac", key), &encode_result(entry))
     }
-    /// Wait until what is to be pushed to the remote cache has been, if there is one.
+    /// Wait until everything queued for the remote cache has been pushed. Does nothing without a remote cache.
     pub fn wait_for_pushes(&self) {
         if let Some(remote) = self.remote() {
             remote.wait_for_pushes();
@@ -533,9 +544,11 @@ impl Cache {
         std::fs::write(&tmp, bytes)?;
         Self::place(&tmp, path)
     }
-    /// Write a blob to a file, which a command reads as an input, by a hard link where it can, and otherwise as
-    /// [`Self::restore`] does. A link shares the blob's file, so it is only for a file which is removed once it is
-    /// read, and which is not executable, as the blob's mode is not changed.
+    /// Write a blob to a file which a command will read as an input: by a hard link where possible, and otherwise as
+    /// [`Self::restore`] does.
+    ///
+    /// A hard link shares the blob's file. So this is only for a file which is removed once it has been read, and
+    /// which is not executable, as the blob's mode must not be changed.
     ///
     /// # Errors
     ///
@@ -548,7 +561,8 @@ impl Cache {
     }
 }
 
-/// Returns a manifest as it is stored, of its sets of discovered inputs with another as the latest, keeping the latest.
+/// Returns the stored bytes of a manifest with `discovery` put first among its sets of discovered inputs. The sets
+/// beyond the most a manifest keeps are dropped.
 fn manifest_with(mut manifest: Vec<Discovery>, discovery: Discovery) -> Vec<u8> {
     manifest.retain(|other| *other != discovery);
     manifest.insert(0, discovery);
@@ -562,7 +576,7 @@ fn manifest_with(mut manifest: Vec<Discovery>, discovery: Discovery) -> Vec<u8> 
     sealed(w)
 }
 
-/// Returns what is written, ended by the hash of it, as each manifest and result is stored.
+/// Returns what was written followed by its hash, which is how each manifest and result is stored.
 fn sealed(w: Writer) -> Vec<u8> {
     let mut bytes = w.0;
     let hash = blake3::hash(&bytes);
@@ -570,7 +584,7 @@ fn sealed(w: Writer) -> Vec<u8> {
     bytes
 }
 
-/// Returns a result as it is stored.
+/// Returns the stored bytes of a result.
 pub(crate) fn encode_result(entry: &Entry) -> Vec<u8> {
     let mut w = header(RESULT);
     w.bytes(&entry.printed);
@@ -583,7 +597,7 @@ pub(crate) fn encode_result(entry: &Entry) -> Vec<u8> {
     sealed(w)
 }
 
-/// Returns a writer of a manifest or a result, which begins with what it is.
+/// Returns a writer for a manifest or a result, already holding the header which says which it is.
 fn header(kind: u8) -> Writer {
     let mut w = Writer::new();
     w.bytes(MAGIC);
@@ -592,18 +606,19 @@ fn header(kind: u8) -> Writer {
     w
 }
 
-/// Returns a result from how it is stored, if it is valid.
+/// Parses the stored bytes of a result, if they are valid.
 pub(crate) fn decode_result(bytes: &[u8]) -> Option<Entry> {
     read_result(valid(RESULT, bytes)?)
 }
 
-/// Returns a manifest as it is stored, as it was, if it is valid, with another set of discovered inputs as the latest.
+/// Returns the stored bytes of a manifest with another set of discovered inputs added as the latest. `stored` is the
+/// manifest as it was, which is ignored if it is not valid.
 pub(crate) fn merged_manifest(stored: Option<&[u8]>, discovery: Discovery) -> Vec<u8> {
     let manifest = stored.and_then(|bytes| read_manifest(valid(MANIFEST, bytes)?)).unwrap_or_default();
     manifest_with(manifest, discovery)
 }
 
-/// Returns the blobs a result as it is stored refers to, if it is valid.
+/// Returns the blobs which the stored bytes of a result refer to, if they are valid.
 pub(crate) fn result_blobs(result: &[u8]) -> Option<Vec<Hash>> {
     let entry = read_result(valid(RESULT, result)?)?;
     Some(entry_blobs(&entry).copied().collect())
@@ -614,7 +629,7 @@ pub(crate) fn entry_blobs(entry: &Entry) -> impl Iterator<Item = &Hash> {
     std::iter::once(&entry.printed).chain(entry.outputs.iter().map(|output| &output.blob))
 }
 
-/// Returns the body of a manifest or result as it is stored, if it is one of this version which is not corrupted.
+/// Returns the body of the stored bytes of a manifest or result, if they are of this version and not corrupted.
 pub(crate) fn valid(kind: u8, bytes: &[u8]) -> Option<&[u8]> {
     let header = MAGIC.len() + 5;
     let ok = bytes.len() >= header + 32 && bytes.starts_with(MAGIC) && bytes[4..8] == VERSION.to_le_bytes();
@@ -622,7 +637,7 @@ pub(crate) fn valid(kind: u8, bytes: &[u8]) -> Option<&[u8]> {
     (ok && bytes[8] == kind && blake3::hash(body) == hash).then(|| &body[header..])
 }
 
-/// Returns the body of a manifest or result, which is removed if it is corrupted.
+/// Reads the body of a manifest or result from its file, removing the file if it is corrupted.
 fn read(kind: u8, path: &Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
     let body = valid(kind, &bytes).map(<[u8]>::to_vec);
@@ -633,8 +648,8 @@ fn read(kind: u8, path: &Path) -> Option<Vec<u8>> {
 }
 
 impl Cache {
-    /// Make the result found by a second key, and the manifest of its first, the latest used, so that they are the
-    /// last to be collected.
+    /// Mark the result under a second key, and the manifest under its first key, as used just now, so that they are
+    /// the last to be collected.
     pub fn used(&self, first: &Hash, second: &Hash) {
         touch(&self.keyed("mf", first));
         touch(&self.keyed("ac", second));
@@ -661,12 +676,16 @@ impl Cache {
     }
     /// Remove what was used longest ago until the cache is no larger than `max` bytes.
     ///
-    /// The results which were used longest ago are removed first, with each blob once no result which is kept refers
-    /// to it, then the manifests which were not used since the latest result removed was, and then, if it is still
-    /// larger, as once every result is removed, the manifests used longest ago. A blob which no result
-    /// refers to, and a file in `tmp`, is removed once it is older than an hour, as a build may be adding the result
-    /// which refers to it, or writing it. A result which is corrupted is removed. A file which cannot be removed is
-    /// kept, as another build may have removed it, or the cache may be read-only.
+    /// In order:
+    ///
+    /// 1. The results used longest ago are removed, each with the blobs no remaining result refers to.
+    /// 2. The manifests not used since the latest result which was removed are removed.
+    /// 3. If the cache is still too large, which needs every result to be gone, the manifests used longest ago are
+    ///    removed.
+    ///
+    /// A blob which no result refers to, and a file in `tmp`, is only removed once it is an hour old, as a build may
+    /// be writing the file, or about to add the result which refers to the blob. A corrupted result is removed. A
+    /// file which cannot be removed is skipped, as another build may have removed it, or the cache may be read-only.
     #[must_use]
     pub fn gc(&self, max: u64) -> Collected {
         let now = std::time::SystemTime::now();
@@ -749,7 +768,7 @@ impl Cache {
         for file in stored(&self.dir.join("tmp")).iter().filter(|file| old(file)) {
             let _ = std::fs::remove_file(&file.path);
         }
-        // an edge is marked to run here for a while, after which it is tried on a worker again
+        // a mark to run an edge here expires, after which the edge is tried on a worker again
         let marked_long_ago = |file: &Stored| now.duration_since(file.modified).is_ok_and(|age| age >= LOCAL_FOR);
         for file in stored(&self.dir.join("local")).iter().filter(|file| marked_long_ago(file)) {
             let _ = std::fs::remove_file(&file.path);
@@ -758,16 +777,17 @@ impl Cache {
         collected.kept = Stats { results: kept, manifests: kept_manifests, blobs: blobs.len(), bytes: size };
         collected
     }
-    /// Collect the cache as [`Self::gc`] does, if it was last collected at least `every` ago, returning what was removed
-    /// and kept if it was collected. A cache which has not been is only marked as collected now, as it is new.
+    /// Collect the cache as [`Self::gc`] does, if it was last collected at least `every` ago. Returns what was
+    /// removed and kept, or `None` if it was not collected. A cache with no record of being collected is new, so it
+    /// is only marked as collected now.
     #[must_use]
     pub fn gc_if_due(&self, max: u64, every: std::time::Duration) -> Option<Collected> {
         let path = self.dir.join(COLLECTED);
         let modified = std::fs::metadata(&path).and_then(|metadata| metadata.modified());
         let due = modified.as_ref().is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed >= every));
         if modified.is_err() || due {
-            // marked first, so that builds which finish at once do not each collect it, by the time, which writing
-            // nothing to the file does not change on Windows
+            // Mark it first, so that builds finishing together do not all collect it. The time is set explicitly,
+            // as writing nothing to the file does not change its time on Windows.
             let _ = std::fs::File::create(&path).and_then(|file| file.set_modified(std::time::SystemTime::now()));
         }
         due.then(|| self.gc(max))
@@ -795,7 +815,8 @@ fn corrupted(path: &Path) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path:?} is corrupted"))
 }
 
-/// Copy a file, by a reflink where the file system can, which shares its contents until one of them is written.
+/// Copy a file, by a reflink where the file system supports one: the copy shares the file's contents until either is
+/// written to.
 fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
     let source = std::fs::File::open(from)?;
     let target = std::fs::File::create(to)?;
@@ -816,11 +837,11 @@ pub fn hex(hash: &Hash) -> String {
     })
 }
 
-/// A key, from parts which are each hashed with their length before them, so that parts which run together hash
-/// differently.
+/// A key being built from parts. Each part is hashed with its length before it, so that `["ab", "c"]` and
+/// `["a", "bc"]` give different keys.
 pub struct Key(Hasher);
 impl Key {
-    /// A key of a kind, which keys of other kinds never equal.
+    /// Starts a key of a kind. Keys of different kinds are never equal.
     #[must_use]
     pub fn new(kind: &str) -> Self {
         let mut key = Self(Hasher::new());
@@ -832,7 +853,7 @@ impl Key {
         self.0.update(bytes);
         self
     }
-    /// Add a hash, or that there is none, as of a file which is missing.
+    /// Add a hash, or `None` for where there is none, as for a missing file.
     pub fn hash(&mut self, hash: Option<&Hash>) -> &mut Self {
         match hash {
             Some(hash) => self.part(hash),
@@ -845,10 +866,14 @@ impl Key {
     }
 }
 
-/// Returns the first key of an edge: of what identifies it in the cache, its action, as
-/// [`crate::plan::action_bytes`] gives it, the variables every command is given, the hashes of the values of the
-/// variables it passes on, or that each is unset, its outputs and depfile, and the contents of the inputs it declares,
-/// by path, or that they are missing.
+/// Returns the first key of an edge, which is made from:
+///
+/// - its cache identity;
+/// - its action, as [`crate::plan::action_bytes`] gives it;
+/// - the variables every command is given;
+/// - the variables it passes on, each with the hash of its value, or that it is unset;
+/// - its outputs and its depfile;
+/// - the inputs it declares, each with its path and the hash of its contents, or that it is missing.
 #[must_use]
 pub fn first_key(
     identity: &str,
@@ -881,8 +906,9 @@ pub fn first_key(
     key.finish()
 }
 
-/// Returns the second key of an edge: of its first key, and the contents of the inputs it discovered, by path, and the
-/// hashes of the values of the environment variables it discovered, or that each is missing or unset.
+/// Returns the second key of an edge, which is made from its first key, the inputs it discovered, each with its path
+/// and the hash of its contents, or that it is missing, and the environment variables it discovered, each with the
+/// hash of its value, or that it is unset.
 #[must_use]
 pub fn second_key(first: &Hash, inputs: &[(&str, Option<&Hash>)], env: &[(&str, Option<&Hash>)]) -> Hash {
     let mut key = Key::new("rig second key");

@@ -1,33 +1,50 @@
-//! Running the actions of cached edges on other machines, workers, which a build sends them to once its own jobs are
-//! full, as `jig worker --stdio` serves them over ssh.
+//! Running the actions of cached edges on other machines, called workers. A build sends edges to its workers once
+//! its own jobs are full. `jig worker --stdio` serves as a worker, usually over ssh.
 //!
-//! A worker is a server of [`crate::remote`]'s protocol which also takes `EXECUTE`, with a [`Request`]: the identity of
-//! the toolchain the action runs with, the action, with the build's directory replaced by a marker, the environment
-//! variables it is given, the names of those it inherits from the worker, which locate its tools there, the blobs of
-//! its inputs, by their paths relative to the build's directory, and the paths of the outputs it writes. The client
-//! asks first which blobs the worker is missing, and sends only those.
+//! A worker is a server of [`crate::remote`]'s protocol which also takes `EXECUTE`, with a [`Request`]. The request
+//! holds:
 //!
-//! The worker runs the action in a directory of its own under its [`Executor::root`]: its inputs are linked there from
-//! its cache, at the paths they have relative to the build's directory, which is as deep in it as the paths leave the
-//! build's directory with `..`, and the marker is replaced by it. Since the paths a toolchain writes are relative, and
-//! remapped, what it writes is what it would write in the client's build. The outputs which are written are added to
-//! the worker's cache, and the reply has their blobs, and what the action printed, as a cache's result does, which the
-//! client fetches, and restores, as it does a result from a remote cache. The directory is removed once the action has
-//! finished.
+//! - the identity of the toolchain the action runs with;
+//! - the action, with a marker in place of the build's directory;
+//! - the environment variables the action is given;
+//! - the names of the variables it inherits from the worker, which locate its tools there;
+//! - the blobs of its inputs, by their paths relative to the build's directory;
+//! - the paths of the outputs it writes.
 //!
-//! An action reads only what is sent, beside the toolchain, which the worker has, by its identity, or by the identity
-//! of its release on any host, for an action which may run on another host, with the standard library of the target
-//! the action needs, if it needs one. One it does not have is refused, with `NOT_FOUND`, unless the worker installs
-//! toolchains, and installs it, with the target, by the name the request gives, which it tries once. The toolchain's
-//! variables, such as `RUSTUP_TOOLCHAIN`, take the place of those the action gives, so that it runs the toolchain it
-//! was matched by. An action which needs a file that was not sent fails, as do those whose paths are
-//! absolute, or do not lead from the build's directory as given, which are refused, and the client runs it itself.
+//! The client first asks which of the blobs the worker is missing, and sends only those.
 //!
-//! An action without a toolchain, whose identity is empty, as a test which runs what was built, runs with none, as a
-//! worker runs it with only what it is sent, and the tools it finds in its `PATH`.
+//! # Running an action
 //!
-//! `GET_CAPABILITIES` is replied to with the worker's [`Capabilities`]: its host, its tags, and its toolchains, with
-//! their names, releases, hosts and installed targets, which clients choose workers by.
+//! The worker runs each action in a fresh directory under its [`Executor::root`]. The inputs are linked there from
+//! the worker's cache, at their paths relative to the build's directory. The build's directory is nested as deep in
+//! the fresh directory as the paths climb out of it with `..`, and the marker in the action is replaced by it. The
+//! paths a toolchain writes are relative, and remapped, so the action writes what it would in the client's build.
+//!
+//! The outputs it writes are added to the worker's cache. The reply holds their blobs and what the action printed,
+//! in the form of a cache's result, and the client fetches and restores them as it does a result from a remote cache.
+//! The directory is removed once the action has finished.
+//!
+//! # Toolchains
+//!
+//! Apart from what it is sent, an action reads only its toolchain, which the worker must have. The worker matches a
+//! toolchain by its identity, or, for an action which may run on another host, by the identity of its release on any
+//! host. It must also have the standard library of the target the action needs, if any. An action whose toolchain
+//! the worker does not have is refused with `NOT_FOUND`, unless the worker installs toolchains: it then tries, once,
+//! to install the toolchain and target by the name the request gives.
+//!
+//! The matched toolchain's variables, such as `RUSTUP_TOOLCHAIN`, replace any the action gives, so that the action
+//! runs the toolchain it was matched to.
+//!
+//! An action with an empty toolchain identity, such as a test which runs what was built, needs no toolchain. It runs
+//! with only what it is sent and the tools found in the worker's `PATH`.
+//!
+//! An action which needs a file that was not sent fails. An action with a path which is absolute, or which cannot be
+//! expressed relative to the build's directory, is refused. Either way the client runs it itself.
+//!
+//! # Capabilities
+//!
+//! `GET_CAPABILITIES` is answered with the worker's [`Capabilities`]: its host, its tags, and its toolchains, each
+//! with its name, release, host and installed targets. Clients choose workers by them.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,8 +53,8 @@ use crate::cache::{Cache, Entry, Hash, Output};
 use crate::graph::Exec;
 use crate::bytes::{Reader, Writer};
 
-/// A toolchain a worker has, by the identity a cached edge has in the graph, with the variables an action which has it
-/// is given to run it, such as `RUSTUP_TOOLCHAIN`, which are not reported to clients.
+/// A toolchain a worker has, found by the identity a cached edge has in the graph. `env` holds the variables given to
+/// an action to make it run this toolchain, such as `RUSTUP_TOOLCHAIN`; they are not reported to clients.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Toolchain {
     pub identity: String,
@@ -49,14 +66,15 @@ pub struct Toolchain {
     pub host: String,
     /// The targets whose standard libraries it has.
     pub targets: Vec<String>,
-    /// What identifies its release on any host, as its identity does but for the host it runs on.
+    /// The identity of its release on any host: like its identity, but not depending on the host it runs on.
     pub release_identity: String,
     pub env: Vec<(String, String)>,
 }
 
 impl Toolchain {
-    /// Whether it runs an action of a toolchain by its identity, or of its release on any host, if that is given,
-    /// with the standard library of a target, if one is given.
+    /// Whether it can run an action. The action's toolchain is given by its identity, and by the identity of its
+    /// release on any host if it may run on another host. `target`, if not empty, is the target whose standard
+    /// library the action needs.
     #[must_use]
     pub fn runs(&self, identity: &str, release: &str, target: &str) -> bool {
         let same = self.identity == identity || (!release.is_empty() && self.release_identity == release);
@@ -64,17 +82,21 @@ impl Toolchain {
     }
 }
 
-/// The release of a toolchain, by which a worker may run an action of it: what identifies the release on any host, and
-/// the name rustup installs it by, either of which may be empty.
+/// The release of a toolchain: its identity on any host, and the name rustup installs it by. A worker on another
+/// host may run an action by either. Either may be empty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Release {
     pub identity: String,
     pub install: String,
 }
 
-/// What an edge needs of a worker: its toolchain, by its identity, and by the identity of its release on any host if it
-/// may run on another host, the name rustup installs the toolchain by, the target whose standard library it needs, and
-/// the tags it needs, any of which but the identity may be empty.
+/// What an edge needs of a worker. Every field but the identity may be empty.
+///
+/// - `identity`: the identity of its toolchain.
+/// - `release`: the identity of the toolchain's release on any host, if the edge may run on another host.
+/// - `install`: the name rustup installs the toolchain by.
+/// - `target`: the target whose standard library it needs.
+/// - `tags`: the tags the worker must have.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Needs<'a> {
     pub identity: &'a str,
@@ -95,8 +117,8 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Whether a worker with them may run an edge: it has every tag the edge needs, and one of its toolchains runs it,
-    /// or it installs toolchains, and the edge's is known by name.
+    /// Whether a worker with these capabilities may run an edge. It must have every tag the edge needs, and either
+    /// have a toolchain which runs the edge, or install toolchains, when the edge's toolchain has a name to install.
     #[must_use]
     pub fn may_run(&self, needs: &Needs) -> bool {
         let tagged = needs.tags.iter().all(|tag| self.tags.contains(tag));
@@ -131,22 +153,25 @@ impl Capabilities {
     }
 }
 
-/// Installs a toolchain by the name a request gives, with the standard library of a target, if one is given, returning
-/// whether it did.
+/// Installs a toolchain by the name a request gives, with the standard library of a target if one is given. Returns
+/// whether it was installed.
 type Install = Box<dyn Fn(&str, Option<&str>) -> bool + Send + Sync>;
 
-/// What a worker runs actions with: the directory of the directories they run in, which is on the same file system as
-/// its cache, so that their inputs are linked from it, the number which run at once, and its capabilities, which are
-/// found when they are first needed, so that a client which connects is answered at once, and again once a toolchain
-/// is installed, if the worker installs them.
+/// What a worker runs actions with.
+///
+/// - `root` holds the directories the actions run in. It is on the same file system as the cache, so that inputs
+///   can be linked from the cache.
+/// - `jobs` is the number of actions which run at once.
+/// - The capabilities are found when they are first needed, so that a client which connects is answered at once.
+///   They are found again once a toolchain has been installed, if the worker installs toolchains.
 pub struct Executor {
     pub root: PathBuf,
     pub jobs: usize,
     found: std::sync::Mutex<Option<std::sync::Arc<Capabilities>>>,
     find: Box<dyn Fn() -> Capabilities + Send + Sync>,
     install: Option<Install>,
-    /// The names of the toolchains which have been installed, or tried to be, with the targets they were installed
-    /// with, each of which is tried once. Installs hold it, so that they take turns.
+    /// The toolchains which the worker has tried to install, successfully or not, by name and target. Each is tried
+    /// once. An install holds the lock, so installs run one at a time.
     installed: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
 }
 
@@ -166,8 +191,8 @@ pub struct Request {
     pub identity: String,
     /// The identity of the toolchain's release on any host, if the action may run on another host, or empty.
     pub release: String,
-    /// The name rustup installs the toolchain by, such as `1.97.0` or `nightly-2026-11-03`, for a worker which does not
-    /// have it, or empty if it is not known.
+    /// The name rustup installs the toolchain by, such as `1.97.0` or `nightly-2026-11-03`, used by a worker which
+    /// does not have the toolchain. Empty if it is not known.
     pub install: String,
     /// The target whose standard library the action needs, or empty if it needs none.
     pub target: String,
@@ -178,15 +203,14 @@ pub struct Request {
     /// The variables it inherits from the worker, which locate the tools and files it uses there.
     pub locating: Vec<String>,
     pub inputs: Vec<Input>,
-    /// The files it writes, relative to the build's directory, which are sent back, if it writes them.
+    /// The files it may write, relative to the build's directory. Those it does write are sent back.
     pub outputs: Vec<String>,
-    /// Those of its outputs which it reports as it writes them, as rustc reports its metadata with JSON, which are told
-    /// as they are, before it finishes.
+    /// The outputs it reports as it writes them, as rustc reports its metadata with JSON. The client is told of each
+    /// as it is reported, before the action finishes.
     pub early: Vec<String>,
 }
 
-/// What an action did on a worker: whether it succeeded, and its outputs and what it printed, as the blobs of a
-/// result.
+/// What an action did on a worker: whether it succeeded, and its outputs and what it printed, as a cache's result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Executed {
     pub succeeded: bool,
@@ -275,8 +299,8 @@ impl Executed {
     }
 }
 
-/// Returns the number of times a path relative to the build's directory leaves it with `..`, before it leads down,
-/// or `None` if it is not such a path: one which is absolute, empty, or has `..` after a name.
+/// Returns how many `..` components begin a path relative to the build's directory. Returns `None` for a path which
+/// is not relative in that way: one which is absolute, empty, or has a `..` after a name.
 #[must_use]
 pub fn ups(path: &str) -> Option<usize> {
     let (mut ups, mut names) = (0, 0);
@@ -291,7 +315,7 @@ pub fn ups(path: &str) -> Option<usize> {
     (names > 0).then_some(ups)
 }
 
-/// The directories actions are run in, which are numbered so that each the process makes is new.
+/// Counts the directories this process has made for actions, so that each has a new name.
 static SANDBOXES: AtomicU64 = AtomicU64::new(0);
 
 /// A directory an action runs in, which is removed when it is dropped.
@@ -303,17 +327,17 @@ impl Drop for Sandbox {
 }
 
 impl Executor {
-    /// An executor with capabilities, which `find` finds once they are first needed.
+    /// An executor whose capabilities are found by `find`, when they are first needed.
     pub fn new(root: PathBuf, jobs: usize, find: impl Fn() -> Capabilities + Send + Sync + 'static) -> Self {
         let (found, installed) = (std::sync::Mutex::default(), std::sync::Mutex::default());
         Self { root, jobs, found, find: Box::new(find), install: None, installed }
     }
-    /// Install the toolchains requests need which the worker does not have, by the names they give, with the targets
-    /// they need, with `install`, which returns whether it did.
+    /// Install toolchains which requests need and the worker lacks, with `install`. It is given the toolchain's name
+    /// and the target the request needs, and returns whether it installed them.
     #[must_use]
     pub fn installing(mut self, install: impl Fn(&str, Option<&str>) -> bool + Send + Sync + 'static) -> Self {
         self.install = Some(Box::new(install));
-        // what was found says it does not install them
+        // the capabilities which were found say it does not install toolchains, so they are found again
         *self.found.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self
     }
@@ -325,8 +349,9 @@ impl Executor {
         });
         std::sync::Arc::clone(capabilities)
     }
-    /// Returns the toolchain which runs a request: one of its identity, or else of its release, with the target it
-    /// needs, installing it by its name if the worker does not have one and installs toolchains, unless it has tried.
+    /// Returns the toolchain to run a request with: one with the request's identity, or failing that with its
+    /// release, which has the target it needs. If the worker has none and installs toolchains, it installs the
+    /// toolchain by its name, unless it has already tried.
     fn toolchain(&self, request: &Request) -> Option<Toolchain> {
         if request.identity.is_empty() {
             return Some(Toolchain::default());
@@ -363,9 +388,9 @@ impl Executor {
     pub fn execute(&self, cache: &Cache, request: &Request) -> Result<Executed, Refused> {
         self.execute_with(cache, request, &|_| (), &|_| ())
     }
-    /// Run an action, as [`Self::execute`] does, telling `spawned` the id of its process, which leads its process
-    /// group, once it has started, so that it can be interrupted, and `wrote` each of its early outputs, once it is in
-    /// the cache, as the action reports it.
+    /// Run an action, as [`Self::execute`] does. `spawned` is called with the id of its process, which leads its
+    /// process group, once it has started, so that it can be interrupted. `wrote` is called with each early output
+    /// the action reports, once the output is in the cache.
     ///
     /// # Errors
     ///
@@ -392,14 +417,14 @@ impl Executor {
         let count = SANDBOXES.fetch_add(1, Ordering::Relaxed);
         let sandbox = Sandbox(self.root.join(format!("{}-{count}", std::process::id())));
         let _ = std::fs::remove_dir_all(&sandbox.0);
-        // the build's directory is as deep as the paths leave it, in directories which the paths do not name
+        // nest the build's directory as deep as the paths climb out of it, under directories no path can name
         let build = (0..depth).fold(sandbox.0.clone(), |dir, level| dir.join(format!(".rig-{level}")));
         let failed = |what: &str, path: &Path, failure: std::io::Error| {
             error(format!("failed to {what} {path:?}: {failure}"))
         };
         std::fs::create_dir_all(&build).map_err(|failure| failed("create", &build, failure))?;
-        // the directory is as the commands find it, once symbolic links are followed, as on macOS, where `/var` is one,
-        // so that the remapping of the build's directory, which the marker gives, matches the paths rustc writes
+        // Use the directory's path with symbolic links resolved, which is what the commands see: on macOS, `/var` is a
+        // link. The remapping of the build's directory, given by the marker, then matches the paths rustc writes.
         let build = crate::sys::canonicalize(&build).map_err(|failure| failed("find", &build, failure))?;
         for input in &request.inputs {
             let path = build.join(&input.path);
@@ -413,13 +438,13 @@ impl Executor {
                 std::fs::create_dir_all(parent).map_err(|failure| failed("create", parent, failure))?;
             }
         }
-        // the toolchain's variables choose the toolchain it was matched by, in place of any the action gives
+        // the toolchain's variables replace any the action gives, so that it runs the toolchain it was matched to
         let chosen: Vec<&str> = toolchain.env.iter().map(|(name, _)| name.as_str()).collect();
         let action = located(&request.action, &build.display().to_string(), &chosen);
         let given = request.env.iter().filter(|(name, _)| !chosen.contains(&name.as_str()));
         let mut env: Vec<_> = given.cloned().collect();
         env.extend(toolchain.env.iter().cloned());
-        // each early output it reports is added to the cache and told, as it is
+        // add each early output to the cache as the action reports it, then pass it on
         let within = build.display().to_string();
         let reported = |path: &str| {
             let path = path.strip_prefix(&within).map_or(path, |path| path.trim_start_matches(['/', '\\']));
@@ -457,8 +482,8 @@ impl Executor {
     }
 }
 
-/// Returns an action with the marker of the build's directory replaced by a directory, without the variables of its
-/// own which are chosen otherwise.
+/// Returns an action with the marker for the build's directory replaced by `dir`, and without those of its own
+/// variables which the toolchain's replace.
 fn located(exec: &Exec, dir: &str, chosen: &[&str]) -> Exec {
     let locate = |string: &str| string.replace(crate::plan::BUILD_DIR, dir);
     Exec {

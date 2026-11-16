@@ -1,14 +1,16 @@
-//! Probes, which find whether the host can run what is built for a Linux or Windows target, by running a tiny program
-//! for its architecture which exits successfully.
+//! Probes, which find whether the host can run what is built for a target, by running a tiny program for the target's
+//! architecture which only exits successfully.
 //!
-//! The probe for Linux is a static ELF executable of one segment, whose code makes the `exit` system call with status
-//! `0`, and for Windows, a PE executable without imports whose entry point returns `0`, which is its exit status. So it
-//! runs where the kernel runs the architecture, or an emulator does, such as one registered with binfmt or given as the
-//! target's runner, or Wine for Windows.
+//! - For Linux, the probe is a static ELF executable with one segment, whose code makes the `exit` system call with
+//!   status `0`.
+//! - For Windows, it is a PE executable without imports, whose entry point returns `0`, which becomes its exit status.
 //!
-//! macOS needs a code signature for arm64 and does not support static executables, so a macOS target is probed by
-//! running `/usr/bin/true`, which is a universal program of macOS, as the target's architecture with `arch`, which runs
-//! where macOS does, such as `x86_64` with Rosetta.
+//! Such a probe runs wherever the kernel runs the architecture, or an emulator does: one registered with binfmt, one
+//! given as the target's runner, or Wine for Windows.
+//!
+//! macOS needs a code signature on arm64, and does not support static executables. So a macOS target is probed by
+//! running `/usr/bin/true`, which is a universal binary, as the target's architecture, with `arch`. That succeeds
+//! wherever macOS can run the architecture, such as `x86_64` under Rosetta.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -305,11 +307,11 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a probe for Windows may run, as Wine may create its prefix when it is first run.
 const WINE_TIMEOUT: Duration = Duration::from_mins(1);
 
-/// Returns whether the host can run what is built for a target, by running its probe, with the runner of the target
-/// if it has one, as a program and its first arguments.
+/// Returns whether the host can run what is built for a target, by running the target's probe. `runner` is the
+/// target's runner, if it has one, as a program and its first arguments.
 ///
-/// A target which is not for Linux, Windows or macOS, or whose architecture has no probe, cannot be found to run, nor
-/// can a macOS target where the host is not macOS.
+/// The answer is `false` wherever it cannot be found out: for a target which is not for Linux, Windows or macOS, for
+/// an architecture with no probe, and for a macOS target on a host which is not macOS.
 pub(super) fn can_run(target: &str, runner: &[String], toolchain: Option<&str>) -> bool {
     if let Some(command) = macos_probe(target) {
         return std::env::consts::OS == "macos" && run(command, toolchain, TIMEOUT);

@@ -1,18 +1,23 @@
 //! Planning a build: which edges must run to bring targets up to date, and why.
 //!
-//! An edge must run if it has no record, its outputs or command have changed, one of its outputs is missing or is not
-//! what the edge produced, the inputs and dependencies it declares have changed, one of them is produced by an edge
-//! which must run, or the stamp of one of them, or of an input discovered from its depfile, differs from the one
-//! recorded. An input which is missing, and which no edge produces, is an error, while a dependency or a discovered
-//! input which is missing runs the edge, which is then up to date until it is there again. What an edge is built
-//! after is built first, but does not make it run. The command of a generator edge may change without it running, as
-//! the generator writes the graph which has it.
+//! An edge must run if any of these holds, as [`Reason`] lists:
 //!
-//! An alias is out of date if an input of it is produced by an edge which must run, or if it has no inputs and is not a
-//! file. An edge which takes an alias as an input takes the inputs of the alias instead, so that it runs when one of
+//! - it has no record of running;
+//! - its outputs or its command are not those recorded;
+//! - one of its outputs is missing, or is not what the edge wrote;
+//! - the inputs and dependencies it declares are not those recorded;
+//! - an edge which produces one of them must run;
+//! - the stamp of one of them, or of an input discovered from its depfile, differs from the one recorded.
+//!
+//! A missing input which no edge produces is an error. A missing dependency or discovered input only runs the edge,
+//! which is then up to date until the file appears. What an edge is built `after` is built first, but never makes it
+//! run. A generator edge does not run when its command changes, as the generator itself writes the graph which holds
+//! that command.
+//!
+//! An alias is out of date if an edge which produces one of its inputs must run, or if it has no inputs and is not a
+//! file. An edge which takes an alias as an input takes the alias's inputs in its place, so that it runs when one of
 //! them changes.
 
-use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
 
 use crate::Error;
@@ -78,13 +83,13 @@ impl Plan {
     }
 }
 
-/// Returns the hash of an edge's action, which it runs again when it changes, with what identifies it in the cache if
-/// it is cached, as that identifies what else the action depends on, such as its toolchain, and the variables it
-/// passes on, as which it inherits are part of what it does.
+/// Returns the hash of an edge's action. The edge runs again when it changes.
+///
+/// It covers the command, the edge's cache identity if it is cached, which stands for what else the action depends on,
+/// such as its toolchain, and the names of the variables it passes on.
 #[must_use]
 pub fn action_hash(edge: EdgeRef) -> u64 {
-    // each hash is of the bytes it would be of if they were together, as they are hashed in turn, so that a large
-    // graph's hashes are found without copying each action
+    // The action is hashed part by part, which gives the hash of the parts joined, without copying them.
     let mut hash = match edge.kind() {
         EdgeKind::Alias => 0,
         EdgeKind::Command(action) => {
@@ -113,7 +118,7 @@ pub fn action_hash(edge: EdgeRef) -> u64 {
     hash
 }
 
-/// The 64-bit FNV-1a hash of bytes given in parts, as [`crate::state::fnv1a`] is of them together.
+/// The 64-bit FNV-1a hash of bytes written in parts, equal to [`crate::state::fnv1a`] of the parts joined.
 struct Fnv(u64);
 impl Fnv {
     fn new() -> Self {
@@ -124,8 +129,8 @@ impl Fnv {
     }
 }
 
-/// Returns an edge's action as bytes, which differ whenever it does: each part of its program with its length before
-/// it, so that parts which run together differ.
+/// Returns an edge's action as bytes, which differ whenever the action does. Each part is preceded by its length, so
+/// that `["ab", "c"]` and `["a", "bc"]` differ.
 #[must_use]
 pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
     match edge.kind() {
@@ -134,12 +139,12 @@ pub fn action_bytes(edge: EdgeRef) -> Vec<u8> {
     }
 }
 
-/// Returns an edge's action as bytes, as [`action_bytes`] does, with a marker in place of each occurrence of the
-/// build's directory, which is absolute, so that the action is the same in a build in another directory, as for the
-/// key of a cache which builds in several share.
+/// Returns an edge's action as [`action_bytes`] does, but with a marker in place of each occurrence of the build's
+/// absolute directory. The bytes are then the same for a build in another directory, so that builds in several
+/// directories can share a cache.
 ///
-/// A command given the build's directory, such as to remap it in what it writes, then has its results shared with
-/// builds elsewhere, so it should write nothing which depends on it.
+/// A command which is given the build's directory, such as to remap it, therefore shares its results with builds
+/// elsewhere, and should write nothing which depends on the directory.
 #[must_use]
 pub fn relocated_action_bytes(edge: EdgeRef, dir: &str) -> Vec<u8> {
     match edge.kind() {
@@ -151,8 +156,8 @@ pub fn relocated_action_bytes(edge: EdgeRef, dir: &str) -> Vec<u8> {
 /// What stands for the build's directory in an action which is relocated.
 pub(crate) const BUILD_DIR: &str = "\0build-dir";
 
-/// Returns an action with the build's directory, absolute, replaced wherever it is by [`BUILD_DIR`], or as it is if
-/// the directory is empty, as it is when it is not known.
+/// Returns an action with each occurrence of the build's absolute directory replaced by [`BUILD_DIR`]. An empty
+/// directory means it is not known, and the action is returned unchanged.
 pub(crate) fn relocated(exec: &Exec, dir: &str) -> Exec {
     let relocate = |string: &str| if dir.is_empty() { string.to_string() } else { string.replace(dir, BUILD_DIR) };
     Exec {
@@ -170,7 +175,7 @@ fn bytes_of(action: &Exec) -> Vec<u8> {
     bytes
 }
 
-/// Gives the bytes of an action, as [`bytes_of`] returns them, in parts, in turn.
+/// Passes the bytes of an action to `write` a part at a time. [`bytes_of`] is the parts joined.
 fn parts_of(exec: &Exec, write: &mut dyn FnMut(&[u8])) {
     let mut part = |part: &str| {
         write(&part.len().to_le_bytes());
@@ -191,7 +196,7 @@ fn parts_of(exec: &Exec, write: &mut dyn FnMut(&[u8])) {
 #[must_use]
 pub fn declared_inputs(graph: &Graph, edge: EdgeRef) -> Vec<NodeId> {
     let mut inputs = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = crate::hash::Set::default();
     let mut stack: Vec<NodeId> = edge.inputs().iter().chain(edge.dependencies()).rev().copied().collect();
     while let Some(node) = stack.pop() {
         if !seen.insert(node) {
@@ -206,33 +211,37 @@ pub fn declared_inputs(graph: &Graph, edge: EdgeRef) -> Vec<NodeId> {
     inputs
 }
 
-/// Returns the stamps of the inputs an edge declares, as they are when it starts, to record once it has run, by their
-/// contents if it is hashed, reusing the hashes of its last record.
+/// Returns the stamps of the inputs an edge declares, taken as it starts, to record once it has run. A hashed edge's
+/// inputs are stamped by their contents, reusing the hashes of its last record where the files are unchanged.
 pub fn input_stamps(graph: &Graph, state: &State, edge: EdgeId, stamps: &mut Stamps) -> Vec<(String, Stamp)> {
     let data = graph.edge(edge);
     let previous = state.get(first_output(graph, edge));
-    let recorded = |path: &str| {
+    // The inputs are usually those recorded, in the same order, so each is looked for where it was last.
+    let recorded = |index: usize, path: &str| {
         let record = previous?;
-        let (_, stamp) = record.inputs.iter().find(|(recorded, _)| recorded == path)?;
+        let (_, stamp) = match record.inputs.get(index) {
+            Some(input) if input.0 == path => input,
+            _ => record.inputs.iter().find(|(recorded, _)| recorded == path)?,
+        };
         Some((stamp, record.start))
     };
     let inputs = declared_inputs(graph, data);
-    inputs.into_iter().map(|node| {
+    inputs.into_iter().enumerate().map(|(index, node)| {
         let path = graph.path(node);
-        (path.to_string(), stamps.node_as(node, data.hashed(), recorded(path)))
+        (path.to_string(), stamps.node_as(node, data.hashed(), recorded(index, path)))
     }).collect()
 }
 
-/// Returns when the stamps of an edge's outputs and discovered inputs were taken, as it finished, in milliseconds since
-/// the Unix epoch.
+/// Returns when an edge finished, in milliseconds since the Unix epoch, which is when the stamps of its outputs and
+/// discovered inputs were taken.
 fn finished(record: &Record) -> u64 {
     record.start.saturating_add(u64::from(record.duration))
 }
 
-/// Returns the record of an edge which has run, from the stamps of its inputs when it started, and the inputs it
+/// Returns the record of an edge which has run, from the stamps its inputs had when it started and the inputs it
 /// discovered.
 ///
-/// The stamps of its outputs and discovered inputs are found again, as the edge may have changed them.
+/// Its outputs and discovered inputs are stamped afresh, as the edge may have changed them.
 pub fn record(
     graph: &Graph,
     edge: EdgeId,
@@ -302,9 +311,9 @@ enum Status {
 /// If a target is not in the graph, or an input which no edge produces is missing, or the graph has a cycle.
 pub fn plan<'g>(graph: &'g Graph, state: &State, stamps: &mut Stamps<'g>, targets: &[&str]) -> Result<Plan, Error> {
     let targets = target_nodes(graph, targets)?;
-    // an output left on a worker is stamped as it was left while its file is missing
+    // an output left on a worker keeps the stamp it was left with while its file is missing here
     stamps.extend_remote(state.remote_outputs());
-    // the files the plan may need are stamped together first
+    // stamp every file the plan may need at once, which is faster than one at a time
     let (nodes, paths) = reachable(graph, state, &targets);
     stamps.prefetch(&nodes, &paths.iter().map(String::as_str).collect::<Vec<_>>());
     let status = vec![Status::Unvisited; graph.edges().len()];
@@ -319,8 +328,8 @@ pub fn plan<'g>(graph: &'g Graph, state: &State, stamps: &mut Stamps<'g>, target
     Ok(planner.plan)
 }
 
-/// Returns the nodes which building targets may stamp: the targets, and the outputs and inputs of the edges which
-/// produce them, and so on, and the paths which those edges discovered when they last ran which are not nodes.
+/// Returns what planning the targets may stamp: the nodes of every edge the targets depend on, directly or not, and
+/// the paths those edges discovered when they last ran which are not nodes.
 fn reachable(graph: &Graph, state: &State, targets: &[NodeId]) -> (Vec<NodeId>, Vec<String>) {
     let mut seen = vec![false; graph.nodes()];
     let mut visited = vec![false; graph.edges().len()];
@@ -363,7 +372,7 @@ impl Planner<'_, '_, '_> {
         if self.status[start.0 as usize] != Status::Unvisited {
             return Ok(());
         }
-        // each entry is an edge, what is built first, of which the first must be there, and the next to visit
+        // each entry is an edge, the nodes built before it, how many of those must exist, and the next one to visit
         let mut stack = vec![self.frame(start)];
         self.status[start.0 as usize] = Status::Visiting;
         while let Some((edge, inputs, required, next)) = stack.last_mut() {
@@ -381,7 +390,7 @@ impl Planner<'_, '_, '_> {
             let index = *next;
             *next += 1;
             let Some(producer) = self.graph.producer(input) else {
-                // a dependency or a discovered input which is missing makes its edge run, rather than failing
+                // only a missing input is an error: a missing dependency or discovered input makes the edge run
                 if index < required && !self.stamps.node(input).exists() {
                     let needed_by = data.outputs().first().map(|&node| self.graph.path(node).to_string());
                     return Err(Error::MissingInput { input: self.graph.path(input).into(), needed_by });
@@ -405,9 +414,11 @@ impl Planner<'_, '_, '_> {
         }
         Ok(())
     }
-    /// Returns an edge to visit, with what is built first: its inputs and what it is built after, which must be there,
-    /// as the count of them says, then its dependencies, and the inputs it discovered when it last ran which an edge
-    /// produces, which may be missing.
+    /// Returns a stack entry for an edge: the edge, the nodes built before it, how many of them must exist, and the
+    /// index of the next to visit.
+    ///
+    /// Its inputs and what it is built after come first, and must exist. Its dependencies, and the inputs it
+    /// discovered when it last ran which an edge produces, follow, and may be missing.
     fn frame(&self, edge: EdgeId) -> (EdgeId, Vec<NodeId>, usize, usize) {
         let data = self.graph.edge(edge);
         let mut inputs: Vec<NodeId> = data.inputs().iter().chain(data.after()).copied().collect();
@@ -430,7 +441,7 @@ impl Planner<'_, '_, '_> {
     }
 }
 
-/// Returns the first output of an edge, which its record is kept by.
+/// Returns the first output of an edge, which is the key of its record.
 pub(crate) fn first_output(graph: &Graph, edge: EdgeId) -> &str {
     let edge = graph.edge(edge);
     let output = edge.outputs().iter().next();
@@ -450,7 +461,7 @@ pub fn target_nodes(graph: &Graph, targets: &[&str]) -> Result<Vec<NodeId>, Erro
     nodes.collect()
 }
 
-/// Returns the nodes an edge discovered when it last ran which an edge produces, which are built before it.
+/// Returns the inputs an edge discovered when it last ran which are produced by edges, and so are built before it.
 pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Vec<NodeId> {
     let record = state.get(first_output(graph, edge));
     let paths = record.into_iter().flat_map(|record| &record.discovered);
@@ -458,9 +469,9 @@ pub(crate) fn discovered_nodes(graph: &Graph, state: &State, edge: EdgeId) -> Ve
     nodes.filter(|&node| graph.producer(node).is_some()).collect()
 }
 
-/// Returns the stamp an input was recorded with, as its hash is reused by: that which the edge which read it recorded,
-/// or if it was left on a worker, and has been fetched since, that which the edge which left it recorded once it was,
-/// with the time and size it was fetched with.
+/// Returns the recorded stamp to reuse an input's hash from. That is the stamp recorded by the edge which read it,
+/// unless the input was left on a worker then and has been fetched since: the edge which produced it then recorded
+/// the same contents with the time and size of the fetched file, which is the stamp to compare the file with.
 fn fetched_as<'a>(graph: &Graph, state: &'a State, path: &str, stamp: &'a Stamp) -> &'a Stamp {
     let Stamp::Remote { hash, .. } = stamp else {
         return stamp;
@@ -474,8 +485,8 @@ fn fetched_as<'a>(graph: &Graph, state: &'a State, path: &str, stamp: &'a Stamp)
     }
 }
 
-/// Returns why an edge must run, or `None` if it is up to date, where `rebuilt` is whether an edge which produces one
-/// of its inputs runs, and so changes the input.
+/// Returns why an edge must run, or `None` if it is up to date. `rebuilt` says whether another edge runs, which
+/// changes the inputs it produces.
 pub(crate) fn reason(
     graph: &Graph,
     state: &State,
@@ -496,7 +507,7 @@ pub(crate) fn reason(
         let missing = edge.outputs().iter().any(|&output| !stamps.node(output).exists());
         return (forced && missing).then_some(Reason::Forced);
     }
-    let outputs = edge.outputs().to_vec();
+    let outputs = edge.outputs();
     let Some(record) = outputs.first().and_then(|&first| state.get(graph.path(first))) else {
         return Some(Reason::NoRecord);
     };
@@ -508,8 +519,8 @@ pub(crate) fn reason(
         return Some(Reason::CommandChanged);
     }
     let hashed = edge.hashed();
-    // a file which was left on a worker is compared by its contents once it is here, as is one which was fetched since,
-    // whose edge recorded it by them then
+    // a file recorded by its contents is compared by them, even if the edge is not hashed: it was left on a worker,
+    // or fetched from one
     let hashed_as = |stamp: &Stamp| hashed || stamp.hash().is_some();
     for (&output, (path, stamp)) in outputs.iter().zip(&record.outputs) {
         let now = stamps.node_as(output, hashed_as(stamp), Some((stamp, finished(record))));
@@ -530,7 +541,7 @@ pub(crate) fn reason(
     for (&node, (path, stamp)) in declared.iter().zip(&record.inputs) {
         let recorded = fetched_as(graph, state, path, stamp);
         let now = stamps.node_as(node, hashed_as(stamp), Some((recorded, record.start)));
-        // what is missing here, which no edge produces, is a dependency, as a missing input is an error
+        // a missing file here must be a dependency, as a missing input was reported as an error while visiting
         if !now.exists() && stamp.exists() {
             return Some(Reason::DependencyMissing(path.clone()));
         }

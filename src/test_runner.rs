@@ -51,9 +51,10 @@ impl Selection {
 
 /// Run the tests a selection chooses, without evaluating the configuration.
 ///
-/// What the tests need is built first, then each is run in turn from the project root with its output captured,
-/// which is shown if it fails, with how long each took. With `verbose`, the output of every test is shown below its
-/// result, such as the results of the tests in a crate's test harness, rather than only those which fail at the end.
+/// What the tests need is built first. Each test is then run in turn, from the project root, with its output
+/// captured, and its result is shown with how long it took. The output of a failed test is shown at the end. With
+/// `verbose`, the output of every test is shown below its result, such as the results of the individual tests in a
+/// crate's test harness.
 pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     let project = Configured::find(Output::Stdout)?;
     // the configuration is up to date, so the tests are chosen before what they need is built, which is only theirs
@@ -125,9 +126,9 @@ pub fn test(selection: &Selection, verbose: bool) -> Result<(), Error> {
     if failures.is_empty() { Ok(()) } else { Err(Error::TestsFailed(failures.len())) }
 }
 
-/// Run a test here, from the project root, with the directories of the project's shared libraries in the platform's
-/// search path of them, with its output captured, returning whether it passed, what it printed,
-/// with how it ended first if it failed, and how long it took.
+/// Run a test here, from the project root, with its output captured, and with the directories of the project's
+/// shared libraries added to the platform's search path for them. Returns whether it passed, what it printed, which
+/// for a failure starts with how it ended, and how long it took.
 fn run_here(test: &database::Test, project: &Configured, library_path: &[&str], pretty: bool) -> (bool, String, Duration) {
     let mut command = std::process::Command::new(test.command[0]);
     // finding the shared libraries of C which what it runs links

@@ -1,12 +1,18 @@
 //! What configuring a project asks rustc: its sysroot, its host, the targets it knows and its version.
 //!
-//! The answers are kept in the database, with a key of what chose and identifies the toolchain which gave them, so that
-//! the project is configured again without running rustc while none of it has changed, as for an edit of a `Jig` file.
-//! rustup's proxy, `rustc`, chooses the toolchain by `RUSTUP_TOOLCHAIN`, a `rust-toolchain` or `rust-toolchain.toml`
-//! file in the working directory or a directory which contains it, and its settings, of overrides by directory and
-//! the default, in `$RUSTUP_HOME/settings.toml`, while `rustc` is found by `PATH`. The key is of each of these, with
-//! the size and time of each file, and those of the file a toolchain's identity is of, which rustup writes when it
-//! updates the toolchain in place, or of rustc in the sysroot, as [`crate::toolchain::identity`] finds it.
+//! The answers are kept in the database, with a key made from everything which chooses and identifies the toolchain
+//! that gave them. While the key is unchanged, as after an edit to a `Jig` file, the project is configured again
+//! without running rustc.
+//!
+//! `rustc` itself is found through `PATH`. If it is rustup's proxy, the toolchain is chosen by, in turn:
+//!
+//! - `RUSTUP_TOOLCHAIN`;
+//! - a `rust-toolchain` or `rust-toolchain.toml` file in the working directory or one of its ancestors;
+//! - rustup's settings in `$RUSTUP_HOME/settings.toml`, which hold the overrides by directory and the default.
+//!
+//! The key covers each of those, with the size and time of each file. It also covers the size and time of the file
+//! the toolchain's identity is made from, as [`crate::toolchain::identity`] finds it: the channel's manifest, which
+//! rustup rewrites when it updates the toolchain in place, or failing that the `rustc` in the sysroot.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

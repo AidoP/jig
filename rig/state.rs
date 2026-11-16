@@ -1,23 +1,35 @@
 //! The state of a build: what each edge was last run with, which tells whether it must run again.
 //!
-//! The state is a log in a directory, `log`, to which a record is appended as soon as an edge has run, so that an
-//! interrupted build loses only the edges which were running. A later record of an edge replaces an earlier one. The
-//! log is rewritten without the records which have been replaced once they are most of it. `lock` in the same
-//! directory is locked while the state is open, so that two builds do not share it.
+//! The state is a directory holding two files. `log` has a record appended as soon as an edge has run, so that an
+//! interrupted build loses only the edges which were running. A later record of an edge replaces an earlier one, and
+//! once most of the log is replaced records, it is rewritten without them. `lock` is locked while the state is open,
+//! so that two builds do not share it.
 //!
-//! The log is the magic bytes and the version, then each record, as its length as a `u32` and the 64-bit FNV-1a hash of
-//! its contents, followed by its contents. A record which is cut short or does not match its hash, as when the build
-//! was killed while writing it, ends the log, and is overwritten by the next record. A log of another version is
-//! started again.
+//! # Format
 //!
-//! A record is the time the edge started and how long it ran, in milliseconds, the hash of its action, then its
-//! outputs, its declared inputs and the inputs it discovered, each as their number followed by each path and its stamp,
-//! then the environment variables it read, as their number followed by each name, and `0` if it was not set, or `1`
-//! followed by the hash of its value, as a `u64`.
-//! A stamp is `0` if the file was missing, `1` followed by its modification time, as an `i64`, and its size, as a
-//! `u64`, `2` followed by those and the BLAKE3 hash of its contents, or `3`, for an output left on a worker, followed
-//! by its hash, and `1` if it is executable or `0` if not. Numbers are little-endian, and paths are their
-//! length as a `u32` followed by their UTF-8 bytes.
+//! Numbers are little-endian, and a string is its length as a `u32` followed by its UTF-8 bytes.
+//!
+//! The log is the magic bytes, the version as a `u32`, then the records. Each record is the length of its contents
+//! as a `u32`, their 64-bit FNV-1a hash, and the contents. A record which is cut short, or does not match its hash,
+//! as when the build was killed while writing it, ends the log, and the next record overwrites it. A log of another
+//! version is started again.
+//!
+//! The contents of a record are:
+//!
+//! - when the edge started, in milliseconds since the Unix epoch, as a `u64`;
+//! - how long it ran, in milliseconds, as a `u32`;
+//! - the hash of its action, as a `u64`;
+//! - its outputs, its declared inputs, then its discovered inputs, each a count followed by that many paths, each
+//!   with its stamp;
+//! - the environment variables it read, as a count followed by each name and `0` if it was not set, or `1` and the
+//!   hash of its value as a `u64`.
+//!
+//! A stamp is one of:
+//!
+//! - `0`, for a missing file;
+//! - `1`, the modification time as an `i64`, and the size as a `u64`;
+//! - `2`, the same, and the BLAKE3 hash of the contents;
+//! - `3`, for an output left on a worker, the hash of its contents, and `1` if it is executable or else `0`.
 
 use std::collections::HashMap;
 use std::io::{Seek, Write};
@@ -30,7 +42,7 @@ use crate::stamp::Stamp;
 const MAGIC: &[u8; 4] = b"RIGL";
 const VERSION: u32 = 4;
 
-/// The fewest records the log has before it is rewritten without those which have been replaced.
+/// The fewest records a log must have to be rewritten without its replaced records.
 const COMPACT_MIN: usize = 1024;
 
 /// What an edge was last run with.
@@ -53,7 +65,7 @@ pub struct Record {
     pub env: Vec<(String, Option<u64>)>,
 }
 impl Record {
-    /// The key of the record, its first output, as the edge is found by.
+    /// The key of the record, by which its edge finds it: its first output.
     #[must_use]
     pub fn key(&self) -> &str {
         self.outputs.first().map_or("", |(path, _)| path)
@@ -63,12 +75,12 @@ impl Record {
 /// The state of a build, which is locked while it is open.
 pub struct State {
     dir: PathBuf,
-    /// The log, which is open but while it is replaced as it is compacted, as Windows does not replace a file which
-    /// is open.
+    /// The log, which is only `None` while it is being replaced by compaction, as Windows does not replace an open
+    /// file.
     log: Option<std::fs::File>,
     /// The lock file, which is held while the state is open.
     _lock: std::fs::File,
-    records: HashMap<String, Record>,
+    records: crate::hash::Map<String, Record>,
     /// The number of records in the log, including those which have been replaced.
     logged: usize,
 }
@@ -93,8 +105,7 @@ impl State {
         let mut log = log.map_err(io(&path))?;
         let bytes = std::fs::read(&path).map_err(io(&path))?;
         let (records, logged, end) = read_log(&bytes);
-        // a log of another version is started again, and one which is cut short is written again from where it is
-        // valid
+        // start a log of another version again, and cut one which ends in a damaged record back to its valid records
         let header = [MAGIC.as_slice(), &VERSION.to_le_bytes()].concat();
         let reset = if end == 0 {
             log.set_len(0).and_then(|()| log.write_all(&header))
@@ -113,7 +124,7 @@ impl State {
     pub fn get(&self, key: &str) -> Option<&Record> {
         self.records.get(key)
     }
-    /// Returns the outputs left on workers, by path, with their stamps, as their edges' records have them.
+    /// Returns the stamps of the outputs left on workers, by path, from their edges' records.
     #[must_use]
     pub fn remote_outputs(&self) -> HashMap<String, Stamp> {
         let outputs = self.records.values().flat_map(|record| &record.outputs);
@@ -155,13 +166,13 @@ impl State {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         let mut records: Vec<_> = self.records.values().collect();
-        // in the order they were run, so that the log is the same for the same records
+        // in the order they ran, so that the same records always give the same log
         records.sort_by(|lhs, rhs| (lhs.start, lhs.key()).cmp(&(rhs.start, rhs.key())));
         for record in records {
             write_record(&mut bytes, record);
         }
         std::fs::write(&tmp, &bytes).map_err(|error| Error::Io(tmp.clone(), error))?;
-        // the log is closed while it is replaced, and opened again, at its end, whether it was replaced or not
+        // close the log while it is replaced, then open it again to append, whether or not replacing it succeeded
         self.log = None;
         let renamed = std::fs::rename(&tmp, &path);
         let log = std::fs::File::options().append(true).open(&path);
@@ -230,10 +241,10 @@ fn write_record(bytes: &mut Vec<u8>, record: &Record) {
     bytes.extend_from_slice(&contents);
 }
 
-/// Read the records of a log, the number of them including those replaced, and the length of the log which is valid,
-/// which is `0` if it is not a log of this version.
-fn read_log(bytes: &[u8]) -> (HashMap<String, Record>, usize, usize) {
-    let mut records = HashMap::new();
+/// Reads a log. Returns its records, how many it holds counting those which were replaced, and the length of its
+/// valid part, which is `0` if it is not a log of this version.
+fn read_log(bytes: &[u8]) -> (crate::hash::Map<String, Record>, usize, usize) {
+    let mut records = crate::hash::Map::default();
     let header = MAGIC.len() + 4;
     if bytes.len() < header || &bytes[..4] != MAGIC || bytes[4..8] != VERSION.to_le_bytes() {
         return (records, 0, 0);

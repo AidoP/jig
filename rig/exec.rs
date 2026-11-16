@@ -1,54 +1,71 @@
-//! Running a build: the edges a [`plan`](crate::plan::plan) finds must run, in parallel, each once those it depends on
-//! have run.
+//! Running a build: the edges a [`plan`](crate::plan::plan) finds must run are run in parallel, each once the edges it
+//! depends on have run.
 //!
-//! Each edge runs its program, without a shell, in the build's directory, on one of a thread for each of the
-//! [`Options::jobs`], which is the most which run at once. Its output, stdout and stderr together, is captured and
-//! given to an [`Observer`] once it finishes, while an edge in the console pool runs alone among console edges with the
-//! terminal, and the output of the others is held until it finishes. An edge which succeeds is recorded as soon as it
-//! does, with the inputs its depfile lists, so that an interrupted build loses only the edges which were running.
+//! # Running an edge
 //!
-//! The outputs of a restat edge are found again once it has run, and if none of them changed, an edge which would run
-//! only because it depends on them is checked again, and does not run if it is otherwise up to date.
+//! Each edge runs its program, without a shell, in the build's directory. At most [`Options::jobs`] run at once, each
+//! on a thread of its own. An edge's output, stdout and stderr together, is captured and given to an [`Observer`] when
+//! it finishes. An edge in the console pool instead has the terminal: only one console edge runs at a time, and the
+//! output of the other edges is held until it finishes. An edge which succeeds is recorded at once, with the inputs
+//! its depfile lists, so that an interrupted build loses only the edges which were running.
 //!
-//! A cached edge, when the build has a [`Cache`], is looked up in it before it runs, by its action and the contents of
-//! its inputs, and if it has run with them before, its outputs and depfile are restored from the cache, and what its
-//! command printed is shown, rather than running it. Otherwise its outputs, depfile and what it printed are added to the
-//! cache once it has run and succeeded. A cache which cannot be read or written is a miss, rather than a failure.
+//! A generator edge is run like any other. A build whose graph is generated should first build the file the graph is
+//! read from, and read the graph again if that ran.
 //!
-//! A cached edge whose inputs are known from when it last ran, or which has an action which discovers them without
-//! running it, may run on a worker, one of [`Options::workers`], once
-//! the build's own jobs are full, if the worker has the edge's toolchain: its inputs, declared and discovered, are
-//! sent to the worker, as [`crate::worker`] describes, which runs it, and its outputs are fetched, and restored as from
-//! the cache. If it cannot, or the action fails there, it is given back to run here, in one of the build's own jobs,
-//! as any other edge does, once one is free.
+//! # Restat
 //!
-//! An edge goes to a worker only if it is estimated to finish sooner there than here: sending its files, running it
-//! there and fetching its outputs, against waiting for one of the build's own jobs, the least time one of the edges
-//! which run here has left, and running it here, by how long they took when they last ran. Sending is estimated by the
-//! size of its files when it last ran, but for those the worker has from this build, as it wrote or was sent them, and
-//! the link's latency and bandwidth, and running it there by the worker's speed, as they are measured. Of the workers
-//! which may run it, the one it would finish soonest on takes it. An
-//! interrupted build has its workers interrupt what they run for it, which does not then run here.
+//! The outputs of a restat edge are stamped again once it has run. If none changed, an edge which was only going to
+//! run because it depends on them is checked again, and does not run if it is otherwise up to date.
 //!
-//! With [`Options::workers_only`], an edge which a worker may run does not run here, but waits for a worker, whatever
-//! its jobs, as long as a worker is connecting, or has reported that it runs the edge. What no worker runs, and an
-//! edge which has not run before, and has no action which discovers its inputs, still runs here, as does one which
-//! fails on a worker, or which it cannot be sent.
+//! # The cache
 //!
-//! An edge with early outputs, as rustc's metadata of a crate, reports them as it runs, as rustc does with
-//! `--json=artifacts`, and an edge which needs only them of its outputs starts once they are, rather than once it has
-//! finished. What such an edge writes is read as it is written, and what rustc would have printed is shown and kept,
-//! rather than its JSON, as for what it printed on a worker.
+//! If the build has a [`Cache`], a cached edge is looked up in it before it runs, by its action and the contents of
+//! its inputs. On a hit, its outputs and depfile are restored from the cache and what its command printed is shown,
+//! and the command does not run. On a miss, the edge runs, and if it succeeds, its outputs, its depfile and what it
+//! printed are added to the cache. A cache which cannot be read or written counts as a miss, not a failure.
 //!
-//! With [`Download::Targets`], the outputs an edge writes on a worker are left there, rather than fetched, but for the
-//! targets of the build, through aliases, and its depfile. Each is stamped by its contents, which its edge's record
-//! keeps, while its file is missing, and is fetched once an edge which runs here, or is sent to another worker, reads
-//! it, and at the end of the build if it is a target. It is fetched from the cache, or the remote cache, or the
-//! workers. One which none of them has any longer is lost: the edge which needed it does not run, the edge which wrote
-//! it is recorded as missing it, and the build is planned and run again, a few times at most, which builds it again.
+//! # Workers
 //!
-//! A generator edge is run like any other. A build whose graph is generated should first build the file it is read
-//! from, then read the graph again if that ran.
+//! Once the build's own jobs are full, a cached edge may run on one of [`Options::workers`] which has the edge's
+//! toolchain. Its inputs must be known, either from when it last ran or from its action which discovers them
+//! ([`Edge::discover`](crate::Edge::discover)). The inputs, declared and discovered, are sent to the worker, as
+//! [`crate::worker`] describes. The worker runs the edge, and its outputs are fetched and restored as if from the
+//! cache. If the edge cannot be sent, or fails there, it is given back and runs here like any other edge, once a job
+//! is free.
+//!
+//! An edge only goes to a worker if it is estimated to finish sooner there than here.
+//!
+//! - There: the time to send its files, run it and fetch its outputs. Sending is estimated from the size of its files
+//!   when it last ran, leaving out those the worker already has from this build, and the measured latency and
+//!   bandwidth of the link. Running is estimated from how long it last took and the measured speed of the worker.
+//! - Here: the wait for one of the build's own jobs, which is the least time any edge running here has left, plus how
+//!   long it last took.
+//!
+//! Of the workers which may run it, the one it would finish soonest on takes it. When a build is interrupted, its
+//! workers interrupt what they are running for it, and those edges do not then run here.
+//!
+//! With [`Options::workers_only`], an edge which a worker may run never runs here. It waits for a worker, however many
+//! jobs are free, as long as some worker is still connecting or has reported that it can run the edge. These still run
+//! here: an edge no worker can run, an edge which has not run before and has no action to discover its inputs, and an
+//! edge which failed on a worker or could not be sent.
+//!
+//! # Early outputs
+//!
+//! An edge with early outputs, such as a crate's metadata, reports each as it writes it, as rustc does with
+//! `--json=artifacts`. An edge which needs only those outputs starts as soon as they are reported, rather than when
+//! the first edge finishes. The output of such an edge is read as it is written. It is rustc's JSON, and what is shown
+//! and kept is what rustc would have printed without it, as for an edge which ran on a worker.
+//!
+//! # Leaving outputs on workers
+//!
+//! With [`Download::Targets`], the outputs an edge writes on a worker stay there, apart from its depfile and the
+//! targets of the build, including those reached through aliases. An output which is left is stamped by its contents,
+//! which its edge's record keeps, while its file is missing here. It is fetched when an edge which runs here, or on
+//! another worker, reads it. It is fetched from the cache, the remote cache or the workers.
+//!
+//! An output which none of them still has is lost. The edge which needed it does not run, the edge which wrote it is
+//! recorded as missing that output, and the build is planned and run again, which builds it again. This is repeated a
+//! few times at most.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Read;
@@ -78,22 +95,23 @@ pub struct Options {
     pub keep_going: usize,
     /// Whether the commands share the jobs through a jobserver, which rig joins if it is run by one.
     pub jobserver: bool,
-    /// Set to stop the build, as an interrupt does: no more edges start, and those running are sent `SIGINT`.
+    /// Set this to stop the build, as an interrupt does: no more edges start, and those running are sent `SIGINT`.
     pub cancel: Arc<AtomicBool>,
     /// Environment variables every command is run with, beside those rig is run with.
     pub env: Vec<(String, String)>,
     /// The cache the results of cached edges are kept in, if there is one.
     pub cache: Option<Cache>,
-    /// The environment variables which a hermetic edge inherits beside those it passes on, which only locate the tools
-    /// and files it uses, rather than changing what it produces, so they are not its inputs: `PATH`, `HOME` and
-    /// `TMPDIR` by default.
+    /// The environment variables every hermetic edge inherits, beside those it passes on: `PATH`, `HOME` and `TMPDIR`
+    /// by default. They only locate the tools and files an edge uses, and do not change what it produces, so they are
+    /// not inputs of the edge.
     pub locating: Vec<String>,
     /// The workers which cached edges may run on, once the build's own jobs are full.
     pub workers: Vec<Arc<Remote>>,
     /// Whether an edge which a worker may run waits for one, rather than running here.
     pub workers_only: bool,
-    /// The releases of toolchains, by their identities, by which a worker may run an edge which may run on another
-    /// host with the same release on its own, and which a worker which installs toolchains installs one by.
+    /// The release of each toolchain, by the toolchain's identity. A worker on another host may run an edge with its
+    /// own toolchain of the same release, if the edge's placement allows it, and a worker which installs toolchains
+    /// installs the release.
     pub releases: HashMap<String, crate::worker::Release>,
     /// Which outputs of the edges which run on workers are fetched.
     pub download: Download,
@@ -105,13 +123,15 @@ pub enum Download {
     /// Every one, once its edge has run.
     #[default]
     All,
-    /// Only the targets of the build, and what an edge which runs here, or on another worker, reads, once it needs
-    /// them, while the others are left on the workers.
+    /// Only the targets of the build, and what an edge running here or on another worker reads, when it needs it.
+    /// The rest stay on the workers.
     Targets,
 }
 impl Options {
-    /// Options for a build in a directory, which stops at the first failure, with two more jobs than the machine runs
-    /// at once, as commands wait on files and processes, or one more with two, or two with one.
+    /// Options for a build in a directory, which stops at the first failure.
+    ///
+    /// It has slightly more jobs than the machine has threads, as commands spend time waiting on files and processes:
+    /// two more, or one more on a machine with one or two threads.
     #[must_use]
     pub fn new(dir: &Path) -> Self {
         let jobs = match std::thread::available_parallelism().map_or(1, std::num::NonZero::get) {
@@ -131,9 +151,8 @@ impl Options {
     }
 }
 
-/// The variables which locate the tools and files a hermetic edge uses, by default: `PATH`, `HOME` and `TMPDIR`, and
-/// on Windows, those of the system's directories and the user's, and the extensions of programs, which Windows
-/// programs need to run.
+/// The default of [`Options::locating`]: `PATH`, `HOME` and `TMPDIR`. On Windows it also has the variables for the
+/// system's and the user's directories and the extensions of programs, which Windows programs need in order to run.
 #[cfg(unix)]
 const LOCATING: [&str; 3] = ["PATH", "HOME", "TMPDIR"];
 #[cfg(windows)]
@@ -150,7 +169,7 @@ pub enum Outcome {
     Failed(ExitStatus),
     /// The command could not be run, or its depfile could not be read.
     Error(String),
-    /// The command did not succeed, once the build was interrupted, which is not counted as a failure.
+    /// The command did not succeed, but the build had been interrupted, so it is not counted as a failure.
     Interrupted,
 }
 impl Outcome {
@@ -180,11 +199,12 @@ pub trait Observer {
     fn finished(&mut self, graph: &Graph, edge: EdgeId, outcome: &Outcome, output: &[u8], progress: Progress) {
         let _ = (graph, edge, outcome, output, progress);
     }
-    /// An edge which started has not run, as what it reads was lost, and starts again in the build's next pass.
+    /// An edge which was reported as started did not run, as an input it reads was lost. It starts again in the
+    /// build's next pass.
     fn unstarted(&mut self, graph: &Graph, edge: EdgeId) {
         let _ = (graph, edge);
     }
-    /// Time has passed, as it is told often while edges run, so that how long they have run can be shown.
+    /// Called often while edges run, so that how long they have been running can be shown.
     fn tick(&mut self) {}
     /// The build has finished, or stopped.
     fn done(&mut self) {}
@@ -206,7 +226,7 @@ pub struct Report {
     pub remote: usize,
     /// Whether the build was interrupted, by a signal or [`Options::cancel`].
     pub interrupted: bool,
-    /// The outputs which were left on workers which no longer had them, which were built again.
+    /// The outputs left on workers which the workers no longer had, and which were built again.
     pub lost: usize,
 }
 impl Report {
@@ -225,42 +245,45 @@ enum Message {
     /// The command of an edge has started, as the process with an id, which leads its process group.
     Spawned(usize, u32),
     Finished(Finished),
-    /// An edge which was sent to a worker, which did not run it, or failed it, given back to run here.
+    /// An edge which was sent to a worker is given back to run here, as the worker did not run it, or it failed there.
     Returned(Box<Job>),
-    /// An edge has written one of its early outputs, which it reported, with its stamp if it was left on a worker.
+    /// An edge has reported writing one of its early outputs. The stamp is set if the output was left on a worker.
     Early(usize, NodeId, Option<Stamp>),
 }
 
-/// An edge for a thread to run: its index in the plan, its action, whether it is in the console pool, and where its
-/// result is looked for in the cache, which is restored rather than running the action, if it is found.
+/// An edge for a thread to run.
 struct Job {
+    /// The edge's index in the plan.
     index: usize,
     action: Exec,
+    /// Whether the edge is in the console pool.
     console: bool,
+    /// Where the edge's result is looked for in the cache. If it is found, it is restored and the action does not run.
     lookup: Option<Lookup>,
     /// The variables a hermetic edge inherits, or `None` if it inherits every one.
     inherit: Option<Vec<String>>,
     /// The worker it runs on, if it is sent to one.
     dispatch: Option<Dispatch>,
-    /// The cache and first key it is marked to run here by if it succeeds, as it failed on a worker.
+    /// Set for an edge which failed on a worker: if it succeeds here, it is marked in this cache, under this key, its
+    /// first, to run here in future.
     mark: Option<(Cache, Hash)>,
-    /// The early outputs it reports, by their paths, if it has any, as it writes what rustc writes with JSON.
+    /// The early outputs it reports, by their paths, if it has any. It then prints rustc's JSON.
     early: Option<Arc<Vec<(String, NodeId)>>>,
-    /// The inputs it reads which were left on workers, which are fetched before it runs here.
+    /// The inputs it reads which were left on workers, to fetch before it runs here.
     fetch: Vec<(String, Stamp)>,
-    /// What the thread which runs it here stamps by their contents once it has succeeded, rather than the build's own
-    /// thread: its outputs and depfile, if it is hashed, and the cache they are put in, if it is cached.
+    /// For a hashed edge, its outputs and depfile, which the thread that runs it hashes once it has succeeded, to
+    /// spare the build's own thread, and the cache they are put in, if it is cached.
     stamp: Option<Arc<(Vec<String>, Option<Cache>)>>,
 }
 
-/// A cached edge sent to a worker: the worker, the cache its outputs are fetched into, and its action, with the paths
-/// of its inputs, whose contents are found by the thread which runs it, and of the outputs it must write.
+/// A cached edge to send to a worker. The contents of its inputs are hashed by the thread which sends it.
 struct Dispatch {
     worker: Arc<Remote>,
+    /// The cache its outputs are fetched into.
     cache: Cache,
-    /// The edge's first key, by which an edge which fails there, but not here, is marked to run here.
+    /// The edge's first key, under which it is marked to run here if it fails on the worker but succeeds here.
     key: Option<Hash>,
-    /// How long it took when it last ran, by which the worker's speed is measured.
+    /// How long it took when it last ran, against which the worker's speed is measured.
     took: Duration,
     identity: String,
     release: String,
@@ -272,16 +295,16 @@ struct Dispatch {
     inputs: Vec<String>,
     /// The outputs it writes, and its depfile, if it has one.
     outputs: Vec<String>,
-    /// A file stderr is written to, if it writes one, which it need not.
+    /// The file its stderr is written to, if any, which it need not write.
     stderr: Option<String>,
-    /// For an edge which has not run, the action which writes its depfile without running it, which runs here first,
-    /// and the depfile, whose inputs are sent too.
+    /// For an edge which has not run: the action which writes its depfile without running it, and the depfile. The
+    /// action runs here first, and the inputs the depfile lists are sent too.
     discovery: Option<(Exec, String)>,
-    /// The inputs which were left on workers, which this worker has, or which are fetched here and sent.
+    /// The inputs which were left on workers. Those this worker lacks are fetched here and sent.
     remote: Vec<(String, Stamp)>,
     /// The outputs which are left on the worker, rather than fetched.
     leave: Vec<String>,
-    /// The outputs it reports as it writes them, which are fetched as they are.
+    /// The early outputs, which it reports as it writes them, and which are fetched as they are reported.
     early: Vec<String>,
     fetcher: Arc<Fetcher>,
 }
@@ -290,9 +313,10 @@ type Left = Vec<(String, Stamp)>;
 
 /// What became of an edge sent to a worker.
 enum Sent {
-    /// It ran there, and printed this, once its outputs were restored, but for those left there, with their stamps.
+    /// It ran there and its outputs have been restored, except those left there. Holds what it printed, and the
+    /// outputs left there.
     Ran(Vec<u8>, Left),
-    /// It did not run, as inputs it reads were left on workers which no longer have them.
+    /// It did not run, as these inputs were left on workers which no longer have them.
     Lost(Vec<String>),
     /// It ran there, and failed, or did not write every output.
     Failed,
@@ -301,9 +325,10 @@ enum Sent {
 }
 
 impl Dispatch {
-    /// Run the edge on the worker, restoring its outputs, and each of its early outputs as the worker tells of it,
-    /// unless it is left there, which `wrote` is told of, by its path, once it is here, or with its stamp if it is
-    /// left.
+    /// Run the edge on the worker and restore its outputs.
+    ///
+    /// Each early output is handled as soon as the worker reports it, and `wrote` is then called with its path: with
+    /// `None` once the output has been restored here, or with its stamp if it is left on the worker.
     fn run(&self, dir: &Path, wrote: &(dyn Fn(&str, Option<Stamp>) + Sync)) -> Sent {
         match self.try_run(dir, wrote) {
             Ok((printed, left)) => Sent::Ran(printed, left),
@@ -312,8 +337,8 @@ impl Dispatch {
     }
     fn try_run(&self, dir: &Path, wrote: &(dyn Fn(&str, Option<Stamp>) + Sync)) -> Result<(Vec<u8>, Left), Sent> {
         let mut paths = self.inputs.clone();
-        // what was left on workers is fetched to be sent, unless this one has it, or the action which discovers what
-        // the edge reads, which runs here, may read it
+        // Inputs left on workers are fetched here if this worker lacks them, to be sent to it. They are all fetched
+        // if the discovery action runs, as it runs here and may read any of them.
         if !self.remote.is_empty() {
             let fetch = if self.discovery.is_some() {
                 self.remote.clone()
@@ -328,7 +353,8 @@ impl Dispatch {
                 return Err(Sent::Lost(lost));
             }
         }
-        // an edge which has not run discovers its inputs here first, as it runs here otherwise, which shows why
+        // An edge which has not run discovers its inputs here first. If that fails, the edge runs here, which shows
+        // the error.
         if let Some((action, depfile)) = &self.discovery {
             let environment =
                 Environment { makeflags: None, env: &self.env, inherit: Some(&self.locating), reports: None };
@@ -347,8 +373,8 @@ impl Dispatch {
         let mut inputs = Vec::new();
         for path in &paths {
             let full = dir.join(path);
-            // an input which is not a file is not sent, which an action which reads it fails without, unless it was
-            // left on a worker, which this one has
+            // An input which is not a file here is not sent, unless it was left on a worker, when this worker has it
+            // by now. An action which reads an input that was not sent fails.
             let Some(metadata) = std::fs::metadata(&full).ok().filter(std::fs::Metadata::is_file) else {
                 let left = self.remote.iter().find(|(remote, _)| remote == path);
                 if let Some(&(_, Stamp::Remote { hash, executable })) = left {
@@ -372,8 +398,8 @@ impl Dispatch {
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
             early: self.early.clone(),
         };
-        // an early output is fetched as it is told of, which is what the edges which need only it wait for, unless it
-        // is left there, when what is here is stale
+        // An early output is fetched as soon as it is reported, as edges which need only it are waiting. If it is
+        // to be left on the worker instead, the file here is stale, and is removed.
         let early = |output: cache::Output| {
             let full = dir.join(&output.path);
             if self.leave.contains(&output.path) {
@@ -398,7 +424,7 @@ impl Dispatch {
         if !executed.succeeded || !self.outputs.iter().all(written) {
             return Err(Sent::Failed);
         }
-        // the outputs which may be left there are, unless they are here already, as they were
+        // an output which may be left on the worker is left, unless the same file is already here
         let (mut kept, mut left) = (Vec::new(), Vec::new());
         for output in executed.entry.outputs {
             let here = || crate::blake3::hash_file(&dir.join(&output.path)).is_ok_and(|hash| hash == output.blob);
@@ -416,7 +442,7 @@ impl Dispatch {
         let size = |blob: &Hash| std::fs::metadata(self.cache.blob_path(blob)).map_or(0, |metadata| metadata.len());
         self.worker.measured(fetched.iter().map(size).sum(), fetching.elapsed());
         let printed = Restore { cache: &self.cache, entry }.apply(dir).map_err(|_| Sent::NotRun)?;
-        // what is left there is missing here, rather than as it was
+        // remove what is here of an output left there, which is stale
         for output in &left {
             let _ = std::fs::remove_file(dir.join(&output.path));
         }
@@ -425,28 +451,32 @@ impl Dispatch {
         });
         Ok((printed, left.collect()))
     }
-    /// Returns what marks the edge to run here, once it failed on the worker and succeeds here, as it depends on what
-    /// it does not declare or discover, until its first key changes.
+    /// Returns the cache and key under which the edge is marked to run here. It is marked if it fails on the worker
+    /// and then succeeds here, which shows that it depends on something it neither declares nor discovers. The mark
+    /// lasts until its first key changes.
     fn mark(&self) -> Option<(Cache, Hash)> {
         Some((self.cache.clone(), self.key?))
     }
 }
 
-/// Where the result of a cached edge is looked for: the cache, the edge's first key, and the variables every command
-/// is given, by which the variables it discovered are stamped.
+/// Where the result of a cached edge is looked for.
 ///
-/// It is looked for on the thread which runs the edge, rather than the build's, so that edges which wait on a remote
-/// cache wait together, and stamps the inputs the edge discovered itself, by their contents.
+/// The lookup runs on the thread which runs the edge, not the build's thread, so that edges waiting on a remote cache
+/// wait at the same time. It therefore hashes the inputs the edge discovered itself, rather than using the build's
+/// [`Stamps`].
 struct Lookup {
     cache: Cache,
+    /// The edge's first key.
     key: Hash,
+    /// The variables every command is given, which the discovered variables are read through.
     env: Arc<Vec<(String, String)>>,
-    /// The outputs left on workers, whose contents are known while their files are missing.
+    /// The outputs left on workers, whose hashes are known while their files are missing here.
     left: Arc<RwLock<HashMap<String, Stamp>>>,
 }
 impl Lookup {
-    /// Returns the second key of a set of inputs the edge discovered, by their contents as they are now, relative to
-    /// the build's directory, or that they are missing, and the values of the variables, as a command sees them.
+    /// Returns the second key for a set of inputs and variables the edge once discovered: the hash of each input's
+    /// contents now, or that it is missing, and of each variable's value as a command sees it. The inputs are
+    /// relative to the build's directory.
     fn second_key(&self, dir: &Path, discovery: &cache::Discovery) -> Hash {
         let hash = |path: &String| {
             let left = || self.left.read().ok()?.get(path)?.hash().copied();
@@ -462,25 +492,25 @@ impl Lookup {
         let env: Vec<_> = discovery.env.iter().zip(&values).map(|(name, hash)| (name.as_str(), hash.as_ref())).collect();
         cache::second_key(&self.key, &inputs, &env)
     }
-    /// Find the edge's result, and restore it, returning what its command printed, or `None` if it is not found or
-    /// cannot be restored.
+    /// Find the edge's result and restore it. Returns what its command printed, or `None` if the result is not found
+    /// or cannot be restored.
     fn restore(&self, dir: &Path) -> Option<Vec<u8>> {
         let (_, entry) = self.cache.find(&self.key, |discovery| self.second_key(dir, discovery))?;
         Restore { cache: &self.cache, entry }.apply(dir).ok()
     }
 }
 
-/// The result of an edge in the cache, which is restored to its outputs.
+/// A cached result of an edge, to restore its outputs from.
 struct Restore<'a> {
     cache: &'a Cache,
     entry: cache::Entry,
 }
 impl Restore<'_> {
-    /// Restore the outputs of the edge, relative to the build's directory, returning what its command printed, once
-    /// the blobs which are not in the cache are fetched from the remote cache together.
+    /// Restore the outputs of the edge, relative to the build's directory, and return what its command printed. The
+    /// blobs missing from the cache are first fetched from the remote cache, in one request.
     ///
-    /// If one cannot be, every blob of the result is checked, so that those which are corrupted are removed, and are
-    /// added again once the edge has run.
+    /// If an output cannot be restored, every blob of the result is checked, so that corrupted ones are removed, to
+    /// be added again once the edge has run.
     fn apply(&self, dir: &Path) -> std::io::Result<Vec<u8>> {
         self.cache.fetch_blobs(&cache::entry_blobs(&self.entry).copied().collect::<Vec<_>>());
         let restored = self.entry.outputs.iter().try_for_each(|output| {
@@ -494,17 +524,18 @@ impl Restore<'_> {
     }
 }
 
-/// What fetches the outputs left on workers which are needed here to their files, each once: from the cache, which
-/// fetches what it does not have from the remote cache, or else from the workers.
+/// Fetches outputs which were left on workers, when they are needed here, to their files. Each is fetched once, from
+/// the cache, which itself asks the remote cache, or failing that from the workers.
 struct Fetcher {
     dir: PathBuf,
     cache: Option<Cache>,
     workers: Vec<Arc<Remote>>,
-    /// Whether each file which has been asked for was fetched, by its path, once it has been.
+    /// The result of fetching each file asked for so far, by its path, set once the fetch has finished.
     fetched: Mutex<HashMap<String, Arc<OnceLock<bool>>>>,
 }
 impl Fetcher {
-    /// Fetch a file left on a worker, returning whether it is here, as it is if it was not left on one.
+    /// Fetch a file if its stamp says it was left on a worker. Returns whether the file is now here, which is `true`
+    /// for a file that was never left.
     fn fetch(&self, path: &str, stamp: Stamp) -> bool {
         let Stamp::Remote { hash, executable } = stamp else {
             return true;
@@ -541,7 +572,7 @@ impl Fetcher {
         let fetched = fetched.iter().filter(|(_, once)| once.get() == Some(&true));
         fetched.map(|(path, _)| path.clone()).collect()
     }
-    /// Fetch files left on workers, on as many threads at once, returning those which none has any longer.
+    /// Fetch files left on workers, on up to `threads` threads. Returns those which could not be fetched.
     fn fetch_all(&self, files: &[(String, Stamp)], threads: usize) -> Vec<String> {
         let lost = |files: &[(String, Stamp)]| -> Vec<String> {
             let lost = files.iter().filter(|(path, stamp)| !self.fetch(path, *stamp));
@@ -558,9 +589,9 @@ impl Fetcher {
     }
 }
 
-/// Stamp files an edge wrote by their contents, relative to the build's directory, and add them to a cache if one is
-/// given, returning the stamps of those which are files. A file which cannot be read is left for the build's own thread
-/// to stamp.
+/// Stamp the files an edge wrote, relative to the build's directory, by their contents, and add them to the cache if
+/// one is given. Returns the stamps of those which are files. A file which cannot be read is skipped, and left for
+/// the build's own thread to stamp.
 fn stamp_outputs(dir: &Path, paths: &[String], cache: Option<&Cache>) -> Vec<(String, Stamp)> {
     let mut stamped = Vec::new();
     for path in paths {
@@ -571,7 +602,7 @@ fn stamp_outputs(dir: &Path, paths: &[String], cache: Option<&Cache>) -> Vec<(St
         let Ok(hash) = crate::blake3::hash_file(&full) else {
             continue;
         };
-        // which it is only an aid to, so a file which is not added is added once it is stored
+        // adding the file now only saves time later, so a failure is ignored: it is added when the result is stored
         if let Some(cache) = cache {
             let _ = cache.put_file(&full, &hash);
         }
@@ -594,7 +625,7 @@ struct Finished {
     remote: bool,
     /// The outputs it left on the worker, with their stamps.
     left: Vec<(String, Stamp)>,
-    /// The inputs it reads which were left on workers which no longer have them, so that it did not run.
+    /// The inputs it reads which were left on workers that no longer have them. If there are any, it did not run.
     lost: Vec<String>,
     /// Its outputs and depfile, stamped by their contents by the thread which ran it, if it is hashed.
     stamped: Vec<(String, Stamp)>,
@@ -610,7 +641,7 @@ enum Status {
     Failed,
 }
 
-/// The most times a build is planned and run, while it loses outputs which were left on workers.
+/// The most times a build is planned and run. It is run again only if outputs left on workers were lost.
 const PASSES: usize = 3;
 
 /// Build targets, given by their paths, or the default targets if none are given.
@@ -643,7 +674,7 @@ pub fn build(
         total.remote += report.remote;
         total.lost += report.lost;
         (total.not_run, total.interrupted) = (report.not_run, report.interrupted);
-        // what was lost is built again, as what needed it is
+        // run again only to rebuild outputs which were lost, and what needed them
         if report.lost == 0 || report.interrupted || report.failed > 0 {
             break;
         }
@@ -655,8 +686,8 @@ pub fn build(
     Ok(total)
 }
 
-/// Ask the workers, on a thread of its own, which of the files left on them they are missing, which has those which
-/// have them keep them from their caches' collection, as they were used, while the build goes on.
+/// Ask the workers which of the files left on them they are missing, on a separate thread, while the build goes on.
+/// The answers are not used: asking marks the files as used, which keeps the workers' caches from collecting them.
 fn keep_left(state: &State, options: &Options) -> Option<std::thread::JoinHandle<()>> {
     if options.workers.is_empty() {
         return None;
@@ -756,7 +787,7 @@ fn build_once(
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
     }
-    // which dependents need only the early outputs of the edges they depend on
+    // find the pairs where an edge needs only the early outputs of an edge it depends on
     for (dependency, dependents) in run.dependents.iter().enumerate() {
         if run.graph.edge(run.edges[dependency]).early().is_empty() {
             continue;
@@ -792,8 +823,8 @@ fn build_once(
     Ok(run.report)
 }
 
-/// Returns the files which are fetched if they were left on workers: the targets, and the inputs of those which are
-/// aliases, and so on.
+/// Returns the files to fetch if they were left on workers: the targets, with the inputs of any alias among them in
+/// its place, however deeply aliases nest.
 fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
     let mut wanted = HashSet::new();
     let mut seen = HashSet::new();
@@ -814,8 +845,8 @@ fn wanted(graph: &Graph, targets: &[NodeId]) -> HashSet<NodeId> {
     wanted
 }
 
-/// Returns, for each toolchain, by its identity, how long the cached edges with it which have run took, and the size of
-/// their outputs, each the median of them, by which an edge which has not run is estimated.
+/// Returns, for each toolchain identity, the median time the cached edges with that toolchain took when they last
+/// ran, and the median size of their outputs. An edge which has not run is estimated from them.
 fn estimates(graph: &Graph, state: &State) -> HashMap<String, (Duration, u64)> {
     let mut found: HashMap<&str, (Vec<u32>, Vec<u64>)> = HashMap::new();
     for (id, edge) in graph.edges().enumerate() {
@@ -841,11 +872,12 @@ fn estimates(graph: &Graph, state: &State) -> HashMap<String, (Duration, u64)> {
     estimates.collect()
 }
 
-/// Returns the priority of each edge in the plan: how long it took when it last ran, in milliseconds, or one if it has
-/// not run, with the longest of the edges which depend on it, as the time of the longest path from it to the end of the
-/// build. Edges on that path, the critical one, run first, so that a long chain does not start last.
+/// Returns the priority of each edge in the plan: the time of the longest path from it to the end of the build. That
+/// is how long it took when it last ran, in milliseconds, or one if it has not run, plus the highest priority among
+/// the edges which depend on it. Edges on the longest, critical, path run first, so that a long chain does not start
+/// last.
 ///
-/// The plan is in an order in which each edge runs after those it depends on, so the priorities are found from its end.
+/// The plan lists each edge after those it depends on, so the priorities are computed from its end.
 fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[Vec<usize>]) -> Vec<u64> {
     let mut priority = vec![0; edges.len()];
     for index in (0..edges.len()).rev() {
@@ -857,9 +889,9 @@ fn critical_paths(graph: &Graph, state: &State, edges: &[EdgeId], dependents: &[
     priority
 }
 
-/// Whether an edge needs only the early outputs of another of the edges it depends on: each of its inputs, declared
-/// and discovered, which the other produces is one of them, and none is the output of an alias, which may lead to the
-/// others.
+/// Whether `edge` needs only the early outputs of an edge it depends on: every input of it, declared or discovered,
+/// which the other edge produces is an early output. An input which is an alias rules this out, as the alias may
+/// stand for the other outputs.
 fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeId) -> bool {
     let early = graph.edge(dependency).early();
     let data = graph.edge(dependent);
@@ -882,9 +914,9 @@ fn early_only(graph: &Graph, state: &State, dependent: EdgeId, dependency: EdgeI
     needs
 }
 
-/// Whether two paths relative to the build's directory are of the same file, with or without `./` before them, and on
-/// Windows, with `\\` or `/` between their components, as rustc reports an artifact by the path it was given, which
-/// jig gives with `\\` there, while the graph has `/`.
+/// Whether two paths relative to the build's directory name the same file, ignoring a leading `./`, and on Windows,
+/// whether components are separated by `\\` or `/`. rustc reports an artifact by the path it was given, which on
+/// Windows jig gives with `\\`, while the graph has `/`.
 pub(crate) fn same_path(lhs: &str, rhs: &str) -> bool {
     let trim = |path: &str| {
         let path = if cfg!(windows) { path.replace('\\', "/") } else { path.to_string() };
@@ -893,7 +925,7 @@ pub(crate) fn same_path(lhs: &str, rhs: &str) -> bool {
     trim(lhs) == trim(rhs)
 }
 
-/// Returns the edges in the plan which an edge depends on, through aliases, by its inputs, declared and discovered.
+/// Returns the edges in the plan which produce an edge's inputs, declared and discovered, looking through aliases.
 fn planned_deps(graph: &Graph, state: &State, edge: EdgeId, index: &HashMap<EdgeId, usize>) -> Vec<usize> {
     let data = graph.edge(edge);
     let inputs = data.inputs().iter().chain(data.dependencies()).chain(data.after());
@@ -924,11 +956,11 @@ struct Run<'g, 's> {
     state: &'s mut State,
     options: &'s Options,
     stamps: Stamps<'g>,
-    /// The edges of the plan, in its order, which each run after those they depend on.
+    /// The edges of the plan, in its order: each comes after those it depends on.
     edges: Vec<EdgeId>,
     reasons: Vec<Reason>,
     index: HashMap<EdgeId, usize>,
-    /// The edges of the plan which each depends on, and depend on it.
+    /// For each edge, the edges of the plan it depends on, and those which depend on it.
     deps: Vec<Vec<usize>>,
     dependents: Vec<Vec<usize>>,
     /// The number of edges each is waiting for.
@@ -951,7 +983,7 @@ struct Run<'g, 's> {
     /// The first error writing the state, which stops the build.
     error: Option<Error>,
     jobserver: Option<Jobserver>,
-    /// The token each running edge holds, which each but one does.
+    /// The jobserver token each running edge holds. One edge runs without a token, in the build's own job.
     tokens: HashMap<usize, u8>,
     /// The edge running in the job the build holds without a token, if one is.
     implicit: Option<usize>,
@@ -963,8 +995,8 @@ struct Run<'g, 's> {
     keys: HashMap<usize, Hash>,
     /// The variables every command is given, for the threads which look edges up in the cache.
     env: Arc<Vec<(String, String)>>,
-    /// The build's directory, absolute, which is replaced in the actions of cached edges by a marker in their keys, so
-    /// that a build in another directory shares their results, or empty if it is not known.
+    /// The build's absolute directory, or empty if it is not known. The cache keys of edges have a marker in its
+    /// place, so that a build in another directory shares their results.
     relocation: String,
     /// The number of running edges which run here, rather than on a worker.
     local: usize,
@@ -975,33 +1007,33 @@ struct Run<'g, 's> {
     spawned: Vec<bool>,
     /// The edges which cannot run on a worker.
     local_only: HashSet<usize>,
-    /// Set once the build is interrupted, so that an edge which a worker was interrupted running does not run here.
+    /// Set once the build is interrupted, so that an edge which was interrupted on a worker does not then run here.
     stop: Arc<AtomicBool>,
-    /// The edges which workers gave back, which run here once one of the build's jobs is free, in the order given.
+    /// The edges which workers gave back, in the order they were given. Each runs here once a job is free.
     returned: std::collections::VecDeque<Job>,
-    /// The dependents, and the edges they depend on, which need only the early outputs of those edges.
+    /// The pairs of a dependent and an edge it depends on where the dependent needs only the edge's early outputs.
     early_deps: HashSet<(usize, usize)>,
     /// The early outputs each running edge has reported.
     reported: HashMap<usize, HashSet<NodeId>>,
-    /// The dependents, and the edges they depend on, which no longer wait for them, as they reported their early
-    /// outputs.
+    /// The pairs of a dependent and an edge it depends on where the dependent has stopped waiting for the edge, as
+    /// the edge has reported its early outputs.
     released: HashSet<(usize, usize)>,
     /// When each running edge started.
     started: HashMap<usize, Instant>,
-    /// The files each worker has from this build, as it wrote or was sent them, which are not sent to it again.
+    /// The files each worker has from this build, as it wrote them or was sent them. They are not sent to it again.
     on_workers: Vec<HashSet<String>>,
     /// The worker each edge which was sent to one was sent to, until it finishes.
     sent_to: HashMap<usize, usize>,
-    /// For each toolchain, by its identity, how long the cached edges with it which have run took, and the size of
-    /// their outputs, each the median of them, by which an edge which has not run is estimated, if there are workers.
+    /// The median time and size of outputs of the cached edges of each toolchain, as [`estimates`] returns them.
+    /// It is empty if there are no workers.
     estimates: HashMap<String, (Duration, u64)>,
     /// The files which are fetched if they were left on workers.
     wanted: HashSet<NodeId>,
-    /// The outputs left on workers, by path, with their stamps, while their files are missing, which the threads which
-    /// look edges up in the cache read.
+    /// The stamps of the outputs left on workers whose files are missing here, by path. The threads which look edges
+    /// up in the cache read it.
     left: Arc<RwLock<HashMap<String, Stamp>>>,
     fetcher: Arc<Fetcher>,
-    /// The outputs left on workers which no longer had them, which are built again.
+    /// The outputs left on workers which the workers no longer had. They are built again.
     lost: Vec<String>,
 }
 
@@ -1012,13 +1044,13 @@ impl Run<'_, '_> {
         let makeflags = self.jobserver.as_ref().and_then(Jobserver::makeflags).map(String::from);
         // when the build was interrupted, until its processes are killed
         let mut interrupted_at = None;
-        // the edges are run by a thread for each job, rather than a thread for each edge
+        // there is one thread for each job, not one for each edge
         let (jobs, work) = std::sync::mpsc::channel::<Job>();
         let work = std::sync::Mutex::new(work);
         let (dir, env) = (self.options.dir.clone(), self.options.env.clone());
         let (work, dir, env, makeflags) = (&work, &dir, &env, makeflags.as_deref());
-        // a thread which takes jobs, of which there is one for each of the build's jobs, and of each worker's, once it
-        // is first sent an edge
+        // The body of a thread which takes jobs. One is started for each of the build's jobs, and one for each of a
+        // worker's jobs when the worker is first sent an edge.
         let stop = Arc::clone(&self.stop);
         let stop = &stop;
         let fetcher = Arc::clone(&self.fetcher);
@@ -1026,15 +1058,15 @@ impl Run<'_, '_> {
         let job_thread = || {
             let sender = sender.clone();
             move || {
-                // the lock is held while waiting for a job, which the other threads wait for in turn
+                // the lock is held while waiting for a job, so the threads take jobs one at a time
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
                     let Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
-                    // a result which cannot be restored, as the cache is corrupted, is a miss, and the action runs
+                    // a result which cannot be restored, as when the cache is corrupted, is a miss: the action runs
                     let restored = lookup.and_then(|lookup| lookup.restore(dir));
                     let cached = restored.is_some();
-                    // each early output which is reported is told, as it is, with its stamp if it was left on a worker
+                    // pass on each early output as it is reported, with its stamp if it was left on a worker
                     let reported_as = |path: &str, left: Option<Stamp>| {
                         let outputs = early.iter().flat_map(|early| early.iter());
                         let reported = outputs.filter(|(output, _)| same_path(output, path));
@@ -1049,7 +1081,7 @@ impl Run<'_, '_> {
                     };
                     let (mut left, mut lost) = (Vec::new(), Vec::new());
                     let (ran, failed_there) = match sent {
-                        // what a worker printed is what the edge wrote, which is rendered as it is here
+                        // what the worker sends is the edge's raw output, which is rendered as it would be here
                         Sent::Ran(printed, kept) if early.is_some() => {
                             left = kept;
                             (Some(crate::json::rendered(&printed, &mut |_| ())), false)
@@ -1066,8 +1098,8 @@ impl Run<'_, '_> {
                         Sent::NotRun => (None, false),
                     };
                     let remote = ran.is_some();
-                    // an edge which the worker did not run is given back to run in one of the build's own jobs, unless
-                    // the worker was interrupted running it
+                    // an edge which the worker did not run is given back to run in one of the build's own jobs,
+                    // unless it was interrupted on the worker
                     let given_back = !cached && !remote && lost.is_empty() && !stop.load(Ordering::SeqCst);
                     if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
                         let mark = dispatch.mark().filter(|_| failed_there);
@@ -1076,7 +1108,7 @@ impl Run<'_, '_> {
                         let _ = sender.send(Message::Returned(Box::new(job)));
                         continue;
                     }
-                    // what it reads which was left on workers is fetched first, if it runs here
+                    // before it runs here, fetch the inputs it reads which were left on workers
                     if !cached && !remote && dispatch.is_none() {
                         lost = fetcher.fetch_all(&fetch, 1);
                     }
@@ -1087,7 +1119,7 @@ impl Run<'_, '_> {
                     } else if let Some(printed) = restored.or(ran) {
                         (Outcome::Succeeded, printed)
                     } else if dispatch.is_some() {
-                        // an edge which a worker was interrupted running does not run here
+                        // an edge which was interrupted on a worker does not run here
                         (Outcome::Interrupted, Vec::new())
                     } else {
                         let spawned = |pid| {
@@ -1098,7 +1130,7 @@ impl Run<'_, '_> {
                         ran_here = true;
                         run_command(&action, dir, console, &environment, &spawned)
                     };
-                    // what it wrote is hashed, and added to the cache, here, rather than by the build's own thread
+                    // hash what it wrote, and add it to the cache, on this thread, to spare the build's own
                     let stamped = match stamp.as_deref() {
                         Some((paths, cache)) if ran_here && outcome.succeeded() => {
                             stamp_outputs(dir, paths, cache.as_ref())
@@ -1119,7 +1151,7 @@ impl Run<'_, '_> {
             for _ in 0..self.options.jobs.max(1) {
                 scope.spawn(job_thread());
             }
-            // the workers are connected to at once, if an edge may run on one
+            // start connecting to the workers straight away, if some edge may run on one
             if (0..self.edges.len()).any(|index| self.remote_identity(index).is_some()) {
                 for worker in &self.options.workers {
                     scope.spawn(|| worker.capabilities());
@@ -1141,7 +1173,7 @@ impl Run<'_, '_> {
                         }
                     }
                 }
-                // a process which ignores the signal, as a shell's background job ignores `SIGINT`, is killed
+                // kill a process which ignores the signal, as a shell's background job ignores `SIGINT`
                 if let Some(at) = interrupted_at && at.elapsed() >= KILL_AFTER {
                     interrupted_at = None;
                     for &group in self.processes.values() {
@@ -1150,8 +1182,8 @@ impl Run<'_, '_> {
                 }
                 // whether an edge is ready but waits for a token
                 let mut waiting_for_token = false;
-                // what a worker gave back takes the build's jobs first, as it has started, even once the build stops,
-                // unless it was interrupted
+                // An edge a worker gave back is first to take a job, as it was already reported as started. It runs
+                // even if the build has stopped starting edges, unless the build was interrupted.
                 if self.report.interrupted {
                     for job in std::mem::take(&mut self.returned) {
                         let now = SystemTime::now();
@@ -1178,8 +1210,8 @@ impl Run<'_, '_> {
                     let _ = jobs.send(job);
                 }
                 while !self.stopping() {
-                    // an edge runs here while the build's jobs are not full, and otherwise on a worker, if one can,
-                    // while one which waits for a worker only runs on one
+                    // An edge runs here while the build has a free job, and otherwise on a worker, if one can run
+                    // it. An edge which waits for a worker never runs here.
                     let here = (self.local < self.options.jobs.max(1)).then(|| self.next_ready()).flatten();
                     let next = here.map(|index| (index, None));
                     let Some((index, worker)) = next.or_else(|| {
@@ -1193,8 +1225,8 @@ impl Run<'_, '_> {
                         self.done(index, false);
                         continue;
                     }
-                    // an edge runs in the job the build holds without a token if it is free, and any other takes a
-                    // token, but for one which runs on a worker
+                    // An edge running here uses the job the build holds without a token, if that is free, and
+                    // otherwise takes a token. An edge on a worker needs neither.
                     match &self.jobserver {
                         _ if worker.is_some() => (),
                         Some(jobserver) if self.implicit.is_some() => {
@@ -1231,7 +1263,7 @@ impl Run<'_, '_> {
                         },
                         None => self.local += 1,
                     }
-                    // a thread for each job takes it, as no more run than there are jobs
+                    // some thread is free to take it, as there is a thread for each job and no more edges than jobs
                     let early = self.early_outputs(index);
                     let fetch = self.remote_inputs(index);
                     let (mark, stamp) = (None, self.stamp_outputs(index));
@@ -1242,8 +1274,8 @@ impl Run<'_, '_> {
                 if self.progress.running == 0 && !self.waiting_for_workers() {
                     break;
                 }
-                // tokens are given back by the commands as well as the edges, so they are looked for again soon,
-                // while an interrupt is looked for less often
+                // other commands sharing the jobserver return tokens too, so tokens are polled for often, and an
+                // interrupt less often
                 let timeout = Duration::from_millis(if waiting_for_token { 5 } else { 50 });
                 observer.tick();
                 match receiver.recv_timeout(timeout) {
@@ -1293,15 +1325,13 @@ impl Run<'_, '_> {
             None => Ok(()),
         }
     }
-    /// Whether no more edges are started, as too many have failed or the state could not be written.
+    /// Whether to start no more edges, as too many have failed or the state could not be written.
     fn stopping(&self) -> bool {
         let failed = self.options.keep_going != 0 && self.report.failed >= self.options.keep_going;
         failed || self.error.is_some() || self.report.interrupted
     }
-    /// Returns the edge of the highest priority which is ready to run, other than one in the console pool while
-    /// another runs.
-    ///
-    /// An edge which waits for a worker is left for one.
+    /// Returns the highest-priority edge which is ready to run here. That excludes an edge in the console pool while
+    /// another console edge runs, and an edge which is waiting for a worker.
     fn next_ready(&mut self) -> Option<usize> {
         let entry = *self.ready.iter().find(|&&(_, index)| {
             let console = self.console && self.graph.edge(self.edges[index]).pool() == Pool::Console;
@@ -1310,8 +1340,8 @@ impl Run<'_, '_> {
         self.ready.remove(&entry);
         Some(entry.1)
     }
-    /// Whether an edge waits for a worker rather than running here, as the build is only for workers: one which may
-    /// run on a worker, while one is connecting, or has reported that it runs the edge.
+    /// Whether an edge waits for a worker rather than running here. That is so with [`Options::workers_only`], for an
+    /// edge which may run on a worker, while some worker is still connecting or has reported that it can run it.
     fn waits_for_workers(&self, index: usize) -> bool {
         if !self.options.workers_only || self.local_only.contains(&index) {
             return false;
@@ -1325,7 +1355,8 @@ impl Run<'_, '_> {
     fn waiting_for_workers(&self) -> bool {
         self.options.workers_only && self.ready.iter().any(|&(_, index)| self.waits_for_workers(index))
     }
-    /// Whether a worker may run an edge, by what it reported of itself, and has not refused its toolchain.
+    /// Whether a worker may run an edge, going by what the worker reported of itself, and has not refused the edge's
+    /// toolchain.
     fn runs(&self, index: usize, worker: usize) -> bool {
         let edge = self.graph.edge(self.edges[index]);
         let Some(identity) = edge.cache() else {
@@ -1343,10 +1374,11 @@ impl Run<'_, '_> {
         let remote = &self.options.workers[worker];
         remote.may_have(identity) && remote.reported().is_some_and(|capabilities| capabilities.may_run(&needs))
     }
-    /// Returns the edge of the highest priority which is ready to run and may run on a worker, with a worker which
-    /// has a free job, and may run it, by what it reported of itself, if there is one.
+    /// Returns the highest-priority edge which is ready and may run on a worker, with the worker to run it on: one
+    /// with a free job which may run it, going by what the worker reported of itself. Returns `None` if there is no
+    /// such pair.
     fn next_for_worker(&mut self) -> Option<(usize, usize)> {
-        // a worker is connected to on a thread of its own, so that the build does not wait for it
+        // each worker is connected to on a thread of its own, so that the build does not wait for it
         let free = |run: &Self, worker: usize| run.on_worker[worker] < run.options.workers[worker].connected_jobs();
         if !(0..self.options.workers.len()).any(|worker| free(self, worker)) {
             return None;
@@ -1361,7 +1393,7 @@ impl Run<'_, '_> {
                 self.local_only.insert(index);
                 continue;
             }
-            // the worker it would finish soonest on, by sending it, and running it there
+            // choose the worker it would finish soonest on, counting the time to send it and to run it there
             let took = self.estimated(index);
             let there = |worker: usize| {
                 let link = self.options.workers[worker].link();
@@ -1370,7 +1402,7 @@ impl Run<'_, '_> {
             let candidates = (0..self.options.workers.len())
                 .filter(|&worker| free(self, worker) && self.runs(index, worker));
             let worker = candidates.min_by_key(|&worker| there(worker));
-            // it waits for a job here if it would finish sooner here, unless it only runs on workers
+            // if it would finish sooner here, it waits for a job here, unless it only runs on workers
             let wait = self.local_wait();
             let worker = worker.filter(|&worker| {
                 self.options.workers_only || wait.is_none_or(|wait| there(worker) < wait.saturating_add(took))
@@ -1382,8 +1414,8 @@ impl Run<'_, '_> {
         }
         None
     }
-    /// Returns how long it is estimated an edge would wait for one of the build's own jobs: the least time one of the
-    /// edges which run here has left, by how long it took when it last ran, or `None` if none of them has run before.
+    /// Estimates how long an edge would wait for one of the build's own jobs: the least time any edge running here has
+    /// left, going by how long each took when it last ran. Returns `None` if none of them has run before.
     fn local_wait(&self) -> Option<Duration> {
         let running = self.started.iter().filter(|(index, _)| !self.sent.contains_key(index));
         let left = running.filter_map(|(&index, started)| {
@@ -1397,15 +1429,15 @@ impl Run<'_, '_> {
         let record = self.state.get(plan::first_output(self.graph, self.edges[index]));
         record.map_or(Duration::ZERO, |record| Duration::from_millis(u64::from(record.duration)))
     }
-    /// Returns how long it is estimated to take to send an edge to a worker over its link, and fetch its outputs: its
-    /// files' sizes when it last ran, but for those the worker has, in the round trips of asking which blobs the
-    /// worker is missing, sending them, running the edge, and fetching its outputs.
+    /// Estimates how long it would take to send an edge to a worker and fetch its outputs. That is the time to
+    /// transfer its files, at the sizes they had when it last ran and leaving out those the worker has, plus the
+    /// round trips: asking which blobs the worker is missing, sending them, running the edge and fetching its outputs.
     fn sending(&self, index: usize, worker: usize, link: crate::remote::Link) -> Duration {
         let has = &self.on_workers[worker];
         let sent = |(path, stamp): &(String, Stamp)| if has.contains(path) { 0 } else { stamp.size() };
         let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
-            // one which has not run sends its declared inputs, as they are, and fetches outputs of the size of those
-            // of the edges with its toolchain, if it has one and they have run
+            // An edge which has not run is estimated to send its declared inputs at their sizes now, and to fetch
+            // outputs of the median size for its toolchain, if other edges with that toolchain have run.
             let identity = self.graph.edge(self.edges[index]).cache().unwrap_or_default();
             let Some(&(_, outputs)) = self.estimates.get(identity) else {
                 return Duration::MAX;
@@ -1416,8 +1448,8 @@ impl Run<'_, '_> {
         let files = previous.inputs.iter().chain(&previous.discovered).chain(&previous.outputs);
         link.time(files.map(sent).sum(), 4)
     }
-    /// Returns how long an edge is estimated to take: as it took when it last ran, or if it has not run, as the edges
-    /// with its toolchain which have run took, or nothing if none has.
+    /// Estimates how long an edge takes to run: as long as it last took, or if it has not run, the median for the
+    /// edges with its toolchain. Returns `None` if none of those has run either.
     fn estimated(&self, index: usize) -> Duration {
         let edge = self.edges[index];
         if self.state.get(plan::first_output(self.graph, edge)).is_some() {
@@ -1426,9 +1458,12 @@ impl Run<'_, '_> {
         let identity = self.graph.edge(edge).cache().unwrap_or_default();
         self.estimates.get(identity).map_or(Duration::ZERO, |&(took, _)| took)
     }
-    /// Returns the identity of the toolchain of an edge which may run on a worker: a cached edge which is not in the
-    /// console pool, which inherits only the variables which locate its tools, and which has run before, so that the
-    /// inputs it discovered are known, whose paths all lead from the build's directory, as its outputs' do.
+    /// Returns the toolchain identity of an edge if the edge may run on a worker, which requires all of:
+    ///
+    /// - it is cached, and not in the console pool;
+    /// - it inherits only the variables which locate its tools;
+    /// - its inputs are known, as it has run before, or it has an action which discovers them;
+    /// - the paths of its inputs and outputs can all be expressed relative to the build's directory.
     fn remote_identity(&self, index: usize) -> Option<&str> {
         let edge = self.graph.edge(self.edges[index]);
         let identity = edge.cache()?;
@@ -1438,7 +1473,7 @@ impl Run<'_, '_> {
         let outputs = edge.outputs().iter().map(|&node| self.graph.path(node));
         let outputs: Vec<&str> = outputs.chain(edge.depfile()).collect();
         let leads = |path: &str| crate::worker::ups(path).is_some();
-        // an edge which has not run finds its inputs by its action which discovers them, if it has one
+        // an edge which has not run can still be sent if it has an action which discovers its inputs
         let Some(previous) = self.state.get(plan::first_output(self.graph, self.edges[index])) else {
             let declared = edge.inputs().iter().chain(edge.dependencies()).map(|&node| self.graph.path(node));
             let discovers = edge.discover().is_some() && edge.depfile().is_some();
@@ -1447,9 +1482,9 @@ impl Run<'_, '_> {
         let recorded = previous.inputs.iter().chain(&previous.discovered).map(|(path, _)| path.as_str());
         recorded.chain(outputs).all(leads).then_some(identity)
     }
-    /// Returns how a started edge runs on a worker: with the inputs it declares now, and those it discovered when it
-    /// last ran, or `None` if one does not lead from the build's directory, or it is marked to run here, when it runs
-    /// here.
+    /// Returns how to run a started edge on a worker, with the inputs it declares now and those it discovered when it
+    /// last ran. Returns `None`, so that the edge runs here, if an input cannot be expressed relative to the build's
+    /// directory, or the edge is marked to run here.
     fn dispatch(&mut self, index: usize, worker: usize) -> Option<Dispatch> {
         let edge = self.graph.edge(self.edges[index]);
         let cache = self.options.cache.as_ref()?.without_remote();
@@ -1459,7 +1494,7 @@ impl Run<'_, '_> {
             return None;
         }
         let previous = self.state.get(plan::first_output(self.graph, self.edges[index]));
-        // one which has not run discovers its inputs first, as it is sent
+        // an edge which has not run discovers its inputs when it is sent
         let discovery = match previous {
             Some(_) => None,
             None => Some((edge.discover()?.clone(), edge.depfile()?.to_string())),
@@ -1476,7 +1511,7 @@ impl Run<'_, '_> {
             self.local_only.insert(index);
             return None;
         }
-        // what it is sent, the worker has
+        // the worker will have everything it is sent
         self.on_workers[worker].extend(inputs.iter().cloned());
         self.sent_to.insert(index, worker);
         let mut env = self.options.env.clone();
@@ -1510,8 +1545,8 @@ impl Run<'_, '_> {
             fetcher: Arc::clone(&self.fetcher),
         })
     }
-    /// Returns what the thread which runs an edge here stamps by their contents once it succeeds: its outputs and
-    /// depfile, if it is hashed, and the cache they are put in, if it is cached, or `None` if it is not hashed.
+    /// Returns what the thread which runs a hashed edge here hashes once the edge succeeds: its outputs and depfile,
+    /// with the cache they are put in, if it is cached. Returns `None` if the edge is not hashed.
     fn stamp_outputs(&self, index: usize) -> Option<Arc<(Vec<String>, Option<Cache>)>> {
         let edge = self.graph.edge(self.edges[index]);
         if !edge.hashed() {
@@ -1542,8 +1577,8 @@ impl Run<'_, '_> {
         }
         remote
     }
-    /// Returns the outputs of an edge which are left on the worker which runs it: none, unless only the targets are
-    /// fetched, when they are those which are not.
+    /// Returns the outputs of an edge to leave on the worker which runs it. With [`Download::Targets`] those are its
+    /// outputs which are not targets of the build, and otherwise none.
     fn leaves(&self, index: usize) -> Vec<String> {
         if self.options.download != Download::Targets {
             return Vec::new();
@@ -1552,7 +1587,7 @@ impl Run<'_, '_> {
         let outputs = edge.outputs().iter().filter(|node| !self.wanted.contains(node));
         outputs.map(|&node| self.graph.path(node).to_string()).collect()
     }
-    /// An output has been left on a worker, with this stamp, or with `None`, is not, or is no longer.
+    /// Record that an output is left on a worker, with its stamp, or with `None`, that it is not, or no longer is.
     fn set_remote(&mut self, path: &str, stamp: Option<Stamp>) {
         self.stamps.set_remote(path, stamp);
         if let Ok(mut left) = self.left.write() {
@@ -1562,8 +1597,8 @@ impl Run<'_, '_> {
             };
         }
     }
-    /// An output left on a worker which no longer has it is lost: its edge is recorded as missing it, so that it is
-    /// built again, by the next pass of the build.
+    /// Handle an output which was left on a worker that no longer has it. Its edge is recorded as missing the output,
+    /// so that the next pass of the build builds it again.
     fn lose(&mut self, path: &str) {
         self.set_remote(path, None);
         self.lost.push(path.to_string());
@@ -1582,7 +1617,7 @@ impl Run<'_, '_> {
             self.error.get_or_insert(error);
         }
     }
-    /// Fetch the targets of the build which were left on workers, losing those which none has any longer.
+    /// Fetch the targets of the build which were left on workers. Those which no worker still has are lost.
     fn fetch_targets(&mut self) {
         let wanted: Vec<NodeId> = self.wanted.iter().copied().collect();
         let mut files = Vec::new();
@@ -1596,8 +1631,8 @@ impl Run<'_, '_> {
             self.lose(&path);
         }
     }
-    /// Record what was fetched in the records of the edges which left it, by its contents, with the hash it was left
-    /// with and the time and size it has now, so that it is not hashed again on each build which compares it.
+    /// Update the record of each edge which left an output that has now been fetched: the output is recorded with the
+    /// hash it was left with and the time and size of the fetched file, so that later builds need not hash it again.
     fn record_fetched(&mut self) {
         let mut records: HashMap<&str, crate::state::Record> = HashMap::new();
         for path in self.fetcher.fetched() {
@@ -1638,8 +1673,8 @@ impl Run<'_, '_> {
         let paths = || early.iter().map(|&node| (self.graph.path(node).to_string(), node)).collect();
         (!early.is_empty()).then(|| Arc::new(paths()))
     }
-    /// An edge has written an early output, which is stamped afresh, and once it has written each, the edges which
-    /// need only them are no longer waiting for it.
+    /// Handle an edge reporting an early output. The output is stamped afresh, and once every early output has been
+    /// reported, the edges which need only those stop waiting for the edge.
     fn early(&mut self, index: usize, node: NodeId, left: Option<Stamp>) {
         if left.is_some() {
             self.set_remote(self.graph.path(node), left);
@@ -1697,19 +1732,18 @@ impl Run<'_, '_> {
         let edge = self.edges[index];
         self.inputs.insert(index, plan::input_stamps(self.graph, self.state, edge, &mut self.stamps));
         let data = self.graph.edge(edge);
-        // the directories of the outputs and depfile are created first, which the command fails without if it needs
-        // them
+        // create the directories of the outputs and the depfile, as the command may fail without them
         let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
         for path in outputs.chain(data.depfile()) {
-            // each directory once, as many outputs share one
+            // each directory is created once, as many outputs share one
             if let Some(dir) = Path::new(path).parent().filter(|dir| !dir.as_os_str().is_empty())
                 && self.directories.insert(dir.to_path_buf())
             {
                 let _ = std::fs::create_dir_all(self.options.dir.join(dir));
             }
         }
-        // the outputs of a restat or hashed edge are stamped before it runs, to find whether it changed them, by their
-        // contents if it is hashed, reusing its last record's hashes
+        // Stamp the outputs of a restat or hashed edge before it runs, to tell afterwards whether it changed them. A
+        // hashed edge's are stamped by their contents, reusing the hashes of its last record.
         if data.restat() || data.hashed() {
             let previous = self.state.get(plan::first_output(self.graph, edge));
             let outputs = data.outputs().iter();
@@ -1743,7 +1777,7 @@ impl Run<'_, '_> {
         let data = self.graph.edge(edge);
         self.started.remove(&index);
         let sent_to = self.sent_to.remove(&index);
-        // an edge which needed what was lost has not run, and runs in the next pass, once what it needs has
+        // an edge whose input was lost did not run: it runs in the next pass, after the input is built again
         if !lost.is_empty() {
             self.progress.running -= 1;
             self.progress.started -= 1;
@@ -1763,7 +1797,7 @@ impl Run<'_, '_> {
             }
             return;
         }
-        // what a worker wrote, it has
+        // the worker has the outputs it wrote
         if let Some(worker) = sent_to.filter(|_| remote) {
             let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
             self.on_workers[worker].extend(outputs.chain(data.depfile()).map(String::from));
@@ -1778,14 +1812,14 @@ impl Run<'_, '_> {
         }
         if cached {
             self.report.cached += 1;
-            // the time it took when it ran is kept, as what it would take if it is not in the cache next time
+            // keep how long it took when it really ran, which estimates how long it takes on a cache miss
             let previous = self.state.get(plan::first_output(self.graph, edge));
             if let Some(previous) = previous {
                 duration = Duration::from_millis(u64::from(previous.duration));
             }
         }
         if outcome.succeeded() {
-            // what it left on a worker is stamped as it was left, and what it did not is stamped by its file
+            // an output left on a worker has the stamp it was left with, and any other is stamped from its file
             let outputs = data.outputs().iter().map(|&node| self.graph.path(node));
             for path in outputs {
                 let stamp = left.iter().find(|(left, _)| left == path).map(|&(_, stamp)| stamp);
@@ -1801,7 +1835,7 @@ impl Run<'_, '_> {
                 Ok(discovered) => {
                     let record = plan::record(self.graph, edge, inputs, &discovered, &mut self.stamps, start, duration);
                     if let Some(key) = key.filter(|_| !cached) {
-                        // the cache is only an aid, so an edge which cannot be added to it is not a failure
+                        // the cache only saves time, so failing to add an edge to it is not a failure of the build
                         let _ = self.store(index, &key, &record, &output);
                     }
                     let changed = match self.before.remove(&index) {
@@ -1839,9 +1873,9 @@ impl Run<'_, '_> {
             observer.finished(self.graph, edge, &outcome, &output, self.progress);
         }
     }
-    /// Returns where the result of a cached edge is looked for, by its first key, which its result is added to the
-    /// cache by if it runs. The thread which runs it looks for it, by the sets of inputs the edge discovered with that
-    /// key.
+    /// Returns where to look for the result of a cached edge: under its first key, which is also where its result is
+    /// added if it runs. The thread which runs the edge does the lookup, trying each set of inputs the edge has
+    /// discovered under that key.
     fn lookup(&mut self, index: usize) -> Option<Lookup> {
         let cache = self.options.cache.as_ref()?;
         let edge = self.graph.edge(self.edges[index]);
@@ -1860,17 +1894,17 @@ impl Run<'_, '_> {
         self.keys.insert(index, key);
         Some(Lookup { cache: cache.clone(), key, env: Arc::clone(&self.env), left: Arc::clone(&self.left) })
     }
-    /// Add the result of a cached edge which has run to the cache, by its first key: its outputs, its depfile and what
-    /// its command printed, which it is restored from by its second key, of the contents of the inputs it discovered,
-    /// which are added to the first key's manifest.
+    /// Add the result of a cached edge which has run to the cache: its outputs, its depfile and what its command
+    /// printed. The inputs it discovered are added to the manifest of its first key, and the result is stored under
+    /// its second key, which is made from the contents of those inputs.
     ///
-    /// An edge any of whose outputs is not a file it wrote is not added.
+    /// The edge is not added if any of its outputs is not a file it wrote.
     fn store(&mut self, index: usize, key: &Hash, record: &crate::state::Record, printed: &[u8]) -> std::io::Result<()> {
         let Some(cache) = &self.options.cache else {
             return Ok(());
         };
         let edge = self.graph.edge(self.edges[index]);
-        // what was left on a worker is not here to be added
+        // an output left on a worker is not here to add
         if record.outputs.iter().any(|(_, stamp)| stamp.is_remote()) {
             return Ok(());
         }
@@ -1903,7 +1937,7 @@ impl Run<'_, '_> {
             env: record.env.iter().map(|(name, _)| name.clone()).collect(),
         };
         cache.add_to_manifest(key, discovery.clone())?;
-        // and to the remote cache, if it takes pushes, which is only an aid too
+        // and add it to the remote cache, if that takes pushes, which also only saves time
         let _ = cache.push(key, &second, &discovery);
         Ok(())
     }
@@ -1911,7 +1945,7 @@ impl Run<'_, '_> {
     fn done(&mut self, index: usize, changed: bool) {
         self.status[index] = Status::Done { changed };
         for dependent in self.dependents[index].clone() {
-            // one which started once the edge's early outputs were written does not wait for it
+            // a dependent which already started, on the edge's early outputs, is not waiting for it
             if self.released.contains(&(dependent, index)) {
                 continue;
             }
@@ -1944,7 +1978,7 @@ fn changed(
     producers.into_iter().any(|producer| changed(graph, producer, index, status, seen))
 }
 
-/// Returns what a depfile lists, or nothing if it is missing, as a command need not write one.
+/// Returns what a depfile lists. A missing depfile lists nothing, as a command need not write one.
 fn read_depfile(path: &Path) -> Result<depfile::Discovered, String> {
     match std::fs::read(path) {
         Ok(bytes) => {
@@ -1962,28 +1996,31 @@ pub(crate) struct Environment<'a> {
     pub(crate) env: &'a [(String, String)],
     /// The variables rig is run with which a hermetic command inherits, or `None` if it inherits every one.
     pub(crate) inherit: Option<&'a [String]>,
-    /// For a command which writes what rustc writes with JSON, what is told the path of each artifact it reports, as it
-    /// is reported, while what it would have printed is kept.
+    /// Set for a command which prints rustc's JSON: called with the path of each artifact as the command reports it.
+    /// The command's output is then kept as what rustc would have printed without JSON.
     pub(crate) reports: Option<&'a dyn Fn(&str)>,
 }
 
-/// Returns the program to start for an action's program, which is relative to its working directory, `working`, if it
-/// is a relative path, as Unix finds it from the working directory the program starts in, while Windows, as `windows`
-/// says, finds it from rig's, so there it is joined to the working directory. A name alone is found in `PATH`.
+/// Returns the path to start an action's program by. A bare name is returned as it is, to be found in `PATH`.
+///
+/// A relative path is relative to the action's working directory, `working`. Unix resolves it from the directory the
+/// program starts in, so it is returned as it is. Windows, selected by `windows`, resolves it from rig's own
+/// directory, so there it is joined to `working`.
 fn program_from(program: &str, working: &Path, windows: bool) -> std::path::PathBuf {
     let path = Path::new(program);
     if windows && path.is_relative() && path.components().count() > 1 { working.join(path) } else { path.to_path_buf() }
 }
 
-/// Run an action in a directory, returning how it finished and its output, stdout and stderr together, with the
-/// jobserver's `MAKEFLAGS` if there is one, telling `spawned` the id of its process once it has started.
+/// Run an action, and return how it finished and its output, stdout and stderr together. `spawned` is called with
+/// the id of its process once it has started.
 ///
-/// The program runs directly, in its working directory, relative to `dir`, with stderr written to its file if it has
-/// one rather than captured.
+/// The program runs directly, without a shell, in its working directory, which is relative to `dir`. It is given the
+/// jobserver's `MAKEFLAGS` if there is one. If the action names a file for stderr, stderr is written there instead of
+/// being captured.
 ///
-/// A console command has the terminal, and no output is captured, and is in rig's process group, so that it is sent
-/// what the terminal sends, such as `SIGINT`. Any other has no stdin, and leads a process group of its own, which the
-/// build signals when it is interrupted.
+/// A console command has the terminal, so none of its output is captured. It stays in rig's process group, so that it
+/// receives what the terminal sends, such as `SIGINT`. Any other command has no stdin, and leads a process group of
+/// its own, which the build signals when it is interrupted.
 pub(crate) fn run_command(
     exec: &Exec,
     dir: &Path,
@@ -2034,7 +2071,7 @@ pub(crate) fn run_command(
     };
     command.stdin(Stdio::null()).stdout(stdout);
     sys::new_group(&mut command);
-    // a writer of the pipe which is not given to the command is closed, so that the output ends
+    // close our copies of the pipe's write end: the output only ends once every writer is closed
     match stderr_file {
         Some(file) => {
             drop(stderr);
@@ -2043,7 +2080,7 @@ pub(crate) fn run_command(
         None => command.stderr(stderr),
     };
     let child = command.spawn();
-    // the command holds the pipe's writers, which must be closed for the output to end
+    // drop the command, which still holds the pipe's write ends, for the same reason
     drop(command);
     let mut child = match child {
         Ok(child) => child,
@@ -2054,7 +2091,7 @@ pub(crate) fn run_command(
     let mut output = Vec::new();
     let read = match environment.reports {
         None => reader.read_to_end(&mut output),
-        // each line is read as it is written, so that an artifact is told as soon as it is reported
+        // read each line as it is written, so that an artifact is passed on as soon as it is reported
         Some(reports) => {
             use std::io::BufRead;
             let mut reader = std::io::BufReader::new(reader);
@@ -2085,25 +2122,33 @@ pub(crate) fn run_command(
     (outcome, output)
 }
 
-/// Shows a build, line by line, where the output is not a terminal which can be redrawn: the status and description
-/// of each edge once it
-/// finishes, or as it starts for a console edge, which then has the terminal, followed by its output. A failed edge
-/// is shown with its outputs and command. With `quiet`, only the output of the commands and failures are shown, and
-/// with `verbose`, each edge is shown by its command rather than its description.
+/// An [`Observer`] which shows a build on stdout or a terminal.
 ///
-/// Without `colour`, as where the output is not a terminal, the escape sequences which colour what the commands
-/// printed are left out, so that commands can be told to print in colour, as rustc is with
-/// `--color=always`, whose output is captured rather than a terminal, without their actions depending on where the
-/// build's output goes.
+/// # Line by line
 ///
-/// [`Self::in_place`] shows the build on a terminal, with a line for each of the edges which run
-/// at once, updated in place with escape sequences: each edge which is running, by the order it started in, with how
-/// long it has run, as `[ 2/15] RUSTC liba.rlib (3m)`, and a line whose edge has finished, while no other has taken
-/// its place, as `[  /15] -`. Each line is cut to the terminal's width, so that none wraps. What finishes is not kept,
-/// but what it printed, and its failure, is shown above the lines. The cursor is left at the end of the last line, so
-/// that no blank line is below them. The lines are taken away while a console edge has the terminal, and once the
-/// build is done, when they are replaced by how many edges finished, of those which may run, and how long the build
-/// took, as `[15/15] completed in 3m 14s`, or `[12/15] stopped after 2s` if not every one did.
+/// By default each edge is shown on a line of its own, for output which cannot be redrawn: its status and description
+/// when it finishes, followed by its output. A console edge is shown when it starts instead, as it then has the
+/// terminal. A failed edge is shown with its outputs and command. With `quiet`, only the output of commands and
+/// failures are shown. With `verbose`, each edge is shown by its command rather than its description.
+///
+/// Without `colour`, as when the output is not a terminal, the escape sequences which colour what commands printed
+/// are removed. Commands can therefore always be told to print in colour, as rustc is with `--color=always`, so that
+/// their actions do not depend on where the build's output goes.
+///
+/// # In place
+///
+/// [`Self::in_place`] shows the build on a terminal, with one line for each edge running at once, redrawn in place
+/// with escape sequences.
+///
+/// - A running edge is shown with the order it started in and how long it has run, as
+///   `[ 2/15] RUSTC liba.rlib (3m)`.
+/// - A line whose edge has finished, and which no other edge has taken, is shown as `[  /15] -`.
+/// - Each line is cut to the terminal's width, so that none wraps.
+/// - A finished edge leaves no line behind, but what it printed, and its failure, are shown above the lines.
+/// - The cursor is left at the end of the last line, so that there is no blank line below.
+/// - The lines are removed while a console edge has the terminal.
+/// - When the build is done, the lines are replaced by how many of the edges finished and how long the build took,
+///   as `[15/15] completed in 3m 14s`, or `[12/15] stopped after 2s` if some did not finish.
 pub struct Console<W: std::io::Write> {
     pub out: W,
     pub quiet: bool,
@@ -2111,17 +2156,17 @@ pub struct Console<W: std::io::Write> {
     pub colour: bool,
     /// The width of the terminal, if what is running is shown in place.
     width: Option<usize>,
-    /// A line for each of the edges which have run at once: the edge running in it, if one is.
+    /// The lines, as many as the most edges which have run at once. Each holds the edge running in it, if any.
     lines: Vec<Option<Running>>,
-    /// The number of edges which may run, as it was last told.
+    /// The number of edges which may run, as last reported.
     total: usize,
-    /// The lines as they were last drawn, the last of which the cursor is at the end of.
+    /// The lines as last drawn. The cursor is at the end of the last one.
     drawn: Vec<String>,
     /// Whether a console edge has the terminal.
     terminal_held: bool,
     /// How far the build had got when an edge last finished, if one has.
     progress: Option<Progress>,
-    /// When the build started, as the console was made.
+    /// When the console was made, which is taken as when the build started.
     began: Instant,
 }
 
@@ -2161,7 +2206,7 @@ impl<W: std::io::Write> Console<W> {
         let description = self.description(graph, edge);
         let _ = writeln!(self.out, "[{}/{}] {description}", progress.finished, progress.total);
     }
-    /// Take the lines away, leaving the cursor where they started.
+    /// Erase the lines, leaving the cursor where they started.
     fn clear(&mut self) {
         if self.drawn.is_empty() {
             return;
@@ -2182,8 +2227,8 @@ impl<W: std::io::Write> Console<W> {
                 return format!("[{:digits$}/{total}] -", "");
             };
             let (head, tail) = (format!("[{number:>digits$}/{total}] "), format!(" ({})", elapsed(started.elapsed())));
-            // the description is cut short, so that the line does not wrap, which would leave the cursor below where
-            // it is thought to be, while how long it has run is kept
+            // Cut the description short so that the line does not wrap, which would put the cursor a line lower
+            // than expected. How long the edge has run is kept.
             let room = width.saturating_sub(1 + head.chars().count() + tail.chars().count());
             let description: String = description.chars().take(room).collect();
             let line = format!("{head}{}{tail}", description.trim_end());
@@ -2205,7 +2250,7 @@ impl<W: std::io::Write> Console<W> {
         self.drawn = lines;
         let _ = self.out.flush();
     }
-    /// The line of an edge which is not running any longer is free.
+    /// Free the line of an edge which is no longer running.
     fn free(&mut self, edge: EdgeId) {
         for line in &mut self.lines {
             if line.as_ref().is_some_and(|running| running.edge == edge) {
@@ -2225,7 +2270,7 @@ fn total_time(duration: Duration) -> String {
     }
 }
 
-/// Returns how long an edge has run, in the largest unit it has run a whole one of.
+/// Returns how long an edge has run, in whole seconds, minutes or hours, whichever is the largest it has reached.
 fn elapsed(duration: Duration) -> String {
     match duration.as_secs() {
         seconds @ 0..60 => format!("{seconds}s"),
@@ -2238,7 +2283,7 @@ impl<W: std::io::Write> Observer for Console<W> {
     fn started(&mut self, graph: &Graph, edge: EdgeId, _: &Reason, progress: Progress) {
         self.total = progress.total;
         if graph.edge(edge).pool() == Pool::Console {
-            // which has the terminal, without the lines
+            // a console edge has the terminal to itself, so the lines are erased
             self.clear();
             self.terminal_held = self.width.is_some();
             self.status(graph, edge, progress);
@@ -2280,7 +2325,7 @@ impl<W: std::io::Write> Observer for Console<W> {
         let failed = !outcome.succeeded() && !matches!(outcome, Outcome::Interrupted);
         self.total = progress.total;
         if self.width.is_some() {
-            // what it printed is shown above the lines, which are drawn again below it, without it
+            // show what it printed above the lines, then draw the lines again below, without the finished edge
             self.free(edge);
             if failed || !output.is_empty() || data.pool() == Pool::Console {
                 self.clear();
@@ -2319,14 +2364,14 @@ impl<W: std::io::Write> Observer for Console<W> {
     }
 }
 
-/// Returns the width of the terminal a file descriptor is, in columns, or `None` if it is not one.
+/// Returns the width in columns of the terminal a file descriptor refers to, or `None` if it is not a terminal.
 #[must_use]
 pub fn terminal_width(fd: i32) -> Option<usize> {
     sys::terminal_width(fd)
 }
 
-/// Returns what a command printed without the escape sequences which colour it, `ESC [ ... <letter>`, and those which
-/// choose the character set, `ESC ( <byte>`, as rustc writes to reset it.
+/// Returns what a command printed without its escape sequences for colour, `ESC [ ... <letter>`, and for choosing
+/// the character set, `ESC ( <byte>`, which rustc writes when it resets colour.
 #[must_use]
 pub fn without_colour(text: &[u8]) -> Vec<u8> {
     let mut plain = Vec::with_capacity(text.len());
@@ -2405,10 +2450,11 @@ mod tests {
         fn read(&self, path: &str) -> String {
             std::fs::read_to_string(self.dir.join(path)).unwrap()
         }
-        /// Record the edges of `quick` as having taken a quarter of the time `slow` took at most, as they would have
-        /// but for starting the test helper, so that `slow` comes first on the critical path, as the tests of workers
-        /// expect, however long the helper took to start when they were measured, which under Wine on CI's runners
-        /// has been longer than `slow`'s second.
+        /// Record each edge of `quick` as having taken at most a quarter of the time `slow` took.
+        ///
+        /// The tests of workers expect `slow` to come first on the critical path. Without this, the time the test
+        /// helper takes to start could make a quick edge look slower: under Wine on CI's runners, starting it has
+        /// taken longer than the second `slow` runs for.
         fn quicker_than(&mut self, slow: &str, quick: &[&str]) {
             let most = self.state.get(slow).expect("the slow edge has run").duration / 4;
             for output in quick {
@@ -2557,9 +2603,9 @@ mod tests {
 
     #[test]
     fn runs_in_parallel() {
-        // each edge marks that it has started, then waits for the others to have, which they have only if they run at
-        // once, whatever starting the test helper takes, as it is slow where it runs alongside the other tests on
-        // Windows on Arm, while one after the other, the first would wait for the second, which hasn't started
+        // Each edge marks that it has started, then waits for the others to do the same. That only succeeds if they
+        // run at once: run one after the other, the first would wait for a second which has not started. Unlike a
+        // timing check, it holds however long the test helper takes to start, which is slow on Windows on Arm.
         let wait = "mkdir $out.started && wait-for a.started 10 && wait-for b.started 10 && wait-for c.started 10 && touch $out";
         let graph = graph().rule("wait", &[("command", wait)])
             .edge("wait", &["a"], &[]).edge("wait", &["b"], &[]).edge("wait", &["c"], &[]);

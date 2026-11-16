@@ -40,9 +40,9 @@ impl GeneratedFile {
 const DEFAULT_MODE: u32 = 0o644;
 
 impl Project {
-    /// Take a `file` statement, whose attributes are `content`, the template string of its contents, `output`, a path
-    /// relative to the build directory, as the outputs of a custom command are, `mode`, its permissions, and the install
-    /// attributes.
+    /// Take a `file` statement. Its attributes are `content`, the template string of its contents; `output`, a path
+    /// relative to the build directory, as for the outputs of a custom command; `mode`, its permissions; and the
+    /// install attributes.
     pub(super) fn parse_file_statement(&mut self, parser: &mut Parser) {
         if !self.parse_space(parser) {
             parser.skip_statement();
