@@ -108,9 +108,15 @@ pub fn test(selection: &Selection, options: &Options) -> Result<(), Error> {
     let mut targets = Vec::new();
     for test in &tests {
         let mut args = options.args.clone();
+        let color = if style.pretty { "--color=always" } else { "--color=never" };
         // a test harness colours its results as jig does, though its output is captured
         if test.libtest {
-            args.push(if style.pretty { "--color=always" } else { "--color=never" }.into());
+            args.push(color.into());
+        }
+        // rustdoc passes on to the tests what its `--test-args` give, and colours its own diagnostics too
+        if test.rustdoc {
+            args = args.into_iter().chain([color.into()]).flat_map(|arg| ["--test-args".into(), arg]).collect();
+            args.push(color.into());
         }
         // which a test on a worker, which is never here, does not need, though it is given it
         let library_path = library_path.as_ref().map(|path| path.to_string_lossy().into_owned());

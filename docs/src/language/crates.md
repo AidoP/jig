@@ -73,6 +73,11 @@ A `crate` statement may be followed by indented attributes:
   the other crates. The crates for a target are documented in the same directory, so that they link to each other. It is
   documented with the options it is checked with, and again when its sources change. It is `false` by default, and
   `true` without a value
+- `doctest`: run the examples in the crate's documentation as a test, `<name>-doc`, with `rustdoc --test`, against the
+  library, and the crates it uses, once they are built, with its edition, `cfg` and `env`, and the `tag`, `timeout` and
+  `serial` of its tests. It is `false` by default, and only a library for the host target has one, as rustdoc runs
+  the examples it compiles. The arguments `jig test` passes on are given to the examples' harness, as
+  `jig test lib-doc -- four` runs those of `four`
 - `install <bool>`: install the crate's output with `jig install`, which is `false` by default. Without a value, it is
   `true`
 - `install-dir <str>`: the directory the output is installed in, relative to the prefix unless it is absolute, which is

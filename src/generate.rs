@@ -1431,7 +1431,8 @@ fn write_database(
     }
     for custom in project.customs.iter().filter(|custom| custom.is_test()) {
         let tags = custom.tags.iter().map(String::as_str).collect();
-        database.tests.push(database::Test { name: &custom.name, libtest: custom.is_libtest(), tags });
+        let (name, libtest, rustdoc) = (&custom.name, custom.is_libtest(), custom.is_rustdoc());
+        database.tests.push(database::Test { name, libtest, tags, rustdoc });
     }
     for (name, path, target, runner, default) in &programs {
         let runner = runner.iter().map(String::as_str).collect();

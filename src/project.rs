@@ -395,6 +395,7 @@ impl Project {
             self.check_target(&target, span);
         }
         self.add_crate_tests();
+        self.add_doctest_uses();
         // in the order the values were set, as the properties are not kept in order
         // the codegen options of a target which is declared after they are set
         let names: Vec<_> = self.values_idx.keys().cloned().collect();

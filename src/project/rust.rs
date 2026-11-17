@@ -23,6 +23,9 @@ pub struct Crate {
     pub test: bool,
     /// Whether the crate is documented by rustdoc, in `<build-dir>/<target>/doc/<name>`.
     pub doc: bool,
+    /// Whether the examples in its documentation are run as a test, `<name>-doc`, which they only are for a library
+    /// for the host target.
+    pub doctest: bool,
     /// The crates for the same target which are passed to this crate with `--extern`.
     pub uses: Vec<Use>,
     /// What is built before the crate and its test harness, and before its test runs, but is not an input.
