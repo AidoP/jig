@@ -37,8 +37,10 @@
 - `test <name>`: a test, which passes if its command succeeds. Like `custom`, it has `input`, `depends` and `command`
   attributes, but no `output` or `default`, and a `tag` attribute, a tag or a list of them, by which `jig test` chooses
   it, as [`jig test`](../commands/test.md) describes, and an `env` attribute, as a custom command's, the variables
-  its command runs with, beside those it inherits. Its inputs and dependencies are built with
-  `jig build test/<name>`, or those of every test with `jig build test`
+  its command runs with, beside those it inherits. Its `timeout`, a number of seconds above zero, such as `60` or
+  `'0.5'`, is how long it may run before it is killed and fails, the `test-timeout` property by default, and `serial`
+  runs it with nothing else running, `false` by default, and `true` without a value. Its inputs and dependencies are
+  built with `jig build test/<name>`, or those of every test with `jig build test`, and `jig test` runs it
 
 <!-- jig-test
 files: local.jig

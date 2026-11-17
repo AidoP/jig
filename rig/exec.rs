@@ -6,8 +6,13 @@
 //! Each edge runs its program, without a shell, in the build's directory. At most [`Options::jobs`] run at once, each
 //! on a thread of its own. An edge's output, stdout and stderr together, is captured and given to an [`Observer`] when
 //! it finishes. An edge in the console pool instead has the terminal: only one console edge runs at a time, and the
-//! output of the other edges is held until it finishes. An edge which succeeds is recorded at once, with the inputs
+//! output of the other edges is held until it finishes. An edge in the serial pool starts once nothing else is
+//! running, and nothing else starts until it has finished. An edge which succeeds is recorded at once, with the inputs
 //! its depfile lists, so that an interrupted build loses only the edges which were running.
+//!
+//! An edge with a timeout which runs for longer is killed, with its process group, and fails with
+//! [`Outcome::TimedOut`]. An edge which runs [`always`](crate::Edge::always), as a test does, runs whenever the build
+//! wants it, and is given what [`Options::given`] has for it beside its action.
 //!
 //! A generator edge is run like any other. A build whose graph is generated should first build the file the graph is
 //! read from, and read the graph again if that ran.
@@ -115,6 +120,21 @@ pub struct Options {
     pub releases: HashMap<String, crate::worker::Release>,
     /// Which outputs of the edges which run on workers are fetched.
     pub download: Download,
+    /// What is given to the commands of some edges which run [`always`](crate::Edge::always) beside their actions,
+    /// by the first output of each, as a test is given the arguments `jig test` was given. As it is not part of an
+    /// edge's action, it is only given to an edge which is never cached nor recorded as up to date.
+    pub given: HashMap<String, Given>,
+}
+
+/// What [`Options::given`] gives the command of an edge which runs always, beside its action.
+#[derive(Clone, Debug, Default)]
+pub struct Given {
+    /// Arguments after the action's own.
+    pub args: Vec<String>,
+    /// Environment variables beside the action's, which replace those of the same names.
+    pub env: Vec<(String, String)>,
+    /// A timeout in place of the edge's own.
+    pub timeout: Option<Duration>,
 }
 
 /// Which outputs of the edges which run on workers are fetched.
@@ -147,6 +167,7 @@ impl Options {
             workers_only: false,
             releases: HashMap::new(),
             download: Download::All,
+            given: HashMap::new(),
         }
     }
 }
@@ -162,7 +183,7 @@ const LOCATING: [&str; 11] = [
 ];
 
 /// How an edge which ran finished.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum Outcome {
     Succeeded,
     /// The command exited unsuccessfully.
@@ -171,6 +192,8 @@ pub enum Outcome {
     Error(String),
     /// The command did not succeed, but the build had been interrupted, so it is not counted as a failure.
     Interrupted,
+    /// The command ran for longer than its timeout, and was killed, with what it started.
+    TimedOut(Duration),
 }
 impl Outcome {
     #[must_use]
@@ -783,6 +806,9 @@ fn build_once(
         left,
         fetcher,
         lost: Vec::new(),
+        serial: false,
+        timeouts: HashMap::new(),
+        timed_out: HashMap::new(),
     };
     if options.jobserver && !run.edges.is_empty() {
         run.jobserver = Jobserver::from_env().or_else(|| Jobserver::create(options.jobs.max(1)).ok());
@@ -1035,6 +1061,12 @@ struct Run<'g, 's> {
     fetcher: Arc<Fetcher>,
     /// The outputs left on workers which the workers no longer had. They are built again.
     lost: Vec<String>,
+    /// Whether an edge in the serial pool is running, while nothing else starts.
+    serial: bool,
+    /// The timeout of each running edge which has one, which runs here outside the console pool.
+    timeouts: HashMap<usize, Duration>,
+    /// The running edges which were killed as they ran for longer than their timeouts, with the timeouts.
+    timed_out: HashMap<usize, Duration>,
 }
 
 impl Run<'_, '_> {
@@ -1180,6 +1212,14 @@ impl Run<'_, '_> {
                         sys::signal_group(group, sys::SIGKILL);
                     }
                 }
+                // kill each edge, with what it started, once it has run for longer than its timeout
+                for (&index, &timeout) in &self.timeouts {
+                    let late = self.started.get(&index).is_some_and(|started| started.elapsed() >= timeout);
+                    if late && let Some(&group) = self.processes.get(&index) && !self.timed_out.contains_key(&index) {
+                        sys::signal_group(group, sys::SIGKILL);
+                        self.timed_out.insert(index, timeout);
+                    }
+                }
                 // whether an edge is ready but waits for a token
                 let mut waiting_for_token = false;
                 // An edge a worker gave back is first to take a job, as it was already reported as started. It runs
@@ -1209,7 +1249,8 @@ impl Run<'_, '_> {
                     self.local += 1;
                     let _ = jobs.send(job);
                 }
-                while !self.stopping() {
+                // nothing starts while an edge in the serial pool runs
+                while !self.stopping() && !self.serial {
                     // An edge runs here while the build has a free job, and otherwise on a worker, if one can run
                     // it. An edge which waits for a worker never runs here.
                     let here = (self.local < self.options.jobs.max(1)).then(|| self.next_ready()).flatten();
@@ -1241,7 +1282,7 @@ impl Run<'_, '_> {
                     }
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
-                    let action = self.action(index).clone();
+                    let action = self.given_action(index);
                     let lookup = self.lookup(index);
                     let edge = self.graph.edge(self.edges[index]);
                     let inherit = edge.hermetic().then(|| {
@@ -1297,8 +1338,15 @@ impl Run<'_, '_> {
                         self.local_only.insert(job.index);
                         self.returned.push_back(job);
                     },
-                    Ok(Message::Finished(finished)) => {
+                    Ok(Message::Finished(mut finished)) => {
                         self.processes.remove(&finished.index);
+                        self.timeouts.remove(&finished.index);
+                        // a command which was killed as it ran too long failed by its timeout, unless it succeeded
+                        if let Some(timeout) = self.timed_out.remove(&finished.index)
+                            && !finished.outcome.succeeded()
+                        {
+                            finished.outcome = Outcome::TimedOut(timeout);
+                        }
                         if let Some(token) = self.tokens.remove(&finished.index)
                             && let Some(jobserver) = &self.jobserver
                         {
@@ -1331,11 +1379,14 @@ impl Run<'_, '_> {
         failed || self.error.is_some() || self.report.interrupted
     }
     /// Returns the highest-priority edge which is ready to run here. That excludes an edge in the console pool while
-    /// another console edge runs, and an edge which is waiting for a worker.
+    /// another console edge runs, an edge in the serial pool while anything runs, and an edge which is waiting for a
+    /// worker.
     fn next_ready(&mut self) -> Option<usize> {
         let entry = *self.ready.iter().find(|&&(_, index)| {
-            let console = self.console && self.graph.edge(self.edges[index]).pool() == Pool::Console;
-            !console && !self.waits_for_workers(index)
+            let pool = self.graph.edge(self.edges[index]).pool();
+            let console = self.console && pool == Pool::Console;
+            let serial = pool == Pool::Serial && self.progress.running > 0;
+            !console && !serial && !self.waits_for_workers(index)
         })?;
         self.ready.remove(&entry);
         Some(entry.1)
@@ -1704,6 +1755,18 @@ impl Run<'_, '_> {
             EdgeKind::Alias => unreachable!("an alias is not run"),
         }
     }
+    /// Returns the action to run for an edge: its own, with what [`Options::given`] gives it, if it runs always.
+    fn given_action(&self, index: usize) -> Exec {
+        let mut action = self.action(index).clone();
+        let edge = self.graph.edge(self.edges[index]);
+        let given = edge.always().then(|| self.options.given.get(plan::first_output(self.graph, self.edges[index])));
+        if let Some(Given { args, env, .. }) = given.flatten() {
+            action.args.extend(args.iter().cloned());
+            action.env.retain(|(name, _)| !env.iter().any(|(given, _)| given == name));
+            action.env.extend(env.iter().cloned());
+        }
+        action
+    }
     /// Whether an edge which would run only as an input is built again is up to date after all, as a restat or hashed
     /// edge it depends on left its outputs alone, or as it is hashed and its inputs' contents are as they were.
     ///
@@ -1762,6 +1825,15 @@ impl Run<'_, '_> {
         if data.pool() == Pool::Console {
             self.console = true;
         }
+        if data.pool() == Pool::Serial {
+            self.serial = true;
+        }
+        // a console edge is in rig's own process group, which cannot be killed alone
+        let given = data.always().then(|| self.options.given.get(plan::first_output(self.graph, edge))).flatten();
+        let timeout = given.and_then(|given| given.timeout).or(data.timeout());
+        if let Some(timeout) = timeout.filter(|_| data.pool() != Pool::Console) {
+            self.timeouts.insert(index, timeout);
+        }
         self.status[index] = Status::Running;
         self.progress.started += 1;
         self.progress.running += 1;
@@ -1776,6 +1848,9 @@ impl Run<'_, '_> {
         let edge = self.edges[index];
         let data = self.graph.edge(edge);
         self.started.remove(&index);
+        if data.pool() == Pool::Serial {
+            self.serial = false;
+        }
         let sent_to = self.sent_to.remove(&index);
         // an edge whose input was lost did not run: it runs in the next pass, after the input is built again
         if !lost.is_empty() {
@@ -2344,8 +2419,10 @@ impl<W: std::io::Write> Observer for Console<W> {
             if let EdgeKind::Command(action) = data.kind() {
                 let _ = writeln!(self.out, "{}", action.command_line());
             }
-            if let Outcome::Error(error) = outcome {
-                let _ = writeln!(self.out, "{error}");
+            match outcome {
+                Outcome::Error(error) => _ = writeln!(self.out, "{error}"),
+                Outcome::TimedOut(timeout) => _ = writeln!(self.out, "timed out after {}", total_time(*timeout)),
+                _ => (),
             }
         }
         let plain;
@@ -2612,6 +2689,122 @@ mod tests {
         let mut build = Build::new("parallel", graph.finish(), &[]);
         build.options.jobs = 3;
         assert_eq!(build.ran(&[]).len(), 3);
+    }
+
+    /// What a build tells its observer, in order: each edge which starts or finishes, by its first output, with how
+    /// many edges were running then, and how each finished.
+    #[derive(Default)]
+    struct Events {
+        events: Vec<(&'static str, String, usize)>,
+        outcomes: Vec<(String, String)>,
+    }
+    impl Observer for Events {
+        fn started(&mut self, graph: &Graph, edge: EdgeId, _: &Reason, progress: Progress) {
+            let output = graph.path(graph.edge(edge).outputs()[0]).to_string();
+            self.events.push(("started", output, progress.running));
+        }
+        fn finished(&mut self, graph: &Graph, edge: EdgeId, outcome: &Outcome, _: &[u8], progress: Progress) {
+            let output = graph.path(graph.edge(edge).outputs()[0]).to_string();
+            self.events.push(("finished", output.clone(), progress.running));
+            self.outcomes.push((output, format!("{outcome:?}")));
+        }
+    }
+
+    #[test]
+    fn runs_what_runs_always_every_time() {
+        // an edge which runs always runs on every build, while the edge it reads is up to date
+        let graph = cat().rule("test", &[("command", "cat $in"), ("always", "")]);
+        let graph = graph.edge("cat", &["copy"], &["source"]).edge("test", &["checked"], &["copy"]).finish();
+        let mut build = Build::new("always", graph, &[("source", "a")]);
+        assert_eq!(build.ran(&[]), ["copy", "checked"]);
+        assert_eq!(build.ran(&[]), ["checked"]);
+        // and why, as a dry run shows it
+        let mut stamps = Stamps::new(&build.graph, &build.dir);
+        let planned = plan::plan(&build.graph, &build.state, &mut stamps, &[]).unwrap();
+        assert_eq!(planned.edges.iter().map(|(_, reason)| reason).collect::<Vec<_>>(), [&Reason::Always]);
+        // a cache does not keep it, whatever `cache` says
+        let cache = TempCache::new("always");
+        let mut graph = cat().rule("test", &[("command", "cat $in"), ("always", "")]).cached("toolchain");
+        graph = graph.edge("test", &["checked"], &["source"]);
+        let mut build = Build::new("always-cached", graph.finish(), &[("source", "a")]);
+        build.options.cache = Some(cache.0.clone());
+        assert_eq!(build.ran(&[]), ["checked"]);
+        assert_eq!(build.ran(&[]), ["checked"]);
+        assert_eq!(cache.0.stats().results, 0);
+    }
+
+    #[test]
+    fn kills_what_runs_longer_than_its_timeout() {
+        // The edge starts a process which sleeps for a minute, and waits for it, so the build only finishes soon if
+        // that process is killed too, as the edge's process group is.
+        let stuck = graph().rule("stuck", &[("command", "echo started && spawn 60 child.pid"), ("timeout", "0.5")]);
+        let mut build = Build::new("timeout", stuck.edge("stuck", &["out"], &[]).finish(), &[]);
+        let started = Instant::now();
+        let mut events = Events::default();
+        let report = super::build(&build.graph, &mut build.state, &build.options, &[], &mut events).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+        assert_eq!((report.failed, report.succeeded()), (1, false));
+        assert_eq!(events.outcomes, [("out".to_string(), "TimedOut(500ms)".to_string())]);
+        // which the console shows
+        let mut console = Console::new(Vec::new(), false, false, false);
+        console.finished(&build.graph, EdgeId(0), &Outcome::TimedOut(Duration::from_millis(500)), b"", Progress::default());
+        let shown = String::from_utf8(console.out).unwrap();
+        assert!(shown.contains("\ntimed out after 0.5s\n"), "{shown}");
+        // a timeout given to an edge which runs always replaces its own
+        let stuck = graph().rule("stuck", &[("command", "sleep 60"), ("always", ""), ("timeout", "60")]);
+        build.graph = stuck.edge("stuck", &["out"], &[]).finish();
+        let given = Given { timeout: Some(Duration::from_millis(300)), ..Given::default() };
+        build.options.given.insert("out".into(), given);
+        let started = Instant::now();
+        let mut events = Events::default();
+        super::build(&build.graph, &mut build.state, &build.options, &[], &mut events).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+        assert_eq!(events.outcomes, [("out".to_string(), "TimedOut(300ms)".to_string())]);
+    }
+
+    #[test]
+    fn gives_what_runs_always_its_arguments() {
+        // the arguments and variables given to an edge which runs always follow its own, and replace its variables
+        let steps = ["touch", "out", "&&", "getenv", "SET", "&&", "getenv", "GIVEN", "&&", "args", "own"];
+        let mut exec = crate::test_helper::exec(steps.into_iter().map(String::from).collect());
+        exec.env.push(("SET".into(), "by the edge".into()));
+        let mut always = Graph::new();
+        let out = always.file("out");
+        let kind = EdgeKind::Command(exec.clone());
+        always.add_edge(crate::Edge { kind, outputs: vec![out], always: true, ..Default::default() }).unwrap();
+        let mut build = Build::new("given", always, &[]);
+        let env = vec![("SET".into(), "replaced".into()), ("GIVEN".into(), "given".into())];
+        build.options.given.insert("out".into(), Given { args: vec!["extra".into()], env, timeout: None });
+        let (report, finished) = build.build(&[]);
+        assert!(report.succeeded(), "{finished:?}");
+        assert_eq!(finished, [("out".to_string(), "replaced\ngiven\nown|extra|".to_string())]);
+        // while an edge which does not run always is not given them, as they are not part of its record
+        build.graph = program(exec);
+        std::fs::remove_file(build.dir.join("out")).unwrap();
+        let (_, finished) = build.build(&[]);
+        assert_eq!(finished, [("out".to_string(), "by the edge\nunset\nown|".to_string())]);
+    }
+
+    #[test]
+    fn runs_what_is_serial_alone() {
+        // nothing else runs while the serial edge does, however many jobs there are, which the order in which the
+        // edges start and finish shows, whatever their times
+        let graph = graph().rule("quick", &[("command", "sleep 0.2 && touch $out")]);
+        let graph = graph.rule("serial", &[("command", "sleep 0.2 && touch $out"), ("pool", "serial")]);
+        let graph = graph.edge("quick", &["a"], &[]).edge("serial", &["s"], &[]).edge("quick", &["b"], &[]);
+        let graph = graph.edge("quick", &["c"], &[]).finish();
+        let mut build = Build::new("serial", graph, &[]);
+        build.options.jobs = 4;
+        let mut events = Events::default();
+        let report = super::build(&build.graph, &mut build.state, &build.options, &[], &mut events).unwrap();
+        assert!(report.succeeded(), "{:?}", events.events);
+        let started = events.events.iter().position(|(event, output, _)| *event == "started" && output == "s").unwrap();
+        let next = &events.events[started + 1];
+        // it started with nothing else running, and finished before anything else started or finished
+        assert_eq!(events.events[started].2, 1, "{:?}", events.events);
+        assert_eq!((next.0, next.1.as_str()), ("finished", "s"), "{:?}", events.events);
+        // while the others ran at once
+        assert!(events.events.iter().any(|&(_, _, running)| running > 1), "{:?}", events.events);
     }
 
     /// A graph of one edge, `out`, which runs a program directly.

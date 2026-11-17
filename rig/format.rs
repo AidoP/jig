@@ -11,8 +11,10 @@
 //! - its kind: `0` for an alias, or `1` followed by its program;
 //! - its description;
 //! - its depfile, an optional string;
-//! - its pool: `0`, or `1` for the console;
-//! - its flags: the sum of `1` if it is a generator, `2` if it is restat and `4` if it is hashed;
+//! - its pool: `0`, `1` for the console, or `2` to run alone;
+//! - its flags: the sum of `1` if it is a generator, `2` if it is restat, `4` if it is hashed and `8` if it always
+//!   runs;
+//! - its timeout, in milliseconds, or `0` without one;
 //! - its cache identity, an optional string;
 //! - the environment variables it passes on, a list of strings;
 //! - its placement: `1` if it may run on any host or else `0`, its target as an optional string, and its tags as a
@@ -32,11 +34,12 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format. Change the version of jig's database with it, so that jig configures a project again
 /// rather than failing to load a graph of the old version.
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
 const HASHED: u32 = 4;
+const ALWAYS: u32 = 8;
 
 impl Graph {
     /// Returns the graph in the format it is saved in.
@@ -63,10 +66,19 @@ impl Graph {
             w.u32(match edge.pool() {
                 Pool::Default => 0,
                 Pool::Console => 1,
+                Pool::Serial => 2,
             });
-            let flags = [(edge.generator(), GENERATOR), (edge.restat(), RESTAT), (edge.hashed_flag(), HASHED)];
+            let flags = [
+                (edge.generator(), GENERATOR),
+                (edge.restat(), RESTAT),
+                (edge.hashed_flag(), HASHED),
+                (edge.always(), ALWAYS),
+            ];
             w.u32(flags.into_iter().filter(|&(set, _)| set).fold(0, |flags, (_, flag)| flags | flag));
-            w.optional(edge.cache());
+            // at least a millisecond, as `0` is none
+            let timeout = edge.timeout().map_or(0, |timeout| u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX).max(1));
+            w.u32(timeout);
+            w.optional(edge.given_cache());
             w.len(edge.pass_env().len());
             for name in edge.pass_env() {
                 w.str(name);
@@ -142,12 +154,17 @@ impl Graph {
             let pool = match r.u32()? {
                 0 => Pool::Default,
                 1 => Pool::Console,
+                2 => Pool::Serial,
                 _ => return Err(Error::Format("unknown pool")),
             };
             let flags = r.u32()?;
-            if flags & !(GENERATOR | RESTAT | HASHED) != 0 {
+            if flags & !(GENERATOR | RESTAT | HASHED | ALWAYS) != 0 {
                 return Err(Error::Format("unknown flags"));
             }
+            let timeout = match r.u32()? {
+                0 => None,
+                millis => Some(std::time::Duration::from_millis(u64::from(millis))),
+            };
             let cache = match r.u32()? {
                 0 => None,
                 1 => Some(r.str()?.into()),
@@ -183,6 +200,8 @@ impl Graph {
                 generator: flags & GENERATOR != 0,
                 restat: flags & RESTAT != 0,
                 hashed: flags & HASHED != 0,
+                always: flags & ALWAYS != 0,
+                timeout,
                 cache,
                 pass_env,
                 placement,
@@ -367,6 +386,8 @@ mod tests {
                 pass_env: vec!["CC".into(), "CFLAGS".into()],
                 discover: Some(Exec { program: "cc".into(), args: vec!["-M".into(), "a.c".into()], ..Exec::default() }),
                 early: vec![c],
+                always: false,
+                timeout: None,
                 placement: crate::Placement {
                     any_host: true,
                     target: Some("riscv64gc".into()),
@@ -384,7 +405,10 @@ mod tests {
         };
         let program = graph.file("e f");
         let kind = EdgeKind::Command(exec);
-        graph.add_edge(Edge { kind, outputs: vec![program], ..Edge::default() }).unwrap();
+        // which always runs, alone, for up to a second and a half
+        let timeout = Some(std::time::Duration::from_millis(1500));
+        let (always, pool) = (true, Pool::Serial);
+        graph.add_edge(Edge { kind, outputs: vec![program], always, timeout, pool, ..Edge::default() }).unwrap();
         graph.add_default(&[a, d]);
         graph
     }

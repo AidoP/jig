@@ -59,6 +59,8 @@ A `crate` statement may be followed by indented attributes:
   tests aren't built for its other targets, nor for any with `test []`
 - `tag <tag>`: a tag of the crate's test, or a list of them, by which `jig test` chooses it, such as `tag 'slow'`. A
   tag is not empty and has no whitespace. It can be repeated, adding to them
+- `timeout <seconds>` and `serial <bool>`: how long the crate's test may run, and whether it runs with nothing else
+  running, as for a [`test` statement](statements.md)
 - `doc`: document the crate with rustdoc in `<build-dir>/<target>/doc/<name>`, which `jig build doc/<name>` builds, or
   `doc/<name>@<target>` if the target is not the host target, and `jig build doc` builds with the documentation of
   the other crates. The crates for a target are documented in the same directory, so that they link to each other. It is

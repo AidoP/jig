@@ -32,6 +32,12 @@ pub struct Edge<'a> {
     pub depfile: Option<&'a Path>,
     /// Whether the edge runs alone, with the terminal, rather than with its output captured.
     pub console: bool,
+    /// Whether the edge runs with nothing else running, with its output captured, as a serial test does.
+    pub serial: bool,
+    /// Whether the edge runs on every build which wants it, as a test does, and is never cached.
+    pub always: bool,
+    /// How long the edge may run before it is killed, with what it started, and fails.
+    pub timeout: Option<std::time::Duration>,
     /// Whether the edge generates the graph, so that it is brought up to date before anything else.
     pub generator: bool,
     /// Whether rig stamps the edge's files by their contents.
@@ -92,7 +98,11 @@ impl RigGraph {
             inputs,
             after: self.nodes(edge.after),
             depfile: edge.depfile.map(path_string),
-            pool: if edge.console { rig::Pool::Console } else { rig::Pool::Default },
+            pool: match (edge.console, edge.serial) {
+                (true, _) => rig::Pool::Console,
+                (false, true) => rig::Pool::Serial,
+                (false, false) => rig::Pool::Default,
+            },
             generator: edge.generator,
             restat: edge.restat,
             hashed: edge.hashed,
@@ -101,6 +111,8 @@ impl RigGraph {
             placement: edge.placement,
             discover: edge.discover,
             early,
+            always: edge.always,
+            timeout: edge.timeout,
         };
         self.graph.add_edge(edge).map(|_| ()).map_err(Error::Rig)
     }

@@ -16,6 +16,9 @@
   administrator
 - `test-tags`: the tags of the tests `jig test` runs without names or tags, beside the tests without tags, as a list,
   which is empty by default
+- `test-timeout`: the timeout of the tests declared while it is set, in seconds, such as `60` or `'0.5'`, which a
+  test's own `timeout` replaces, with no value until it is set, so that a test has no timeout. Any other value is the
+  error `invalid-operand` where it is set
 - `change-detection`: how rig finds that a file has changed, `'timestamp'` by default, by its modification time and
   size, or `'hash'`, by a BLAKE3 hash of its contents too. With `'hash'`, a file which is written again unchanged, or
   changed and changed back, rebuilds nothing, and what depends on an output which is written unchanged is not rebuilt.

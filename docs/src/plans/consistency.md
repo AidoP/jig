@@ -2,7 +2,7 @@
 
 A plan for the places where jig's commands, statements and settings disagree with each other, and for what a project
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
-each statement takes, and of the settings, in November 2026. **Phases 1a, 2, 3, 4 and 5 are done**, and the rest is not started.
+each statement takes, and of the settings, in November 2026. **Phases 1 to 5 are done**, and the rest is not started.
 
 The phases are ordered by how much each is worth against what it costs, and each stands on its own. jig is not
 stable yet, so a phase which changes what a project writes, or the variables it reads, replaces the old form rather
@@ -10,8 +10,8 @@ than keeping it for a while beside the new one.
 
 ## Phase 1: tests
 
-`jig test` builds what the tests need with rig, then runs each test itself, one at a time. So a test which hangs
-hangs `jig test`, one test of a crate's harness cannot be run alone, and a machine with many cores runs one test at a
+`jig test` built what the tests need with rig, then ran each test itself, one at a time. So a test which hung hung
+`jig test`, one test of a crate's harness could not be run alone, and a machine with many cores ran one test at a
 time.
 
 ### 1a: jobs, a timeout and arguments (done)
@@ -28,7 +28,7 @@ time.
 What it leaves: a timeout kills the test's own process, and not what that process started, and only applies to the
 tests which run here, not to those sent to workers.
 
-### 1b: what a test declares
+### 1b: what a test declares (done)
 
 - `timeout <seconds>` on a `test` statement, and on a crate with `test`, with a `test-timeout` property as the
   default of both, which `--timeout` replaces. It is recorded in the database, whose version changes.
@@ -39,19 +39,41 @@ tests which run here, not to those sent to workers.
   the test started too. rig's process groups are private to it, behind `rig::sys`, so this needs a small public
   interface in rig for running a program with a timeout, which a worker would then use for a test it is sent.
 
-### 1c: tests as edges (dropped)
+How it was done, with 1c, which made each test which runs here an edge of rig's graph, `test-run/<name>`: its
+`timeout` and `serial`, and the `test-timeout` property, are the edge's, in the graph rather than the database, and a
+test runs in the process group rig gives every command. Beside the plan:
 
-This was to make each test an edge of rig's graph, so that a test whose inputs had not changed did not run again,
-and `jig test` showed what it printed when it last ran. It is dropped: tests are generally not pure, as they read
-files, the clock, the network and the machine beyond what they declare, so their results are not cached, and a test
-runs every time it is asked for. `jig test` keeps running the tests itself.
+- There is no `test-jobs`. Tests run in the build's jobs, so `-j` is the jobs of both, and the default is the
+  build's, as many as the machine runs at once and two more, rather than one. A test which must not run beside
+  others is `serial`, as jig's own performance tests are.
+- A `serial` test runs with nothing else running, build or test, as what disturbs a test which times what it runs is
+  anything else running.
+- `pass-env` is left out of a test, as a test inherits every variable `jig test` has, and is never cached, so which
+  ones it reads changes nothing.
+- A timeout, and a process group, are only those of a test which runs here. One sent to a worker runs as before.
+- A test runs while rig holds the build's state, so a test which builds the same project with jig cannot, where it
+  could when `jig test` ran the tests after the build.
+- The results are shown once the build is done, rather than as each test finishes, as the build's console shows the
+  tests running, and `finished in` is the time of the build, with the tests, rather than of the tests alone.
 
-The rest of what it would have given does not need tests to be edges, and is left until a project needs it:
+### 1c: tests as edges which run always (done)
 
-- Sharing the jobs of the build with what the tests start, which `jig test` can do by creating or joining a
-  jobserver itself, as rig does.
-- Sending tests to workers by the placement of their crates, as cached edges are, rather than by their targets, as
-  `Workers` in `src/test_runner.rs` does.
+Each test becomes an edge of rig's graph, which `jig test` builds with what the test needs, so that tests run in the
+build's jobs, with its jobserver, as soon as what each needs is built. A test is generally not pure, as it reads files,
+the clock, the network and the machine beyond what it declares, so its edge runs `always`: it runs every time it is
+wanted, and is never cached, nor skipped as up to date.
+
+- rig gains `always` edges, planned with the reason `Always` whenever they are wanted, which are neither cached nor sent
+  to workers, whatever their `cache` says.
+- rig gains a timeout on an edge, which kills the edge's process group, and the outcome `TimedOut`, which is 1b's
+  process group.
+- rig gains the `Serial` pool, for 1b's `serial`.
+- `jig test` gives each test what is decided when it runs, rather than when the project is configured, through
+  `Options::given`: the arguments after `--`, the colour of a test harness's results, the search path of the
+  project's shared libraries, and `--timeout`. It is only given to an edge which runs always, as it is not part of
+  the edge's action, which a cached or recorded edge's must be.
+- A failed test does not stop the build, which goes on with `-k 0`, and what each test printed and how it finished
+  are collected by an observer, which shows the build's console only that it ran.
 
 ## Phase 2: the command line (done)
 

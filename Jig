@@ -76,6 +76,8 @@ crate perf 'test/perf.rs'
     target release-target
     test
     tag 'perf'
+    # it times jig, so nothing else runs beside it
+    serial
     depends {release-target}/jig
 
 # the book, in `docs/`, which mdBook builds into the build directory with `jig build custom/book`, as CI does, and

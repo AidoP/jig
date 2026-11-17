@@ -199,6 +199,11 @@ impl Project {
             self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
             return false;
         }
+        // as must the timeout of the tests
+        if ident == "test-timeout" && super::customs::seconds(&operand.data).is_none() {
+            self.invalid_operand(&operand, "a number of seconds above zero", false);
+            return false;
+        }
         // the codegen options of a target, and clippy's lints, are declared when they are first used
         self.declare_on_demand(ident);
         let property = self.declare(ident.into(), None);
