@@ -208,7 +208,7 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   still reported. The errors of a variable's value are those of before, which do not name the variable.
 - jig's own tests use the new variables, so that a developer's `JIG_CACHE_DIR` does not replace the tests' cache.
 
-## Phase 6: commands
+## Phase 6: commands (done)
 
 - `jig clean [<target> ...]` (done): removes what rig built, by the outputs of the graph, rather than the build
   directory, so that what the project did not build is left, and the state forgets them. `rig::clean` removes the
@@ -222,7 +222,10 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   and sources in the project, but not in the build directory, and assembly is left out. jig's own sources are not
   formatted by rustfmt, so it is not run on them.
 - `jig lint` runs `clang-tidy` on the sources of the C statements with a `c/tidy` property, from the compile
-  commands jig already writes for clangd.
+  commands jig already writes for clangd (done). `c/tidy` is the checks, as `--checks` takes them, read where a
+  statement is declared, and empty by default. Each statement with it has an alias, `tidy/<name>`, of what it builds,
+  which `lint` includes, so that what its sources include is built first; clang-tidy then runs on its sources each
+  time, as its diagnostics are not saved, and `-D` gives it `--warnings-as-errors=*`.
 
 ## Phase 7: crates
 
