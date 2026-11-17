@@ -8446,3 +8446,21 @@ fn crates_have_editions() {
     assert_contains(&output.stderr, "error[invalid-operand]: unsigned value used where an edition, `2015`, `2018`, `2021` or `2024` is required\n --> Jig:1:13");
     assert_contains(&output.stderr, "error[invalid-operand]: str value used where an edition");
 }
+
+#[test]
+fn crates_take_flags() {
+    let project = Project::new("flags", &[
+        ("Jig", "crate a 'a.rs'\n    doc\n    flags ['--cap-lints', 'allow']\n    flags '--check-cfg=cfg(fast)'\n"),
+        ("a.rs", "#[cfg(fast)]\npub fn f() {}\nfn unused() {}\n"),
+    ]);
+    let output = project.configure().ok();
+    let host = project.host();
+    // given after jig's own, before the root, as rustc and clippy take them, but not to rustdoc
+    assert_contains(output.build(&format!("{host}/liba.rlib")), " --cap-lints allow '--check-cfg=cfg(fast)' ../a.rs");
+    assert_contains(output.build(&format!("{host}/check/liba.rmeta")), " --cap-lints allow ");
+    assert!(!output.build(&format!("{host}/doc/a/index.html")).contains("--cap-lints"));
+    // which rustc takes: the dead code and the unknown `cfg` are allowed
+    let built = jig_command().arg("build").current_dir(&project.dir).output().unwrap();
+    let shown = String::from_utf8(built.stdout).unwrap() + &String::from_utf8(built.stderr).unwrap();
+    assert!(built.status.success() && !shown.contains("warning"), "{shown}");
+}

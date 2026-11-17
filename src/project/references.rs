@@ -299,6 +299,7 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
         "test" => AttributeValue::Set(Data::Bool(c.test)),
         "doc" => AttributeValue::Set(Data::Bool(c.doc)),
         "edition" => AttributeValue::Set(Data::Str(c.edition.clone())),
+        "flags" => AttributeValue::Set(strings(&c.flags)),
         "use" => {
             let mut names = Vec::new();
             for used in &c.uses {

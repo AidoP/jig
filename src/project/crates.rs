@@ -86,6 +86,7 @@ impl Project {
         // as the property where it is declared says, unless its own attribute does
         let mut edition = self.value("edition", parser.file).and_then(|value| rust::edition(&value.data));
         let mut link_script = None;
+        let mut flags = Vec::new();
         let mut codegen = Vec::new();
         // the defaults of the install attributes depend on the crate type, so they are applied once it is known
         let mut install_attributes = Vec::new();
@@ -167,6 +168,18 @@ impl Project {
                 "cfg" => {
                     if let Some(options) = self.cfg_options(&attribute.operand()) {
                         cfg.extend(options);
+                    }
+                },
+                // arguments of rustc, each a string or a number
+                "flags" => {
+                    let operand = attribute.operand();
+                    let argument = |data: &Data| matches!(data, Data::Str(_) | Data::Unsigned(_) | Data::Signed(_));
+                    match &operand.data {
+                        data if argument(data) => flags.push(data.coerce_string()),
+                        Data::List(items) if items.iter().all(argument) => {
+                            flags.extend(items.iter().map(Data::coerce_string));
+                        },
+                        _ => self.invalid_operand(&operand, "str, or list of str", false),
                     }
                 },
                 name if ATTRIBUTES.contains(&name) => self.running_attribute(&mut running, name, &attribute.operand()),
@@ -272,6 +285,7 @@ impl Project {
                         dir,
                         kind,
                         edition: edition.clone().unwrap_or_else(|| "2024".into()),
+                        flags: flags.clone(),
                         builtin,
                         default,
                         test,

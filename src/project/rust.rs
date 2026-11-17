@@ -14,6 +14,8 @@ pub struct Crate {
     pub kind: Kind,
     /// The edition rustc compiles it with, from its `edition` or the property where it is declared.
     pub edition: String,
+    /// The arguments of rustc, and clippy, from its `flags`, after those jig gives, but before its root.
+    pub flags: Vec<String>,
     pub builtin: bool,
     /// Whether the crate is built by `jig build` without targets.
     pub default: bool,
