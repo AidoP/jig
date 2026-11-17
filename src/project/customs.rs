@@ -62,6 +62,8 @@ pub enum CustomKind {
         runner: Option<usize>,
         /// Whether the command is the test harness of a crate, built by libtest.
         harness: bool,
+        /// Whether the command is rustdoc, which runs the examples in a crate's documentation as its tests.
+        rustdoc: bool,
         /// For a crate's test harness which runs on a worker, rather than here: its target, which the worker must be
         /// able to run.
         on_workers: Option<String>,
@@ -132,6 +134,11 @@ impl Custom {
     /// runner, the runner is what is run, and the harness is its last argument.
     pub fn is_libtest(&self) -> bool {
         matches!(self.kind, CustomKind::Test { runner: None, harness: true, .. })
+    }
+    /// Whether it is a test of a crate's documentation, which rustdoc runs, and which takes the arguments of the
+    /// tests in its `--test-args`.
+    pub fn is_rustdoc(&self) -> bool {
+        matches!(self.kind, CustomKind::Test { rustdoc: true, .. })
     }
     /// How a test runs here, if it is a test.
     pub fn test_run(&self) -> Option<&TestRun> {
@@ -381,7 +388,7 @@ impl Project {
         // declare the outputs as a property named after the command, now that the name is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test {
-            CustomKind::Test { runner: None, harness: false, on_workers: None, run }
+            CustomKind::Test { runner: None, harness: false, rustdoc: false, on_workers: None, run }
         } else {
             CustomKind::Command { outputs, default, install, edge }
         };

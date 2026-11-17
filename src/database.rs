@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 38;
+const VERSION: u32 = 39;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -118,6 +118,9 @@ pub struct Test<'a> {
     pub libtest: bool,
     /// The tags of the test, by which `jig test` chooses it.
     pub tags: Vec<&'a str>,
+    /// Whether the program is rustdoc, running the examples of a crate's documentation, which takes the arguments of
+    /// the tests in `--test-args`.
+    pub rustdoc: bool,
 }
 
 /// The sources of a library or executable of C which `jig lint` checks with clang-tidy.
@@ -244,6 +247,7 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         w.str(test.name);
         w.u32(u32::from(test.libtest));
         w.strs(&test.tags);
+        w.u32(u32::from(test.rustdoc));
     }
     w.len(database.lints.len());
     for lint in &database.lints {
@@ -329,8 +333,8 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: flag(&mut r)?, deps: r.list(Reader::u32)? });
     }
     for _ in 0..r.u32()? {
-        let (name, libtest, tags) = (r.str()?, flag(&mut r)?, r.strs()?);
-        database.tests.push(Test { name, libtest, tags });
+        let (name, libtest, tags, rustdoc) = (r.str()?, flag(&mut r)?, r.strs()?, flag(&mut r)?);
+        database.tests.push(Test { name, libtest, tags, rustdoc });
     }
     for _ in 0..r.u32()? {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
@@ -417,8 +421,8 @@ mod tests {
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
             ],
             tests: vec![
-                Test { name: "unit", libtest: false, tags: vec!["slow", "io"] },
-                Test { name: "app", libtest: true, tags: vec![] },
+                Test { name: "unit", libtest: false, tags: vec!["slow", "io"], rustdoc: false },
+                Test { name: "app", libtest: true, tags: vec![], rustdoc: true },
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             docs: vec![Doc { name: "app", index: "build/x86_64/doc/app/index.html" }],
@@ -452,7 +456,7 @@ mod tests {
         assert_eq!(read(b"{\"crates\"").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         // truncated
         let mut bytes = Vec::new();
-        let test = Test { name: "x", libtest: false, tags: vec![] };
+        let test = Test { name: "x", libtest: false, tags: vec![], rustdoc: false };
         let tests = vec![test];
         write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
@@ -472,7 +476,7 @@ mod benches {
                 let deps = if i > 0 { vec![i as u32 - 1, 0] } else { vec![] };
                 Flycheck { label, diagnostics, member: true, deps }
             }).collect();
-            let test = |label| Test { name: label, libtest: true, tags: vec![] };
+            let test = |label| Test { name: label, libtest: true, tags: vec![], rustdoc: false };
             let tests = labels[..n].iter().map(|(label, _)| test(label.as_str())).collect();
             Database { flychecks, tests, ..Default::default() }
         };

@@ -8464,3 +8464,28 @@ fn crates_take_flags() {
     let shown = String::from_utf8(built.stdout).unwrap() + &String::from_utf8(built.stderr).unwrap();
     assert!(built.status.success() && !shown.contains("warning"), "{shown}");
 }
+
+#[test]
+fn doctests_run_the_examples() {
+    let lib = "/// Four.\n///\n/// ```\n/// assert_eq!(lib::four(), 4);\n/// ```\npub fn four() -> u32 { util::two() * 2 }\n\
+               /// Wrong.\n///\n/// ```\n/// assert_eq!(util::two(), 3);\n/// ```\npub fn wrong() {}\n";
+    let project = Project::new("doctests", &[
+        ("Jig", "crate util 'util.rs'\ncrate lib 'lib.rs'\n    use util\n    doctest\n    tag 'docs'\n"),
+        ("util.rs", "pub fn two() -> u32 { 2 }\n"),
+        ("lib.rs", lib),
+    ]);
+    let test = |args: &[&str]| {
+        let output = jig_command().arg("test").args(args).current_dir(&project.dir).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    // a test named after the library, with its tags, which runs each example against it and the crates it uses
+    let (passed, shown) = test(&["--tag", "docs", "-v"]);
+    assert!(!passed, "{shown}");
+    assert_contains(&shown, "test lib-doc ... FAILED");
+    assert_contains(&shown, "lib.rs - four (line 3) ... ok");
+    assert_contains(&shown, "lib.rs - wrong (line 9) ... FAILED");
+    // which are filtered by the arguments after `--`
+    let (passed, shown) = test(&["lib-doc", "--", "four"]);
+    assert!(passed, "{shown}");
+}

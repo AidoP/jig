@@ -236,7 +236,11 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
 - `flags <arguments>` on a crate, for what rustc takes which is not a codegen option, such as `-l`, `-L`,
   `--check-cfg` and `-Z` on nightly (done). They follow jig's own arguments when the crate is compiled, checked and
   linted, but rustdoc is not given them, as it rejects `-l`.
-- `doctest` on a crate with `doc`: a test which runs `rustdoc --test`, named `<name>-doc`.
+- `doctest` on a crate with `doc`: a test which runs `rustdoc --test`, named `<name>-doc` (done). It does not need
+  `doc`, as rustdoc tests without documenting. Only a library for the host target has one, as rustdoc runs the
+  examples it compiles; the library and the crates it uses are given with `--extern`, and `-L dependency=` finds what
+  they use. The database marks the test as rustdoc's, so that `jig test` gives it the arguments after `--` in
+  `--test-args`. A library which links C is not given its libraries yet.
 - `bench` on a crate: its harness built with the options of `profile/release`, run by `jig bench`, which is a
   command of its own, as a benchmark is not a test which passes or fails.
 

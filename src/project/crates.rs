@@ -73,6 +73,7 @@ impl Project {
         let mut default = false;
         let mut tested = Tested::All(false);
         let mut doc = false;
+        let mut doctest = false;
         let mut tags = Vec::new();
         // how its test runs, from `timeout` and `serial`
         let mut test_run = self.default_test_run(parser.file);
@@ -123,6 +124,11 @@ impl Project {
                 "doc" => {
                     if let Some(value) = self.flag(&attribute.operand()) {
                         doc = value;
+                    }
+                },
+                "doctest" => {
+                    if let Some(value) = self.flag(&attribute.operand()) {
+                        doctest = value;
                     }
                 },
                 "edition" => {
@@ -276,6 +282,7 @@ impl Project {
                 }),
                 Entry::Vacant(entry) => {
                     let dir = build_dir.join(&target);
+                    let doctest = doctest && kind == rust::Kind::Lib && target == host;
                     let c = entry.insert(rust::Crate {
                         name: name.clone(),
                         name_span: span,
@@ -290,6 +297,7 @@ impl Project {
                         default,
                         test,
                         doc,
+                        doctest,
                         uses: uses.clone(),
                         depends: depends.clone(),
                         cfg: cfg.clone(),
@@ -310,6 +318,11 @@ impl Project {
                         let harness = c.test_harness();
                         let depends = c.depends.clone();
                         self.add_crate_test(name, span, harness, depends, tags.clone(), test_run.clone());
+                    }
+                    let c = &self.crates[&(name.clone(), declared[declared.len() - 1].clone())];
+                    if c.doctest {
+                        let doctest = Self::doctest(c, tags.clone(), test_run.clone());
+                        self.add_custom(doctest);
                     }
                 },
             }
@@ -434,11 +447,70 @@ impl Project {
             depends,
             command,
             program: None,
-            kind: CustomKind::Test { runner: None, harness: true, on_workers: None, run },
+            kind: CustomKind::Test { runner: None, harness: true, rustdoc: false, on_workers: None, run },
             tags,
             running: Running::default(),
             cache: None,
         });
+    }
+    /// Returns the test which runs the examples in a library's documentation, `<name>-doc`, with rustdoc, from the
+    /// project root, against the library, with its edition, `cfg` and `env`. The crates it uses are given to it by
+    /// [`Self::add_doctest_uses`], once they are declared.
+    fn doctest(c: &rust::Crate, tags: Vec<String>, run: TestRun) -> Custom {
+        let output = c.output();
+        let mut command = vec![
+            "rustdoc".to_string(),
+            "--test".into(),
+            format!("--crate-name={}", c.name),
+            format!("--edition={}", c.edition),
+        ];
+        for option in &c.cfg {
+            command.extend(["--cfg".to_string(), option.clone()]);
+        }
+        command.extend(["-L".to_string(), format!("dependency={}", c.dir.display())]);
+        command.extend(["--extern".to_string(), format!("{}={}", c.name, output.display())]);
+        command.push(c.path.display().to_string());
+        Custom {
+            name: format!("{}-doc", c.name),
+            name_span: c.name_span,
+            inputs: vec![output, c.path.clone()],
+            depends: c.depends.clone(),
+            command,
+            program: None,
+            kind: CustomKind::Test { runner: None, harness: false, rustdoc: true, on_workers: None, run },
+            tags,
+            running: Running { env: c.env.clone(), ..Running::default() },
+            cache: None,
+        }
+    }
+    /// Give the test of each library's documentation the crates the library uses, each with `--extern` before its
+    /// root, now that they are declared, and have them built first.
+    pub(super) fn add_doctest_uses(&mut self) {
+        for key in self.crate_keys() {
+            let c = &self.crates[&key];
+            let Some(&index) = self.tests_idx.get(&format!("{}-doc", c.name)).filter(|_| c.doctest) else {
+                continue;
+            };
+            // unless another test had its name
+            let declared = self.customs[index].name_span;
+            if (declared.file, declared.offset) != (c.name_span.file, c.name_span.offset) {
+                continue;
+            }
+            let mut externs = Vec::new();
+            let mut inputs = Vec::new();
+            for used in &c.uses {
+                // a library of C is linked, not given with `--extern`
+                if let Some(dep) = self.crates.get(&(used.name.clone(), c.target.clone())) {
+                    externs.extend(["--extern".to_string(), format!("{}={}", dep.name, dep.output().display())]);
+                    inputs.push(dep.output());
+                }
+            }
+            let test = &mut self.customs[index];
+            let root = test.command.pop();
+            test.command.extend(externs);
+            test.command.extend(root);
+            test.inputs.extend(inputs);
+        }
     }
     /// Complete the tests of the crates with a `test` attribute, which were forward declared, now that the runner of
     /// each target is known. A test is kept if its target allows tests, which a builtin target does by default if the
@@ -487,7 +559,8 @@ impl Project {
                 if on_workers.is_some() {
                     self.customs[declared].running.worker_tags = worker_tags;
                 }
-                self.customs[declared].kind = CustomKind::Test { runner, harness: true, on_workers, run };
+                let rustdoc = false;
+                self.customs[declared].kind = CustomKind::Test { runner, harness: true, rustdoc, on_workers, run };
             }
         }
         if !removed.is_empty() {
