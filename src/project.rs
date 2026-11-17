@@ -283,11 +283,11 @@ impl Project {
         self.values.push(value);
         id
     }
+    /// Returns the value of a property, or of a local, where a statement in `file` reads it. A builtin property
+    /// which was renamed is read by its old name too.
     fn value(&self, name: &str, file: usize) -> Option<&Value> {
-        let mut idx = self.files[file].locals.get(name);
-        if idx.is_none() {
-            idx = self.values_idx.get(name);
-        }
+        let idx = self.files[file].locals.get(name);
+        let idx = idx.or_else(|| self.values_idx.get(self.renamed(name).unwrap_or(name)));
         Some(&self.values[*idx?])
     }
     /// Returns the names of the properties which are declared, in no order.
@@ -344,24 +344,26 @@ impl Project {
             data => vec![data.coerce_string()],
         }
     }
-    /// Returns the values of the cache's properties, `cache/dir`, `cache/size`, `cache/remote`, `cache/push`,
-    /// `cache/token-file`, `workers`, `workers-only` and `download`.
+    /// Returns the values of the settings of the cache and the workers, as [`crate::cache::SETTINGS`] lists them.
     pub fn cache_properties(&self) -> crate::cache::Properties {
-        let value = |name: &str| self.values_idx.get(name).map(|&value| &self.values[value].data);
-        let string = |name: &str| value(name).map(Data::coerce_string).unwrap_or_default();
+        use crate::cache::{DIR, DOWNLOAD, PUSH, REMOTE, SIZE, TOKEN_FILE, WORKERS, WORKERS_ONLY};
+        let value = |setting: &crate::cache::Setting| {
+            self.values_idx.get(setting.property).map(|&value| &self.values[value].data)
+        };
+        let string = |setting| value(setting).map(Data::coerce_string).unwrap_or_default();
         crate::cache::Properties {
-            dir: string("cache/dir"),
-            size: string("cache/size"),
-            remote: string("cache/remote"),
-            push: matches!(value("cache/push"), Some(Data::Bool(true))),
-            token_file: string("cache/token-file"),
-            workers: match value("workers") {
+            dir: string(&DIR),
+            size: string(&SIZE),
+            remote: string(&REMOTE),
+            push: matches!(value(&PUSH), Some(Data::Bool(true))),
+            token_file: string(&TOKEN_FILE),
+            workers: match value(&WORKERS) {
                 Some(Data::List(workers)) => workers.iter().map(Data::coerce_string).collect(),
                 Some(worker) => vec![worker.coerce_string()],
                 None => Vec::new(),
             },
-            workers_only: matches!(value("workers-only"), Some(Data::Bool(true))),
-            download: string("download"),
+            workers_only: matches!(value(&WORKERS_ONLY), Some(Data::Bool(true))),
+            download: string(&DOWNLOAD),
         }
     }
     /// The directory `jig install` installs in by default, which is the value of the builtin `install-prefix` property.

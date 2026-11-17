@@ -177,6 +177,21 @@ impl Project {
     }
     /// Give a property a value, as `set` does, returning whether it was given.
     pub(super) fn set_property(&mut self, ident: &str, span: Span, operand: Operand) -> bool {
+        // a builtin property which was renamed is set by the name it has now, with a note
+        let ident = match self.renamed(ident) {
+            Some(now) => {
+                self.diagnostics.push(Diagnostic {
+                    span: Some(span),
+                    message: Message::RenamedProperty { old: ident.into(), now },
+                    severity: Severity::Note,
+                });
+                now
+            },
+            None => ident,
+        };
+        if !self.check_setting(ident, &operand) {
+            return false;
+        }
         // the severity of a diagnostic must be one it can be overridden to
         if ident.starts_with("diagnostic/") && let Data::Str(severity) = &operand.data && severity_override(severity).is_none() {
             self.diagnostics.push(Diagnostic {
@@ -222,6 +237,40 @@ impl Project {
             local: false,
         };
         self.assign(ident, value)
+    }
+    /// Returns the name a builtin property has now, if `name` is its old name, unless the project declared a property
+    /// of that name itself.
+    pub(super) fn renamed(&self, name: &str) -> Option<&'static str> {
+        let declared = self.properties_idx.get(name).is_some_and(|&id| self.properties[id].is_some());
+        crate::cache::renamed(name).filter(|_| !declared)
+    }
+    /// Check the value a setting of the cache or the workers is given, and report it if it is not what the setting can
+    /// be, returning whether it is. A setting which one of its variables overrides is not checked, as the variable's
+    /// value is used, and is checked when the settings are resolved.
+    fn check_setting(&mut self, name: &str, operand: &Operand) -> bool {
+        let Some(setting) = crate::cache::SETTINGS.into_iter().find(|setting| setting.property == name) else {
+            return true;
+        };
+        if setting.read(&mut |variable| self.read_env(variable)).is_some() {
+            return true;
+        }
+        // the workers are a list, while the others are a `str`, and a value of another type is reported by its type
+        let values = match &operand.data {
+            Data::List(items) => items.iter().map(Data::coerce_string).collect(),
+            Data::Str(value) => vec![value.clone()],
+            _ => return true,
+        };
+        for value in values {
+            if let Some(expected) = crate::cache::invalid(setting, &value) {
+                self.diagnostics.push(Diagnostic {
+                    span: Some(operand.span),
+                    message: Message::InvalidSetting { name: setting.property, value, expected },
+                    severity: Severity::Error,
+                });
+                return false;
+            }
+        }
+        true
     }
     /// Assign a value to a property, unless it does not have the property's type, returning whether it was assigned.
     ///

@@ -140,6 +140,8 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "undeclared-property",
     "redeclare-property",
     "read-only-property",
+    "renamed-property",
+    "invalid-setting",
     "unknown-declaration-attribute",
     "unknown-crate-attribute",
     "unknown-attribute",
@@ -290,6 +292,17 @@ pub enum Message {
         id: usize,
         name: String,
         builtin: bool,
+    },
+    /// A property which was renamed is set by its old name, which sets the property it was renamed to.
+    RenamedProperty {
+        old: String,
+        now: &'static str,
+    },
+    /// A setting of the cache or the workers which is not what it can be, as [`crate::cache::invalid`] says.
+    InvalidSetting {
+        name: &'static str,
+        value: String,
+        expected: &'static str,
     },
     ReadOnlyProperty {
         id: usize,
@@ -557,6 +570,12 @@ impl core::fmt::Display for Message {
             },
             Self::RedeclareProperty { name, builtin: false, .. } => write!(f, "redeclaration of property {name:?}"),
             Self::RedeclareProperty { name, builtin: true, .. } => write!(f, "redeclaration of builtin property {name:?}"),
+            Self::RenamedProperty { old, now } => {
+                write!(f, "`{old}` is now `{now}`, which it sets; the old name will be removed")
+            },
+            Self::InvalidSetting { name, value, expected } => {
+                write!(f, "`{name}` is {value:?}, which is not {expected}")
+            },
             Self::ReadOnlyProperty { name, builtin: false, .. } => write!(f, "cannot set read-only property {name:?}"),
             Self::ReadOnlyProperty { name, builtin: true, .. } => write!(f, "cannot set read-only builtin property {name:?}"),
             Self::UnknownDeclarationAttribute { name, .. } => write!(f, "unknown declare attribute {name:?}"),
@@ -765,6 +784,8 @@ impl Message {
             Self::ExpectedExact { .. } => "expected-exact",
             Self::UndeclaredProperty { .. } => "undeclared-property",
             Self::RedeclareProperty { .. } => "redeclare-property",
+            Self::RenamedProperty { .. } => "renamed-property",
+            Self::InvalidSetting { .. } => "invalid-setting",
             Self::ReadOnlyProperty { .. } => "read-only-property",
             Self::UnknownDeclarationAttribute { .. } => "unknown-declaration-attribute",
             Self::UnknownCrateAttribute { .. } => "unknown-crate-attribute",
