@@ -12,6 +12,7 @@ mod database;
 #[cfg(test)]
 mod differential;
 mod doc;
+mod fmt;
 mod generate;
 mod install;
 mod lint;
@@ -94,6 +95,8 @@ commands:
     doc [--open] [<name> ...]
                          document the crates with `doc`, or only those named, with rustdoc, and show where the first
                          page of each is, opening the first in the browser with `--open`
+    fmt [--check]        format the crates which are edited with rustfmt, and the sources of C and C++ with
+                         clang-format, if it is installed, or with `--check`, fail if one is not formatted
     cache stats|gc [--max-size <size>]|clear
                          show what rig's cache holds, remove what was used longest ago until it is no larger than a
                          size, `cache/size` or 10 GiB by default, as is done after a build once a day, or remove
@@ -204,6 +207,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         "worker" => cache::worker(&args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "workers" => cache::workers(&user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "graph" => show_graph::show(args.flag("json"), &args.names()).map(|()| ExitCode::SUCCESS),
+        "fmt" => fmt::fmt(args.flag("check")).map(|()| ExitCode::SUCCESS),
         "doc" => doc::doc(&args.names(), args.flag("open"), args.build()?).map(|()| ExitCode::SUCCESS),
         "lint" => lint::lint(&args.names(), args.flag("deny-warnings"), args.build()?).map(|()| ExitCode::SUCCESS),
         "install" => {
@@ -274,7 +278,7 @@ const fn spec(name: &'static str, options: &'static [Opt], builds: bool, operand
 }
 
 /// Every command's [`Spec`], but for `jig build --proxy`, which the wrappers it installs run.
-const SPECS: [Spec; 16] = [
+const SPECS: [Spec; 17] = [
     spec("generate", &[], false, Some(1)),
     spec("build", &[switch("dry-run", Some('n')), VERBOSE], true, None),
     spec("clean", &[], false, None),
@@ -283,6 +287,7 @@ const SPECS: [Spec; 16] = [
     Spec { passes_on: true, ..spec("run", &[], true, Some(1)) },
     spec("lint", &[switch("deny-warnings", Some('D'))], true, None),
     spec("doc", &[switch("open", None)], true, None),
+    spec("fmt", &[switch("check", None)], false, Some(0)),
     spec("install", &[switch("proxy", None)], true, Some(1)),
     spec("cache", &[valued("max-size", None, "size")], false, Some(1)),
     spec("serve", &[STDIO, LISTEN, TOKEN_FILE, switch("push", None)], false, Some(0)),
@@ -758,6 +763,8 @@ enum Error {
     UnknownDoc(String),
     /// `jig doc` without names, in a project which documents no crate.
     NoDocs,
+    /// `jig fmt --check` found files which are not formatted, or a formatter failed.
+    NotFormatted,
     UnknownProgram(String, Vec<String>),
     /// A program to run was not named, though there are several, or a name is that of crates for several targets.
     ProgramNotChosen(Vec<String>),
@@ -841,6 +848,7 @@ impl core::fmt::Display for Error {
             Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
             Self::UnknownDoc(name) => write!(f, "no crate to document named {name:?}, as only a crate with `doc` is"),
             Self::NoDocs => write!(f, "no crate to document, as none has `doc`"),
+            Self::NotFormatted => write!(f, "the sources are not formatted, or could not be"),
             Self::UnknownProgram(name, names) => write!(f, "no program named {name:?}, of {}", names.join(", ")),
             Self::ProgramNotChosen(names) => write!(f, "choose the program to run, of {}", names.join(", ")),
             Self::NoPrograms => write!(f, "no binary crate to run"),

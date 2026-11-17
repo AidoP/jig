@@ -1326,6 +1326,26 @@ fn write_database(
             library_path.push(dir);
         }
     }
+    // what `jig fmt` formats: the files of the project, but not those the build writes, nor the toolchain's
+    let in_project = |path: &Path| {
+        let path = normalize(&at.root, path);
+        let inside = path.starts_with(&at.root) && !path.starts_with(&at.build_dir);
+        inside.then(|| path.strip_prefix(&at.root).unwrap_or(&path).display().to_string())
+    };
+    let mut rust_roots: Vec<String> = Vec::new();
+    for root in units.iter().filter(|unit| unit.member).filter_map(|unit| in_project(&unit.root)) {
+        if !rust_roots.contains(&root) {
+            rust_roots.push(root);
+        }
+    }
+    let mut c_sources: Vec<String> = Vec::new();
+    let sources = project.natives().into_iter().flat_map(|native| &native.sources);
+    let formatted = sources.filter(|source| source.language != crate::project::Language::Assembly);
+    for source in formatted.filter_map(|source| in_project(&source.path)) {
+        if !c_sources.contains(&source) {
+            c_sources.push(source);
+        }
+    }
     let test_tags = project.test_tags();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets = installed.iter().map(|file| rig_graph::path_string(&at.path(&file.path)));
@@ -1356,6 +1376,8 @@ fn write_database(
         rustc_targets: rustc.targets.iter().map(String::as_str).collect(),
         rustc_verbose_version: &rustc.verbose_version,
         library_path: library_path.iter().map(String::as_str).collect(),
+        rust_roots: rust_roots.iter().map(String::as_str).collect(),
+        c_sources: c_sources.iter().map(String::as_str).collect(),
         ..Default::default()
     };
     for (unit, diagnostics) in units.iter().zip(&diagnostics) {
