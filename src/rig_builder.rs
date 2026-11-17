@@ -42,8 +42,6 @@ pub struct Tests {
     pub given: HashMap<String, rig::exec::Given>,
     /// What each test which ran printed, how it finished, and how long it ran.
     pub finished: HashMap<String, (rig::exec::Outcome, Vec<u8>, std::time::Duration)>,
-    /// How many of the other edges failed, as what the tests need.
-    pub others_failed: usize,
 }
 
 /// An observer which collects what the edges of tests print and how they finish, rather than passing them on, and
@@ -75,9 +73,6 @@ impl rig::exec::Observer for Collecting<'_> {
     ) {
         let took = self.started.remove(&edge).map(|started| started.elapsed()).unwrap_or_default();
         if !self.is_test(graph, edge) {
-            if !outcome.succeeded() && !matches!(outcome, rig::exec::Outcome::Interrupted) {
-                self.tests.borrow_mut().others_failed += 1;
-            }
             return self.inner.finished(graph, edge, outcome, output, progress);
         }
         let first = graph.path(graph.edge(edge).outputs()[0]).to_string();

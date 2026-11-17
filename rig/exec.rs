@@ -281,6 +281,8 @@ struct Job {
     action: Exec,
     /// Whether the edge is in the console pool.
     console: bool,
+    /// Whether the edge is given the jobserver rig created, which it is unless it runs always.
+    shares: bool,
     /// Where the edge's result is looked for in the cache. If it is found, it is restored and the action does not run.
     lookup: Option<Lookup>,
     /// The variables a hermetic edge inherits, or `None` if it inherits every one.
@@ -1122,7 +1124,7 @@ impl Run<'_, '_> {
             move || {
                 // the lock is held while waiting for a job, so the threads take jobs one at a time
                 while let Ok(Ok(job)) = work.lock().map(|work| work.recv()) {
-                    let Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp } = job;
+                    let Job { index, action, console, shares, lookup, inherit, dispatch, mark, early, fetch, stamp } = job;
                     let start = SystemTime::now();
                     let clock = Instant::now();
                     // a result which cannot be restored, as when the cache is corrupted, is a miss: the action runs
@@ -1175,7 +1177,7 @@ impl Run<'_, '_> {
                     if let Some(dispatch) = dispatch.as_ref().filter(|_| given_back) {
                         let mark = dispatch.mark().filter(|_| failed_there);
                         let (lookup, dispatch) = (None, None);
-                        let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp };
+                        let job = Job { index, action, console, shares, lookup, inherit, dispatch, mark, early, fetch, stamp };
                         let _ = sender.send(Message::Returned(Box::new(job)));
                         continue;
                     }
@@ -1197,6 +1199,7 @@ impl Run<'_, '_> {
                             let _ = sender.send(Message::Spawned(index, pid));
                         };
                         let reports: Option<&dyn Fn(&str)> = early.as_ref().map(|_| &reported as &dyn Fn(&str));
+                        let makeflags = makeflags.filter(|_| shares);
                         let environment = Environment { makeflags, env, inherit: inherit.as_deref(), reports };
                         ran_here = true;
                         run_command(&action, dir, console, &environment, &spawned)
@@ -1332,6 +1335,9 @@ impl Run<'_, '_> {
                     }
                     self.start(index, observer);
                     let console = self.graph.edge(self.edges[index]).pool() == Pool::Console;
+                    // A test, which an edge that runs always usually is, does not share the build's jobs, as one
+                    // which counts on running its own at once would wait for them.
+                    let shares = !self.graph.edge(self.edges[index]).always();
                     let action = self.given_action(index);
                     let lookup = self.lookup(index);
                     let edge = self.graph.edge(self.edges[index]);
@@ -1361,7 +1367,7 @@ impl Run<'_, '_> {
                     let early = self.early_outputs(index);
                     let fetch = self.remote_inputs(index);
                     let (mark, stamp) = (None, self.stamp_outputs(index));
-                    let job = Job { index, action, console, lookup, inherit, dispatch, mark, early, fetch, stamp };
+                    let job = Job { index, action, console, shares, lookup, inherit, dispatch, mark, early, fetch, stamp };
                     let _ = jobs.send(job);
                 }
                 // the build goes on while an edge waits for a worker which is connecting
@@ -4311,6 +4317,18 @@ mod tests {
         if std::env::var_os("MAKEFLAGS").is_none() {
             build.ran(&[]);
             assert_eq!(build.read("a"), "unset\n");
+        }
+        // nor is an edge which runs always given the one rig creates, while the others are
+        let graph = crate::testing::graph()
+            .rule("check", &[("command", "getenv MAKEFLAGS > $out")])
+            .rule("test", &[("command", "getenv MAKEFLAGS > $out"), ("always", "")])
+            .edge("check", &["a"], &[])
+            .edge("test", &["t"], &[]);
+        let mut build = Build::new("always-no-jobserver", graph.finish(), &[]);
+        if std::env::var_os("MAKEFLAGS").is_none() && std::env::var_os("CARGO_MAKEFLAGS").is_none() {
+            build.ran(&[]);
+            assert_ne!(build.read("a"), "unset\n");
+            assert_eq!(build.read("t"), "unset\n");
         }
     }
 }

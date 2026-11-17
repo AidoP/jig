@@ -580,6 +580,11 @@ impl Executor {
             ran
         });
         let timed_out = timed_out.load(Ordering::SeqCst) && !outcome.succeeded();
+        // why it could not run is sent with what it printed, as the client sees only that it failed
+        let mut printed = printed;
+        if let crate::exec::Outcome::Error(why) = &outcome {
+            printed.extend(format!("{why}\n").into_bytes());
+        }
         let mut outputs = Vec::new();
         for path in &request.outputs {
             let full = build.join(path);
@@ -891,7 +896,7 @@ mod tests {
         assert!(!alive());
         // an action which finishes in time is not taken as timed out, even when it fails
         let action = crate::test_helper::exec(crate::test_helper::words("exit 3"));
-        let request = Request { action, timeout: Some(Duration::from_secs(60)), ..request };
+        let request = Request { action, timeout: Some(Duration::from_mins(1)), ..request };
         let executed = executor.execute(&cache, &request).unwrap();
         assert!(!executed.succeeded && !executed.timed_out);
         let _ = std::fs::remove_dir_all(&dir);

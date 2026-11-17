@@ -436,8 +436,9 @@ impl Project {
                 let test = &self.customs[index];
                 (test.name_span.file, test.name_span.offset) == (span.file, span.offset)
             });
-            let target = c.target.clone();
-            // a test which runs on a worker is run there directly, as the worker runs its target
+            let (target, worker_tags) = (c.target.clone(), c.worker_tags.clone());
+            // a test which runs on a worker is run there directly, as the worker runs its target, on a worker with
+            // the crate's tags
             let on_workers = self.tests_on_workers(&target).then(|| target.clone());
             let runner = match self.target(&target).map(|target| target.runner) {
                 _ if on_workers.is_some() => None,
@@ -459,6 +460,9 @@ impl Project {
             };
             if let Some(declared) = declared {
                 let run = self.customs[declared].test_run().cloned().unwrap_or_default();
+                if on_workers.is_some() {
+                    self.customs[declared].running.worker_tags = worker_tags;
+                }
                 self.customs[declared].kind = CustomKind::Test { runner, harness: true, on_workers, run };
             }
         }

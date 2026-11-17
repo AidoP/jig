@@ -37,7 +37,8 @@ An edge runs a command, or is an alias, which runs nothing and is up to date onc
 - **the variables it passes on,** of those it inherits, which are its inputs (see [environment
   variables](environment.md));
 - **its placement:** whether a toolchain of the same release on another host may run it, the target whose standard
-  library it needs, and the tags a worker must have (see [workers](workers.md));
+  library it needs, the tags a worker must have, and for an edge which runs only on workers, the target a worker's
+  host must run (see [workers](workers.md));
 - **a discovery command,** which writes its depfile without doing its work, as rustc with `--emit=dep-info`, so that
   an edge which hasn't run can be sent to a worker with the inputs it reads.
 

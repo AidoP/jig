@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 33;
+const VERSION: u32 = 34;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -102,22 +102,13 @@ pub struct Flycheck<'a> {
 /// A test, which passes if its command succeeds.
 #[derive(Debug, PartialEq)]
 pub struct Test<'a> {
+    /// Its name, which is also the name of the edge which runs it, as `generate::test_run` gives it.
     pub name: &'a str,
-    /// The program and its arguments, run from the project root.
-    pub command: Vec<&'a str>,
     /// Whether the program is a test harness built by libtest and run directly, so that it takes libtest's
     /// arguments, such as `--color`.
     pub libtest: bool,
     /// The tags of the test, by which `jig test` chooses it.
     pub tags: Vec<&'a str>,
-    /// For a crate's test harness which runs on a worker: its target, which the worker must be able to run. Empty
-    /// for a test which runs here.
-    pub on_workers: &'a str,
-    /// The files sent to a worker which runs the test, relative to the project root: its harness, and what it
-    /// depends on.
-    pub inputs: Vec<&'a str>,
-    /// The environment variables the test runs with, beside those it inherits, by their names.
-    pub env: Vec<(&'a str, &'a str)>,
 }
 
 /// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
@@ -216,13 +207,8 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.len(database.tests.len());
     for test in &database.tests {
         w.str(test.name);
-        w.strs(&test.command);
         w.u32(u32::from(test.libtest));
         w.strs(&test.tags);
-        w.str(test.on_workers);
-        w.strs(&test.inputs);
-        w.strs(&test.env.iter().map(|&(name, _)| name).collect::<Vec<_>>());
-        w.strs(&test.env.iter().map(|&(_, value)| value).collect::<Vec<_>>());
     }
     w.len(database.lints.len());
     for lint in &database.lints {
@@ -290,14 +276,8 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
         database.flychecks.push(Flycheck { label: r.str()?, diagnostics: r.str()?, member: flag(&mut r)?, deps: r.list(Reader::u32)? });
     }
     for _ in 0..r.u32()? {
-        let (name, command, libtest, tags) = (r.str()?, r.strs()?, flag(&mut r)?, r.strs()?);
-        let (on_workers, inputs) = (r.str()?, r.strs()?);
-        let (names, values) = (r.strs()?, r.strs()?);
-        if names.len() != values.len() {
-            return None;
-        }
-        let env = names.into_iter().zip(values).collect();
-        database.tests.push(Test { name, command, libtest, tags, on_workers, inputs, env });
+        let (name, libtest, tags) = (r.str()?, flag(&mut r)?, r.strs()?);
+        database.tests.push(Test { name, libtest, tags });
     }
     for _ in 0..r.u32()? {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
@@ -375,24 +355,8 @@ mod tests {
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
             ],
             tests: vec![
-                Test {
-                    name: "unit",
-                    command: vec!["./run", "a b"],
-                    libtest: false,
-                    tags: vec!["slow", "io"],
-                    on_workers: "",
-                    inputs: vec![],
-                    env: vec![("MODE", "fast"), ("EMPTY", "")],
-                },
-                Test {
-                    name: "app",
-                    command: vec!["./build/riscv64/test/app"],
-                    libtest: true,
-                    tags: vec![],
-                    on_workers: "riscv64",
-                    inputs: vec!["build/riscv64/test/app", "data/input"],
-                    env: vec![],
-                },
+                Test { name: "unit", libtest: false, tags: vec!["slow", "io"] },
+                Test { name: "app", libtest: true, tags: vec![] },
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             programs: vec![
@@ -424,7 +388,7 @@ mod tests {
         assert_eq!(read(b"{\"crates\"").unwrap_err().kind(), std::io::ErrorKind::InvalidData);
         // truncated
         let mut bytes = Vec::new();
-        let test = Test { name: "x", command: vec![], libtest: false, tags: vec![], on_workers: "", inputs: vec![], env: vec![] };
+        let test = Test { name: "x", libtest: false, tags: vec![] };
         let tests = vec![test];
         write(&mut bytes, &Database { tests, ..Default::default() }).unwrap();
         assert_eq!(read(&bytes[..bytes.len() - 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
@@ -444,10 +408,7 @@ mod benches {
                 let deps = if i > 0 { vec![i as u32 - 1, 0] } else { vec![] };
                 Flycheck { label, diagnostics, member: true, deps }
             }).collect();
-            let test = |label| {
-                let command = vec![label, "--quiet"];
-                Test { name: label, command, libtest: true, tags: vec![], on_workers: "", inputs: vec![], env: vec![] }
-            };
+            let test = |label| Test { name: label, libtest: true, tags: vec![] };
             let tests = labels[..n].iter().map(|(label, _)| test(label.as_str())).collect();
             Database { flychecks, tests, ..Default::default() }
         };

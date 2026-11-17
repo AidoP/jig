@@ -50,7 +50,8 @@ test runs in the process group rig gives every command. Beside the plan:
   anything else running.
 - `pass-env` is left out of a test, as a test inherits every variable `jig test` has, and is never cached, so which
   ones it reads changes nothing.
-- A timeout, and a process group, are only those of a test which runs here. One sent to a worker runs as before.
+- A timeout, and a process group, were at first only those of a test which runs here; 1d gives them to a test on a
+  worker too.
 - A test runs while rig holds the build's state, so a test which builds the same project with jig cannot, where it
   could when `jig test` ran the tests after the build.
 - The results are shown once the build is done, rather than as each test finishes, as the build's console shows the
@@ -59,7 +60,7 @@ test runs in the process group rig gives every command. Beside the plan:
 ### 1c: tests as edges which run always (done)
 
 Each test becomes an edge of rig's graph, which `jig test` builds with what the test needs, so that tests run in the
-build's jobs, with its jobserver, as soon as what each needs is built. A test is generally not pure, as it reads files,
+build's jobs as soon as what each needs is built. A test is generally not pure, as it reads files,
 the clock, the network and the machine beyond what it declares, so its edge runs `always`: it runs every time it is
 wanted, and is never cached, nor skipped as up to date.
 
@@ -74,6 +75,25 @@ wanted, and is never cached, nor skipped as up to date.
   the edge's action, which a cached or recorded edge's must be.
 - A failed test does not stop the build, which goes on with `-k 0`, and what each test printed and how it finished
   are collected by an observer, which shows the build's console only that it ran.
+- An edge which runs always isn't given the jobserver rig creates, as cargo gives none to a test: rig's own tests,
+  which count on their builds running edges at once, waited for tokens the tests around them held.
+
+### 1d: tests on workers as edges (done)
+
+A test sent to a worker was sent by `jig test` itself once the build was done, apart from the build: it was not shown
+running, took no timeout, ignored `serial` and the crate's `worker-tag`, and every test of a target went to the first
+worker which ran it. It is now a `test-run/<name>` edge too, placed to run only on workers:
+
+- rig's placement gains `runs`, the target a worker's host must run. Such an edge never runs here: it is sent, without
+  a toolchain, to a worker whose host runs the target, by `runs_on`, which moved from `jig test` into rig, and which
+  has its tags, spread over the workers which run it. A failure there is its outcome, `failed on <worker>`, with what
+  it printed, rather than a reason to run it here, and one which no worker runs fails with what each worker runs.
+- A request to a worker carries the edge's timeout, which the worker enforces on the command's process group, and the
+  reply says whether it timed out. A worker is named as `workers/list` gives it, for the messages.
+- A test's harness is given by the absolute path of the build directory, which rig sends as its marker, as a worker's
+  build directory is not `build` beside the project root.
+- The database keeps only a test's name, tags and whether it is a test harness: its command, variables, inputs and
+  target are the edge's.
 
 ## Phase 2: the command line (done)
 

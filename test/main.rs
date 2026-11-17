@@ -2309,16 +2309,25 @@ fn tests_on_workers() {
     let worker = format!("{ENV} JIG_CACHE_DIR={store} {jig} worker --stdio --jobs 2");
     let passing = "#[test]\nfn reads() { assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"sent\\n\"); }\n";
     let failing = "#[test]\nfn fails() { panic!(\"on the worker\") }\n";
+    let stuck = "#[test]\nfn stuck() { std::thread::sleep(std::time::Duration::from_secs(120)) }\n";
     let project = Project::new("tests-on-workers", &[
         (
             "Jig",
             "target {host-target}\n    override\n    test 'workers'\ncrate passing 'passing.rs'\n    test\n    \
-             depends 'data.txt'\ncrate failing 'failing.rs'\n    test\n",
+             depends 'data.txt'\ncrate failing 'failing.rs'\n    test\ncrate stuck 'stuck.rs'\n    test\n    \
+             timeout '0.5'\ncrate tagged 'tagged.rs'\n    test\n    worker-tag 'gpu'\n",
         ),
         ("passing.rs", passing),
         ("failing.rs", failing),
+        ("stuck.rs", stuck),
+        ("tagged.rs", "#[test]\nfn t() {}\n"),
         ("data.txt", "sent\n"),
     ]);
+    // each is an edge which runs only on a worker whose host runs its target, with the crate's worker tags
+    let output = project.configure().ok();
+    let host = project.host();
+    assert_contains(output.build("test-run/passing"), &format!("\n    runs-on = {host}\n"));
+    assert_contains(output.build("test-run/tagged"), "\n    tags = gpu\n");
     let test = |workers: &str| {
         let mut command = jig_command();
         command.args(["test", "--verbose"]).env("JIG_CACHE_DIR", dir.join("local")).env("JIG_WORKERS_LIST", workers);
@@ -2331,6 +2340,10 @@ fn tests_on_workers() {
     assert_contains(&shown, "test failing ... FAILED");
     assert_contains(&shown, &format!("failed on {worker}"));
     assert_contains(&shown, "on the worker");
+    // the worker kills what runs longer than its timeout, and none of them has the tag
+    assert_contains(&shown, "test stuck   ... FAILED");
+    assert_contains(&shown, "timed out after 0.50s");
+    assert_contains(&shown, &format!("no worker runs {host}, as {worker} lacks the tags gpu"));
     let sent = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", &store).output().unwrap();
     assert!(!String::from_utf8(sent.stdout).unwrap().contains("and 0 blobs"));
     // without a worker, they cannot run
@@ -5639,24 +5652,14 @@ target wrapped
     // a runner can be what is built, such as the output of a custom command, which is built first
     assert_contains(&output.graph, "\ntest/app@wrapped\n    alias = wrapped/test/app wrap.sh\n");
     assert_contains(&output.graph, &format!("\ntest/app\n    alias = {host}/test/app{EXE}\n"));
-    // the runner runs the harness, which is its last argument, while without one the harness runs directly
-    // with the paths jig joins, which have `\\` on Windows, as with `/`, as on Unix, as each is a byte
-    let mut database = std::fs::read(project.dir.join(".jig")).unwrap();
-    if cfg!(windows) {
-        database.iter_mut().filter(|byte| **byte == b'\\').for_each(|byte| *byte = b'/');
-    }
-    let strings = |strings: &[&str]| {
-        let mut bytes = (strings.len() as u32).to_le_bytes().to_vec();
-        for s in strings {
-            bytes.extend((s.len() as u32).to_le_bytes());
-            bytes.extend(s.as_bytes());
-        }
-        bytes
-    };
-    let contains = |needle: &[u8]| database.windows(needle.len()).any(|window| window == needle);
-    assert!(contains(&strings(&["./run.sh", "-m", "virt", "./build/vm/test/app"])));
-    assert!(contains(&strings(&["./build/plain/test/app"])));
-    assert!(contains(&strings(&["./build/wrap.sh", "--fast", "./build/wrapped/test/app"])));
+    // the runner runs the harness, which is its last argument, while without one the harness runs directly, from
+    // the project root
+    let command = |test: &str| format!("{} ", output.build(&format!("test-run/{test}")).lines().find_map(|line| {
+        line.strip_prefix("    command = ")
+    }).unwrap_or_default());
+    assert_contains(&command("app@vm"), "cd .. && ./run.sh -m virt ./build/vm/test/app ");
+    assert_contains(&command("app@plain"), "cd .. && ./build/plain/test/app ");
+    assert_contains(&command("app@wrapped"), "cd .. && ./build/wrap.sh --fast ./build/wrapped/test/app ");
 }
 
 #[test]

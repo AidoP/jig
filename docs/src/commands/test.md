@@ -7,28 +7,29 @@ named, whatever their tags, or chosen by tag with `--tag`, which can be repeated
 tests run in the order they are named, followed by the others, in the order they were declared. A name or tag which no
 test has is an error, as is an option it does not have. Options may follow the names.
 
-Each test which runs here is a command of rig's graph, `test-run/<name>`, which runs always: it runs every time it
-is asked for, as a test's result may depend on more than it declares, such as the clock or the network, and is never
-cached. So the tests run in the build which builds what they need, in its jobs, each as soon as what it needs is
-built, and the build shows each running as `TEST <name>`. What a test prints is kept rather than shown by the build,
-and the results are shown once the build is done, in the order the tests were chosen, whatever order they ran in.
-A test whose inputs fail to build isn't run, and fails. The tests a [worker](../workers.md) runs are sent once what
-they need is built.
+Each test is a command of rig's graph, `test-run/<name>`, which runs always: it runs every time it is asked for, as a
+test's result may depend on more than it declares, such as the clock or the network, and is never cached. So the tests
+run in the build which builds what they need, in its jobs, each as soon as what it needs is built, and the build shows
+each running as `TEST <name>`. A test which runs on [workers](../workers.md) is sent to one in the same way, and never
+runs here. What a test prints is kept rather than shown by the build, and the results are shown once the build is
+done, in the order the tests were chosen, whatever order they ran in. A test whose inputs fail to build isn't run, and
+fails.
 
 - `-j <jobs>` builds and tests with as many jobs, which are as many as the machine runs at once, and two more, by
   default. A test which must not run beside others, as it times what it runs, or writes files others read, is
   `serial`, and runs with nothing else running.
 - `-k <failures>` and `-q` are those of [jig build](build.md), while `-v` shows the output of the tests rather than the
   commands of the build. The build goes on after a failure, so that every test which can run does.
-- `--timeout <seconds>` replaces the timeout of every test which runs here, which may be a fraction, such as `0.5`.
+- `--timeout <seconds>` replaces the timeout of every test, which may be a fraction, such as `0.5`.
 - The arguments after `--` are given to each test which runs, after its own, such as a filter for the tests of a
   crate's test harness, as in `jig test app -- parser::`.
 
 A test's `timeout`, or the `test-timeout` property where it is declared, is how long it may run before it is killed,
 with every process it started, as each test runs in a process group of its own, or a job object on Windows. It then
-fails, showing `timed out after <seconds>s` before what it printed until then. A test has no timeout unless one is
-given. A test runs with the variables of its `env`, beside those `jig test` inherits, and the directories of the
-project's [shared libraries](../language/shared-libraries.md) before the platform's search path of them.
+fails, showing `timed out after <seconds>s` before what it printed until then. A worker enforces a test's timeout in
+the same way. A test has no timeout unless one is given. A test runs with the variables of its `env`, beside those
+`jig test` inherits, and the directories of the project's [shared libraries](../language/shared-libraries.md) before the
+platform's search path of them. It isn't given the build's jobserver, as cargo's tests aren't.
 
 A test runs while rig holds the build's state, so a test which builds the same project with jig fails to, while one
 which builds another project, in a directory of its own, can.
