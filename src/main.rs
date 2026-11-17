@@ -11,6 +11,7 @@ mod configured;
 mod database;
 #[cfg(test)]
 mod differential;
+mod doc;
 mod generate;
 mod install;
 mod lint;
@@ -61,7 +62,7 @@ shows on stderr, once the command has finished, how long configuring, building, 
 commands of the build which took longest.
 
 A command takes its options anywhere before `--`, and fails for one it does not take. `-h` or `--help` after any
-command shows this message. `test`, `run`, `lint` and `install` build first, and take the options of `build` which are
+command shows this message. `test`, `run`, `lint`, `doc` and `install` build first, and take the options of `build` which are
 about building: `-j`, `-k` and `-q`.
 
 commands:
@@ -90,6 +91,9 @@ commands:
                          lint the crates which are edited with clippy, or only those named, as the `clippy/<lint>`
                          properties set where they are declared give the levels of the lints, where `-D` or
                          `--deny-warnings` fails if there is a warning
+    doc [--open] [<name> ...]
+                         document the crates with `doc`, or only those named, with rustdoc, and show where the first
+                         page of each is, opening the first in the browser with `--open`
     cache stats|gc [--max-size <size>]|clear
                          show what rig's cache holds, remove what was used longest ago until it is no larger than a
                          size, `cache/size` or 10 GiB by default, as is done after a build once a day, or remove
@@ -200,6 +204,7 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
         "worker" => cache::worker(&args, &user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "workers" => cache::workers(&user_settings(toolchain.as_deref())?).map(|()| ExitCode::SUCCESS),
         "graph" => show_graph::show(args.flag("json"), &args.names()).map(|()| ExitCode::SUCCESS),
+        "doc" => doc::doc(&args.names(), args.flag("open"), args.build()?).map(|()| ExitCode::SUCCESS),
         "lint" => lint::lint(&args.names(), args.flag("deny-warnings"), args.build()?).map(|()| ExitCode::SUCCESS),
         "install" => {
             let prefix = args.operands.first().map(PathBuf::from);
@@ -269,7 +274,7 @@ const fn spec(name: &'static str, options: &'static [Opt], builds: bool, operand
 }
 
 /// Every command's [`Spec`], but for `jig build --proxy`, which the wrappers it installs run.
-const SPECS: [Spec; 15] = [
+const SPECS: [Spec; 16] = [
     spec("generate", &[], false, Some(1)),
     spec("build", &[switch("dry-run", Some('n')), VERBOSE], true, None),
     spec("clean", &[], false, None),
@@ -277,6 +282,7 @@ const SPECS: [Spec; 15] = [
     Spec { passes_on: true, ..spec("test", &[VERBOSE, switch("all", None), TAG, valued("timeout", None, "seconds")], true, None) },
     Spec { passes_on: true, ..spec("run", &[], true, Some(1)) },
     spec("lint", &[switch("deny-warnings", Some('D'))], true, None),
+    spec("doc", &[switch("open", None)], true, None),
     spec("install", &[switch("proxy", None)], true, Some(1)),
     spec("cache", &[valued("max-size", None, "size")], false, Some(1)),
     spec("serve", &[STDIO, LISTEN, TOKEN_FILE, switch("push", None)], false, Some(0)),
@@ -749,6 +755,9 @@ enum Error {
     /// A path which cannot be written to a depfile, as it has a line break.
     LineBreak(std::path::PathBuf, String),
     UnknownLint(String),
+    UnknownDoc(String),
+    /// `jig doc` without names, in a project which documents no crate.
+    NoDocs,
     UnknownProgram(String, Vec<String>),
     /// A program to run was not named, though there are several, or a name is that of crates for several targets.
     ProgramNotChosen(Vec<String>),
@@ -830,6 +839,8 @@ impl core::fmt::Display for Error {
                 write!(f, "cannot write {text:?} to {path:?}, as a depfile cannot have a line break")
             },
             Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
+            Self::UnknownDoc(name) => write!(f, "no crate to document named {name:?}, as only a crate with `doc` is"),
+            Self::NoDocs => write!(f, "no crate to document, as none has `doc`"),
             Self::UnknownProgram(name, names) => write!(f, "no program named {name:?}, of {}", names.join(", ")),
             Self::ProgramNotChosen(names) => write!(f, "choose the program to run, of {}", names.join(", ")),
             Self::NoPrograms => write!(f, "no binary crate to run"),

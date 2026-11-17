@@ -1294,6 +1294,7 @@ fn write_database(
     // the database borrows the paths and commands
     let diagnostics: Vec<_> = units.iter().map(|unit| unit.diagnostics().display().to_string()).collect();
     let lint_diagnostics: Vec<_> = units.iter().map(|unit| unit.lint_diagnostics().display().to_string()).collect();
+    let doc_indices: Vec<_> = units.iter().map(|unit| unit.doc_index().display().to_string()).collect();
 
     // the binary crates, by the name of the crate with its target, as a test is named
     let host = project.host();
@@ -1365,6 +1366,11 @@ fn write_database(
     for (unit, diagnostics) in units.iter().zip(&lint_diagnostics) {
         if let Some(name) = &unit.lint {
             database.lints.push(database::Lint { name, diagnostics });
+        }
+    }
+    for (unit, index) in units.iter().zip(&doc_indices) {
+        if let Some(name) = &unit.doc {
+            database.docs.push(database::Doc { name, index });
         }
     }
     for custom in project.customs.iter().filter(|custom| custom.is_test()) {

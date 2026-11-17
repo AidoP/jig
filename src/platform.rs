@@ -210,6 +210,24 @@ pub fn library_path(root: &std::path::Path, dirs: &[&str]) -> Option<std::ffi::O
     std::env::join_paths(paths).ok()
 }
 
+/// Open a file in the program the desktop opens it with, such as a page in the browser, without waiting for it.
+pub fn open(path: &Path) -> Result<(), crate::Error> {
+    let mut command = if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/c", "start", ""]);
+        command
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command.arg(path);
+    match command.spawn() {
+        Ok(_) => Ok(()),
+        Err(error) => Err(crate::Error::Exec(Box::new(command), error)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
