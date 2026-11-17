@@ -2,7 +2,7 @@
 
 A plan for the places where jig's commands, statements and settings disagree with each other, and for what a project
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
-each statement takes, and of the settings, in November 2026. **Phases 1a, 2, 3 and 4 are done**, and the rest is not started.
+each statement takes, and of the settings, in November 2026. **Phases 1a, 2, 3, 4 and 5 are done**, and the rest is not started.
 
 The phases are ordered by how much each is worth against what it costs, and each stands on its own. A phase which
 changes what a project writes says how what is written today keeps working.
@@ -143,7 +143,7 @@ How it was done: a custom command's `CommandEdge`, in `src/project/customs.rs`, 
 - The depfile is kept with a `depfile` property while the attributes are evaluated, as the outputs are with `output`.
 - `console` is not cached, as rig caches no edge with the terminal, and a test takes none of them.
 
-## Phase 5: settings
+## Phase 5: settings (done)
 
 - The settings of the cache are `cache/dir`, `cache/size`, `cache/remote`, `cache/push` and `cache/token-file`, but
   `workers`, `workers-only` and `download` beside them have no prefix. They become `workers/list`, `workers/only`
@@ -156,6 +156,21 @@ How it was done: a custom command's `CommandEdge`, in `src/project/customs.rs`, 
   has the `tcp://` and `http://` forms and the directory on Windows.
 - A size, remote, worker or `download` which is not valid is a diagnostic where the property was set, when it was
   set by the configuration rather than by a variable.
+
+How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its variables, and `SETTINGS` lists them.
+`Project::set_property` sets a renamed property by its new name, with the note, and checks a setting's value as it
+checks `change-detection`'s, with the error `invalid-setting`. Beside the plan:
+
+- Every variable follows one rule, `JIG_` and the property's name in capitals with `_` for `/` and `-`, so the token
+  file's is `JIG_CACHE_TOKEN_FILE`, rather than `JIG_REMOTE_CACHE_TOKEN_FILE`, and the others are `JIG_CACHE_PUSH`,
+  `JIG_WORKERS_LIST` and `JIG_WORKERS_DOWNLOAD`. An old variable is read only when the new one is not set, so the
+  configuration depends on it only then, and is read without a note, as nothing shows where a variable was set.
+- The old names of the properties are not declared. Setting one sets the new property, and reading one reads it, so
+  `defined(download)` and `{workers}` still work. A project which declares a property of an old name itself keeps
+  it as its own.
+- A value is checked where it is set, rather than once the configuration ends, so a value which is replaced later is
+  still reported. The errors of a variable's value are those of before, which do not name the variable.
+- jig's own tests use the new variables, so that a developer's `JIG_CACHE_DIR` does not replace the tests' cache.
 
 ## Phase 6: commands
 

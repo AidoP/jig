@@ -89,18 +89,18 @@ commands:
                          `--deny-warnings` fails if there is a warning
     cache stats|gc [--max-size <size>]|clear
                          show what rig's cache holds, remove what was used longest ago until it is no larger than a
-                         size, `JIG_CACHE_SIZE` or 10 GiB by default, as is done after a build once a day, or remove
+                         size, `cache/size` or 10 GiB by default, as is done after a build once a day, or remove
                          everything in it
     serve --stdio [--push] | serve --listen <address> --token-file <path> [--push]
                          serve rig's cache on stdin and stdout as a remote cache, as `cache/remote` runs it by ssh, or
                          over TCP at an address, such as `0.0.0.0:7070`, to clients with the token in the file,
                          taking pushes with `--push`
     worker (--stdio | --listen <address> --token-file <path>) [--jobs <n>] [--tag <tag> ...] [--install]
-                         run the cached commands of builds which send them, as the `workers` property runs it by ssh,
+                         run the cached commands of builds which send them, as `workers/list` runs it by ssh,
                          on stdin and stdout, or over TCP at an address, for clients with the token in the file, with
                          rig's cache as its store, and the toolchains rustup has, running as many at once as `--jobs`,
                          reporting its tags, and with `--install`, installing a toolchain a command needs with rustup
-    workers              show the workers of the `workers` property, with their hosts, tags and toolchains
+    workers              show the workers of `workers/list`, with their hosts, tags and toolchains
     graph [--json] [<output> ...]
                          show rig's graph of the project, once it is up to date: each command, headed by its outputs,
                          with its inputs, dependencies and command line, or as JSON with `--json`, or only those of the
@@ -525,8 +525,9 @@ fn declare_builtins(
         ),
         (
             project::Property::new("cache/dir".into(), project::Type::String).info(
-                "the directory of rig's cache, `$XDG_CACHE_HOME/jig` or `~/.cache/jig` by default, or `'off'` without \
-                 a cache, which `JIG_CACHE` overrides",
+                "the directory of rig's cache, or `'off'` without a cache: `$XDG_CACHE_HOME/jig`, or failing that \
+                 `~/.cache/jig`, by default, and on Windows `%LOCALAPPDATA%\\jig\\cache`, which `JIG_CACHE_DIR` \
+                 overrides",
             ),
             cache_dir,
         ),
@@ -539,16 +540,17 @@ fn declare_builtins(
         ),
         (
             project::Property::new("cache/remote".into(), project::Type::String).info(
-                "the remote cache which rig's cache is in front of, as `'ssh://[<user>@]<host>[:<port>][/<jig>]'` or \
-                 a command which serves it on its stdin and stdout, or empty without one, which `JIG_REMOTE_CACHE` \
-                 overrides",
+                "the remote cache which rig's cache is in front of, as `'ssh://[<user>@]<host>[:<port>][/<jig>]'`, \
+                 `'tcp://<host>:<port>'`, `'http://[<user>:<password>@]<host>[:<port>][/<path>]'` or a command which \
+                 serves it on its stdin and stdout, or empty without one, which `JIG_CACHE_REMOTE` overrides",
             ),
             String::new(),
         ),
         (
             project::Property::new("cache/token-file".into(), project::Type::String).info(
-                "the file of the token which proves rig to a remote cache which needs one, as `jig serve --listen` \
-                 does, or empty without one",
+                "the file of the token which proves rig to a remote cache or a worker which needs one, as \
+                 `jig serve --listen` does, and which is sent as a bearer token over HTTP, or empty without one, \
+                 which `JIG_CACHE_TOKEN_FILE` overrides",
             ),
             String::new(),
         ),
@@ -563,21 +565,21 @@ fn declare_builtins(
         (
             project::Property::new("cache/push".into(), project::Type::Bool).info(
                 "whether rig pushes what it builds to the remote cache, if it takes pushes, which \
-                 `JIG_REMOTE_CACHE_PUSH=1` overrides",
+                 `JIG_CACHE_PUSH=1` overrides",
             ),
             project::Data::Bool(false),
         ),
         (
-            project::Property::new("workers".into(), project::Type::List).info(
+            project::Property::new(cache::WORKERS.property.into(), project::Type::List).info(
                 "the workers rig sends cached commands to once its own jobs are full, each as \
                  `'ssh://[<user>@]<host>[:<port>][/<jig>]'`, `'tcp://<host>:<port>'`, with the token of \
-                 `cache/token-file`, or a command which serves one on its stdin and stdout, which `JIG_WORKERS`, \
+                 `cache/token-file`, or a command which serves one on its stdin and stdout, which `JIG_WORKERS_LIST`, \
                  separated by `;`, overrides",
             ),
             project::Data::List(Vec::new()),
         ),
         (
-            project::Property::new("workers-only".into(), project::Type::Bool).info(
+            project::Property::new(cache::WORKERS_ONLY.property.into(), project::Type::Bool).info(
                 "whether what a worker may build waits for one, rather than being built here, which \
                  `JIG_WORKERS_ONLY=1` overrides, while what no worker builds, and what is not cached, is still built \
                  here",
@@ -585,10 +587,10 @@ fn declare_builtins(
             project::Data::Bool(false),
         ),
         (
-            project::Property::new("download".into(), project::Type::String).info(
+            project::Property::new(cache::DOWNLOAD.property.into(), project::Type::String).info(
                 "what is fetched of what workers build: `'all'`, or `'targets'`, which are what is asked for, as by \
                  default, installed or tested, and what is built here, while the rest is left on the workers, which \
-                 `JIG_DOWNLOAD` overrides",
+                 `JIG_WORKERS_DOWNLOAD` overrides",
             ),
             project::Data::Str("all".into()),
         ),
@@ -750,13 +752,13 @@ enum Error {
     ChangeDetection(String),
     /// A size, of the cache, which is not one.
     InvalidSize(String),
-    /// `jig cache` without a cache, as `JIG_CACHE` turns it off.
+    /// `jig cache` without a cache, as `JIG_CACHE_DIR` turns it off.
     CacheOff,
     UnknownCacheCommand(String),
-    /// A `JIG_REMOTE_CACHE` which is not a remote cache.
+    /// A remote cache, from `cache/remote` or its variable, which is not one.
     InvalidRemote(String),
     InvalidWorker(String),
-    /// A `download` which is not what is fetched of what workers build.
+    /// A `workers/download` which is not what is fetched of what workers build.
     InvalidDownload(String),
     InvalidJobs(String),
     /// A `-k` which is not a number of failures.
@@ -837,7 +839,11 @@ impl core::fmt::Display for Error {
             },
             Self::InvalidSize(size) => write!(f, "{size:?} is not a size, such as `512M` or `10G`"),
             Self::CacheOff => {
-                write!(f, "the cache is off, as `JIG_CACHE` is empty or `off`, or neither `XDG_CACHE_HOME` nor `HOME` is set")
+                write!(
+                    f,
+                    "the cache is off, as `cache/dir` or `JIG_CACHE_DIR` is empty or `off`, or neither \
+                     `XDG_CACHE_HOME` nor `HOME` is set",
+                )
             },
             Self::InvalidRemote(remote) => {
                 write!(

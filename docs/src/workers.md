@@ -1,8 +1,8 @@
 # Workers
 
 Once a build's own jobs are full, the cached commands it would run, such as rustc's, can run on other machines,
-workers, given by the `workers` property, usually in the user's configuration, or the `JIG_WORKERS` environment
-variable, with the workers separated by `;`, which overrides it. A worker is `ssh://[<user>@]<host>[:<port>][/<jig>]`,
+workers, given by the `workers/list` property, usually in the user's configuration, or the `JIG_WORKERS_LIST`
+environment variable, with the workers separated by `;`, which overrides it. A worker is `ssh://[<user>@]<host>[:<port>][/<jig>]`,
 which runs `jig worker --stdio` there by ssh, `tcp://<host>:<port>`, which `jig worker --listen <address> --token-file
 <path>` serves, proved to by the token of `cache/token-file`, or a command which serves one on its stdin and stdout.
 A worker runs as many commands at once as `--jobs`, or as the machine runs threads, and reports the tags of each
@@ -25,14 +25,14 @@ its workers run for it, as does one whose connection to a worker ends. A build w
 many of its commands ran on them. A worker runs whatever it is sent, so it must only be reachable by those who are
 trusted.
 
-With the `workers-only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
+With the `workers/only` property `true`, or `JIG_WORKERS_ONLY=1`, which overrides it, what a worker may build is not
 built here, however many jobs the build has, but waits for a worker, as for a machine which should be left alone. What
 must be built here still is: what no worker builds, as none has its toolchain or target, or none can be reached, and
 what is not cached, such as custom commands without `cache`. What has not been built before, such as a fresh checkout's
 crates, goes to workers too, once rustc finds the files it reads without compiling it, here first. A command which fails
 on a worker is run here again, as without it.
 
-With the `download` property `'targets'`, or `JIG_DOWNLOAD=targets`, which overrides it, what workers build is left on
+With the `workers/download` property `'targets'`, or `JIG_WORKERS_DOWNLOAD=targets`, which overrides it, what workers build is left on
 them, rather than fetched, but for what was asked for: what is built by default, the files `jig install` installs, the
 tests `jig test` runs, or the targets `jig build` is given. What is left there is fetched once something built here
 reads it, or a worker which does not have it is sent something which does, and when it is asked for later, without
@@ -48,7 +48,7 @@ rustc loads it, and what is linked by the host's linker, as binaries and tests a
 
 ```jig
 # ~/.config/jig/config
-set workers ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
+set workers/list ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
 ```
 
 Tests run on workers too, where the host cannot run them. With workers, a builtin target which the host cannot run, and

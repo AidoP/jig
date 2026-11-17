@@ -19,7 +19,7 @@ The edge which generates the graph, which `jig build -n` shows as `CONFIGURE gra
   again;
 - and the environment variables it read, as `# env-dep:` lines of `graph.d`: those `env()` read, `PATH` when `which`
   searched it, `RUSTUP_TOOLCHAIN`, and those which set the cache, the workers and the install prefix, such as
-  `JIG_CACHE` and `JIG_WORKERS`. Only a hash of each value is kept.
+  `JIG_CACHE_DIR` and `JIG_WORKERS_LIST`. Only a hash of each value is kept.
 
 `graph.d` is a depfile, which can be read to see what a project depends on.
 

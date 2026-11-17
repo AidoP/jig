@@ -27,21 +27,21 @@
   configuration: its directory, `$XDG_CACHE_HOME/jig`, `%LOCALAPPDATA%\jig\cache` on Windows, or
   `~/.cache/jig` by default, or `'off'`; the size it is
   collected down to, `'10G'` by default; the remote cache it is in front of, empty by default; and whether it pushes
-  to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE`, `JIG_CACHE_SIZE`,
-  `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH`
+  to it, `false` by default. Each is overridden by an environment variable: `JIG_CACHE_DIR`, `JIG_CACHE_SIZE`,
+  `JIG_CACHE_REMOTE` and `JIG_CACHE_PUSH`
 - `cache/token-file`: the file of the token which proves rig to a remote cache which needs one, as one reached over
-  TCP does, and to workers reached over TCP, empty by default
+  TCP does, and to workers reached over TCP, empty by default, which `JIG_CACHE_TOKEN_FILE` overrides
 - `host-target`: the target triple of the host, as printed by `rustc --print=host-tuple`, which is read-only
 - `msrv` and `profile/<name>`: the builtin files, which `use` processes, as described for [`use`](statements.md), which are read-only
 - `rust-version`: the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc, and which
   `jig lint` gives clippy, as cargo does, so that it suggests only what that version has, with no value until it is set
 - `toolchain`: the rustup toolchain given with `+<toolchain>`, or empty if none was given, which is read-only
-- `workers`: the workers which cached commands run on once a build's own jobs are full, as [workers](../workers.md) describes, empty
-  by default, which `JIG_WORKERS` overrides
-- `workers-only`: whether what a worker may build waits for one, rather than being built here, as described for
+- `workers/list`: the workers which cached commands run on once a build's own jobs are full, as
+  [workers](../workers.md) describes, empty by default, which `JIG_WORKERS_LIST` overrides
+- `workers/only`: whether what a worker may build waits for one, rather than being built here, as described for
   [workers](../workers.md), `false` by default, which `JIG_WORKERS_ONLY=1` overrides
-- `download`: what is fetched of what workers build, `'all'`, as by default, or `'targets'`, as described for [workers](../workers.md),
-  which `JIG_DOWNLOAD` overrides
+- `workers/download`: what is fetched of what workers build, `'all'`, as by default, or `'targets'`, as described for
+  [workers](../workers.md), which `JIG_WORKERS_DOWNLOAD` overrides
 - `codegen/<option>`: a codegen option of the crates declared while it is set, as described for [codegen options](codegen.md), while
   `codegen/` is a dict of those which are set
 - `codegen/<target>/<option>`: a codegen option of the crates for a target declared while it is set, which replaces
@@ -61,6 +61,14 @@
   it can be given another level. As clippy has many lints, each is declared when it is first used, while `clippy/` is
   a dict of those which are set
 - `diagnostic/<id>`: the severity of a diagnostic, as [diagnostics](diagnostics.md) describes
+
+The variable which overrides a setting of the cache or the workers is named after it, as `JIG_` and its name in
+capitals, with `_` for `/` and `-`. The names the variables had before, `JIG_CACHE`, `JIG_REMOTE_CACHE`,
+`JIG_REMOTE_CACHE_PUSH`, `JIG_WORKERS` and `JIG_DOWNLOAD`, are still read when the new one is not set. `workers`,
+`workers-only` and `download` were renamed to `workers/list`, `workers/only` and `workers/download`, and still set and
+read them, with the note `renamed-property`, until they are removed. A size, a remote cache, a worker, or what is
+fetched of what workers build, which is not one is the error `invalid-setting` where it is set, unless a variable
+overrides it.
 
 ```jig
 set build-dir 'out'

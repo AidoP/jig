@@ -1,36 +1,42 @@
 //! rig's cache, which holds the results of rustc, clippy and the custom commands with `cache`, and `jig cache`,
 //! which shows, collects and clears it.
 //!
-//! The cache is configured by builtin properties, which the user's configuration ([`crate::config`]) usually sets.
-//! An environment variable overrides each.
+//! The cache and the workers are configured by builtin properties, which the user's configuration
+//! ([`crate::config`]) usually sets. An environment variable named after each overrides it, as [`Setting`]
+//! describes, and the names the variables had before are still read.
 //!
-//! - `cache/dir`, or `JIG_CACHE`: the directory of the cache. `off`, or an empty value, turns the cache off. The
+//! - `cache/dir`, or `JIG_CACHE_DIR`: the directory of the cache. `off`, or an empty value, turns the cache off. The
 //!   default is `$XDG_CACHE_HOME/jig`, or failing that `$HOME/.cache/jig`, and on Windows `%LOCALAPPDATA%\jig\cache`.
 //! - `cache/size`, or `JIG_CACHE_SIZE`: the size the cache is collected down to, which happens after a build, at most
 //!   once a day. `10G` by default.
-//! - `cache/remote`, or `JIG_REMOTE_CACHE`: the remote cache behind this one, if any. It is one of:
+//! - `cache/remote`, or `JIG_CACHE_REMOTE`: the remote cache behind this one, if any. It is one of:
 //!   - `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig serve --stdio` on the host with ssh;
 //!   - `tcp://<host>:<port>`, which `jig serve --listen` serves;
 //!   - `http://[<user>:<password>@]<host>[:<port>][/<path>]`, a server of files over HTTP, laid out as a cache's
 //!     directory is;
 //!   - a command, split at spaces, which serves the cache on its stdin and stdout.
-//! - `cache/push`, or `JIG_REMOTE_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
-//! - `cache/token-file`: the file holding the token for a remote cache which needs one. The token proves the client
-//!   to a server reached over TCP, and is sent as a bearer token over HTTP. The file is read when connecting, so the
-//!   token itself is never recorded with the project.
-//! - `workers`, or `JIG_WORKERS`, in which workers are separated by `;`: the workers rig sends cached edges to once
-//!   its own jobs are full. Each is one of:
+//! - `cache/push`, or `JIG_CACHE_PUSH=1`: whether results are pushed to the remote cache, if it takes them.
+//! - `cache/token-file`, or `JIG_CACHE_TOKEN_FILE`: the file holding the token for a remote cache which needs one.
+//!   The token proves the client to a server reached over TCP, and is sent as a bearer token over HTTP. The file is
+//!   read when connecting, so the token itself is never recorded with the project.
+//! - `workers/list`, or `JIG_WORKERS_LIST`, in which workers are separated by `;`: the workers rig sends cached
+//!   edges to once its own jobs are full. Each is one of:
 //!   - `ssh://[<user>@]<host>[:<port>][/<jig>]`, which runs `jig worker --stdio` on the host with ssh;
 //!   - `tcp://<host>:<port>`, which `jig worker --listen` serves, using the token of `cache/token-file`;
 //!   - a command, split at spaces, which serves a worker on its stdin and stdout.
-//! - `workers-only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for a worker, rather than being
+//! - `workers/only`, or `JIG_WORKERS_ONLY=1`: whether what a worker may build waits for a worker, rather than being
 //!   built here.
-//! - `download`, or `JIG_DOWNLOAD`: how much of what workers build is fetched. `'all'` fetches everything.
-//!   `'targets'` fetches only what was asked for, which includes the defaults and what is installed or tested, and
-//!   what edges built here read. The rest stays on the workers.
+//! - `workers/download`, or `JIG_WORKERS_DOWNLOAD`: how much of what workers build is fetched. `'all'` fetches
+//!   everything. `'targets'` fetches only what was asked for, which includes the defaults and what is installed or
+//!   tested, and what edges built here read. The rest stays on the workers.
 //!
 //! The settings are resolved when the project is configured, as the configuration reads the variables, and are
-//! recorded in the project's database, where a build reads them.
+//! recorded in the project's database, where a build reads them. A value the configuration gives which is not what
+//! its setting can be is the error `invalid-setting` where it is set, while a variable's is an error when the
+//! settings are resolved.
+//!
+//! `workers`, `workers-only` and `download` were renamed to `workers/list`, `workers/only` and `workers/download`.
+//! The old names still set them and read them, with the note `renamed-property`, until they are removed.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -38,20 +44,74 @@ use std::time::Duration;
 
 use crate::Error;
 
-/// The environment variable which gives the directory of the cache, or turns it off.
-pub const DIR: &str = "JIG_CACHE";
-/// The environment variable which gives the size the cache is collected down to.
-pub const SIZE: &str = "JIG_CACHE_SIZE";
-/// The environment variable which gives the remote cache.
-pub const REMOTE: &str = "JIG_REMOTE_CACHE";
-/// The environment variable which pushes results to the remote cache, if it is `1`.
-pub const PUSH: &str = "JIG_REMOTE_CACHE_PUSH";
-/// The environment variable which gives the workers, separated by `;`.
-pub const WORKERS: &str = "JIG_WORKERS";
-/// The environment variable which, if it is `1`, makes what a worker may build wait for a worker.
-pub const WORKERS_ONLY: &str = "JIG_WORKERS_ONLY";
-/// The environment variable which gives how much of what workers build is fetched, `all` or `targets`.
-pub const DOWNLOAD: &str = "JIG_DOWNLOAD";
+/// A setting of the cache or the workers: its builtin property, and the environment variables which override it.
+///
+/// The first variable is named after the property, as `JIG_` followed by its name in capitals, with `_` for `/` and
+/// `-`. Any others are the names it had before, which are still read, but only when the variables before them are
+/// not set, so that the configuration depends on no more variables than it needs.
+pub struct Setting {
+    pub property: &'static str,
+    pub variables: &'static [&'static str],
+}
+impl Setting {
+    /// Returns the value of the first of the setting's variables which is set, as `env` gives them.
+    pub fn read(&self, env: &mut impl FnMut(&str) -> Option<OsString>) -> Option<OsString> {
+        self.variables.iter().find_map(|variable| env(variable))
+    }
+}
+
+/// The directory of the cache, or `off` to turn it off.
+pub const DIR: Setting = Setting { property: "cache/dir", variables: &["JIG_CACHE_DIR", "JIG_CACHE"] };
+/// The size the cache is collected down to.
+pub const SIZE: Setting = Setting { property: "cache/size", variables: &["JIG_CACHE_SIZE"] };
+/// The remote cache.
+pub const REMOTE: Setting = Setting { property: "cache/remote", variables: &["JIG_CACHE_REMOTE", "JIG_REMOTE_CACHE"] };
+/// Whether results are pushed to the remote cache, which the variables give as `1`.
+pub const PUSH: Setting = Setting { property: "cache/push", variables: &["JIG_CACHE_PUSH", "JIG_REMOTE_CACHE_PUSH"] };
+/// The file of the token for the remote cache and the workers.
+pub const TOKEN_FILE: Setting = Setting { property: "cache/token-file", variables: &["JIG_CACHE_TOKEN_FILE"] };
+/// The workers, which the variables separate by `;`.
+pub const WORKERS: Setting = Setting { property: "workers/list", variables: &["JIG_WORKERS_LIST", "JIG_WORKERS"] };
+/// Whether what a worker may build waits for a worker, which the variables give as `1`.
+pub const WORKERS_ONLY: Setting = Setting { property: "workers/only", variables: &["JIG_WORKERS_ONLY"] };
+/// How much of what workers build is fetched, `all` or `targets`.
+pub const DOWNLOAD: Setting =
+    Setting { property: "workers/download", variables: &["JIG_WORKERS_DOWNLOAD", "JIG_DOWNLOAD"] };
+
+/// Every setting, in the order the book lists them.
+pub const SETTINGS: [&Setting; 8] = [&DIR, &SIZE, &REMOTE, &PUSH, &TOKEN_FILE, &WORKERS, &WORKERS_ONLY, &DOWNLOAD];
+
+/// The properties of the workers which were renamed, by their old names, with the names they have now. Setting one
+/// sets the property it was renamed to, with the note `renamed-property`.
+const RENAMED: [(&str, &str); 3] =
+    [("workers", WORKERS.property), ("workers-only", WORKERS_ONLY.property), ("download", DOWNLOAD.property)];
+
+/// Returns the name a property has now, if it is the old name of one which was renamed.
+pub fn renamed(name: &str) -> Option<&'static str> {
+    RENAMED.iter().find(|(old, _)| *old == name).map(|&(_, now)| now)
+}
+
+/// Checks the value of a setting which can be invalid: a size, a remote cache, a worker, or what is fetched of what
+/// workers build. Returns what it must be, for a diagnostic, which follows "is not", if it is not that.
+pub fn invalid(setting: &Setting, value: &str) -> Option<&'static str> {
+    let (valid, expected) = match setting.property {
+        "cache/size" => (parse_size(value).is_some(), "a size, such as `'512M'` or `'10G'`"),
+        "cache/remote" => (
+            value.trim().is_empty() || remote_transport(value, false).is_some(),
+            "a remote cache: `'ssh://[<user>@]<host>[:<port>][/<jig>]'`, `'tcp://<host>:<port>'`, \
+             `'http://[<user>:<password>@]<host>[:<port>][/<path>]'` or a command, as `https://` is not spoken, which \
+             a proxy which speaks TLS can be put in front of",
+        ),
+        "workers/list" => (
+            value.trim().is_empty() || worker_transport(value.trim()).is_some(),
+            "a worker: `'ssh://[<user>@]<host>[:<port>][/<jig>]'`, `'tcp://<host>:<port>'` or a command",
+        ),
+        "workers/download" => (matches!(value, "" | "all" | "targets"), "`'all'` or `'targets'`"),
+        _ => return None,
+    };
+    (!valid).then_some(expected)
+}
+
 /// The size the cache is collected down to by default.
 pub const DEFAULT_SIZE: &str = "10G";
 /// How often the cache is collected after a build.
@@ -113,14 +173,15 @@ pub struct Settings {
 impl Settings {
     /// Resolve the settings from the cache's properties, each overridden by its variable, as `env` gives it.
     pub fn resolve(properties: &Properties, mut env: impl FnMut(&str) -> Option<OsString>) -> Result<Self, Error> {
-        let mut string = |name: &str, property: &str| match env(name) {
+        let mut string = |setting: &Setting, property: &str| match setting.read(&mut env) {
             Some(value) => value.to_string_lossy().into_owned(),
             None => property.to_string(),
         };
-        let dir = string(DIR, &properties.dir);
-        let size = string(SIZE, &properties.size);
-        let remote = string(REMOTE, &properties.remote);
-        let push = match env(PUSH) {
+        let dir = string(&DIR, &properties.dir);
+        let size = string(&SIZE, &properties.size);
+        let remote = string(&REMOTE, &properties.remote);
+        let token_file = string(&TOKEN_FILE, &properties.token_file);
+        let push = match PUSH.read(&mut env) {
             Some(push) => push == "1",
             None => properties.push,
         };
@@ -132,9 +193,9 @@ impl Settings {
         {
             return Err(Error::InvalidRemote(remote.clone()));
         }
-        let token_file = &properties.token_file;
-        let token_file = (!token_file.is_empty()).then(|| std::path::absolute(token_file).unwrap_or_else(|_| token_file.into()));
-        let workers = match env(WORKERS) {
+        let token_file =
+            (!token_file.is_empty()).then(|| std::path::absolute(&token_file).unwrap_or_else(|_| token_file.into()));
+        let workers = match WORKERS.read(&mut env) {
             Some(workers) => workers.to_string_lossy().split(';').map(String::from).collect(),
             None => properties.workers.clone(),
         };
@@ -143,11 +204,11 @@ impl Settings {
         if let Some(worker) = workers.iter().find(|worker| worker_transport(worker).is_none()) {
             return Err(Error::InvalidWorker(worker.clone()));
         }
-        let workers_only = match env(WORKERS_ONLY) {
+        let workers_only = match WORKERS_ONLY.read(&mut env) {
             Some(only) => only == "1",
             None => properties.workers_only,
         };
-        let download = match env(DOWNLOAD) {
+        let download = match DOWNLOAD.read(&mut env) {
             Some(download) => download.to_string_lossy().into_owned(),
             None => properties.download.clone(),
         };
@@ -396,7 +457,7 @@ fn serve_worker(
 pub fn workers(settings: &Settings) -> Result<(), Error> {
     let workers = settings.workers()?;
     if workers.is_empty() {
-        println!("no workers, as the `workers` property and `JIG_WORKERS` give none");
+        println!("no workers, as the `workers/list` property and `JIG_WORKERS_LIST` give none");
     }
     // ask all the workers at once, as connecting can take a while
     let reports: Vec<_> = std::thread::scope(|scope| {
@@ -601,6 +662,62 @@ mod tests {
             let resolved = Settings::resolve(&properties, env(workers));
             assert!(matches!(resolved, Err(Error::InvalidWorker(_))), "{workers:?}");
         }
+    }
+
+    #[test]
+    fn reads_each_setting_by_its_variables() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| OsString::from(value))
+        };
+        // the first variable of each is named after its property
+        for setting in SETTINGS {
+            let named = format!("JIG_{}", setting.property.to_uppercase().replace(['/', '-'], "_"));
+            assert_eq!(setting.variables[0], named);
+        }
+        // which is read first, and an old name only when it is not set, so that the configuration does not depend on
+        // the old name then
+        let both = env(&[("JIG_CACHE_DIR", "/new"), ("JIG_CACHE", "/old")]);
+        let mut read = Vec::new();
+        let value = DIR.read(&mut |name| {
+            read.push(name.to_string());
+            both(name)
+        });
+        assert_eq!((value, read), (Some("/new".into()), vec!["JIG_CACHE_DIR".to_string()]));
+        assert_eq!(DIR.read(&mut env(&[("JIG_CACHE", "/old")])), Some("/old".into()));
+        assert_eq!(DIR.read(&mut env(&[])), None);
+        // the token file has a variable too
+        let properties = Properties {
+            dir: String::new(),
+            size: "1G".into(),
+            remote: String::new(),
+            push: false,
+            token_file: "/property".into(),
+            workers: Vec::new(),
+            workers_only: false,
+            download: String::new(),
+        };
+        let settings = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE_TOKEN_FILE", "/variable")])));
+        assert_eq!(settings.token_file, Some(std::path::absolute("/variable").unwrap()));
+        // the properties which were renamed
+        assert_eq!(renamed("workers"), Some("workers/list"));
+        assert_eq!(renamed("workers-only"), Some("workers/only"));
+        assert_eq!(renamed("download"), Some("workers/download"));
+        assert_eq!(renamed("workers/list"), None);
+        // and what each setting can be
+        let checks = [
+            (&SIZE, "10G", "lots"),
+            (&REMOTE, "tcp://cache:7000", "https://cache"),
+            (&WORKERS, "ssh://worker", "http://worker"),
+            (&DOWNLOAD, "targets", "some"),
+        ];
+        for (setting, valid, not) in checks {
+            assert_eq!(invalid(setting, valid), None, "{valid}");
+            assert!(invalid(setting, not).is_some(), "{not}");
+        }
+        // where empty is none, rather than an invalid one
+        assert_eq!((invalid(&REMOTE, ""), invalid(&WORKERS, " "), invalid(&DOWNLOAD, "")), (None, None, None));
+        // and those which are not checked
+        assert_eq!(invalid(&DIR, "anything"), None);
     }
 
     #[test]

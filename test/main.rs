@@ -218,7 +218,7 @@ fn jig_command() -> Command {
 /// Run a command with the tests' own cache, rather than the user's, which every test shares, as builds may, and which
 /// is collected down to 256 MiB, and without the user's configuration.
 fn with_test_cache(mut command: Command) -> Command {
-    command.env("JIG_CACHE", std::env::temp_dir().join("jig-test-cache")).env("JIG_CACHE_SIZE", "256M");
+    command.env("JIG_CACHE_DIR", std::env::temp_dir().join("jig-test-cache")).env("JIG_CACHE_SIZE", "256M");
     command.env("JIG_CONFIG", "off");
     command
 }
@@ -1587,7 +1587,7 @@ fn caches_what_links_by_its_linker() {
     let app = project.dir.join(format!("build/{}/app", project.host()));
     let build = || {
         let mut command = jig_command();
-        let output = command.arg("build").env("JIG_CACHE", &cache).current_dir(&project.dir).output().unwrap();
+        let output = command.arg("build").env("JIG_CACHE_DIR", &cache).current_dir(&project.dir).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     };
     let links = || std::fs::read_to_string(project.dir.join("links")).unwrap_or_default().lines().count();
@@ -1608,7 +1608,7 @@ fn caches_what_links_by_its_linker() {
 
 #[test]
 fn rig_fetches_from_the_cache() {
-    // rustc's results are kept in the cache `JIG_CACHE` gives, from which those which are removed are fetched, with
+    // rustc's results are kept in the cache `JIG_CACHE_DIR` gives, from which those which are removed are fetched, with
     // what rustc printed, rather than running it, which here is not found
     let cache = std::env::temp_dir().join(format!("jig-test-{}-cache", std::process::id()));
     let _ = std::fs::remove_dir_all(&cache);
@@ -1619,14 +1619,14 @@ fn rig_fetches_from_the_cache() {
         ("app.rs", "fn main() { print!(\"{}\", a::value()); }\n"),
     ];
     let project = Project::new("rig-cache", &files);
-    project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", &cache_dir)]).ok();
     // the configuration depends on the file which identifies the toolchain, which rustup writes when it updates it
     let depfile = slashed(&std::fs::read_to_string(project.dir.join("build/graph.d")).unwrap());
     let manifest = depfile.contains("/rustlib/multirust-channel-manifest.toml");
     assert!(manifest || depfile.contains("/bin/rustc"), "{depfile}");
     let build_in = |project: &Project, path: Option<&str>| {
         let mut command = jig_command();
-        command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
+        command.arg("build").env("JIG_CACHE_DIR", &cache_dir).current_dir(&project.dir);
         if let Some(path) = path {
             command.env("PATH", path);
         }
@@ -1646,25 +1646,26 @@ fn rig_fetches_from_the_cache() {
     // as is every edge of a checkout in another directory, as what rustc is given is relative to the build directory,
     // except the build directory remapped, which rig replaces in the keys of the cache
     let other = Project::new("rig-cache-other", &files);
-    other.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    other.configure_with(&[("JIG_CACHE_DIR", &cache_dir)]).ok();
     assert_contains(&build_in(&other, Some("/nonexistent")), "unused variable");
     let output = Command::new(other.dir.join(format!("build/{host}/app{EXE}"))).output().unwrap();
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
     // and turning it off configures the project again, without the cache
     let mut command = jig_command();
-    let output = command.arg("build").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+    let output = command.arg("build").env("JIG_CACHE_DIR", "off").current_dir(&project.dir).output().unwrap();
     assert_contains(&String::from_utf8(output.stdout).unwrap(), configuring());
     let _ = std::fs::remove_dir_all(&cache);
 }
 
 #[test]
 fn cache_command() {
-    // the cache is in `XDG_CACHE_HOME`, or else `HOME`, unless `JIG_CACHE` gives it or turns it off
+    // the cache is in `XDG_CACHE_HOME`, or else `HOME`, unless `JIG_CACHE_DIR` gives it or turns it off
     let home = std::env::temp_dir().join(format!("jig-test-{}-cache-home", std::process::id()));
     let cache = |env: &[(&str, &str)], args: &[&str]| {
         let mut command = jig_command();
         // without the directory Windows has for it, which is taken before `HOME` there
-        command.arg("cache").args(args).env_remove("JIG_CACHE").env_remove("XDG_CACHE_HOME").env_remove("LOCALAPPDATA");
+        command.arg("cache").args(args).env_remove("JIG_CACHE_DIR");
+        command.env_remove("XDG_CACHE_HOME").env_remove("LOCALAPPDATA");
         let output = command.env("HOME", &home).envs(env.iter().copied()).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
         (output.status.success(), slashed(&(stdout + &String::from_utf8(output.stderr).unwrap())))
@@ -1675,7 +1676,7 @@ fn cache_command() {
     assert!(output.starts_with(&format!("{home_dir}/.cache/jig\n0 results, 0 manifests and 0 blobs, 0 B\n")), "{output}");
     let xdg = home.join("xdg").display().to_string();
     assert!(cache(&[("XDG_CACHE_HOME", &xdg)], &["stats"]).1.starts_with(&format!("{}/jig\n", slashed(&xdg))));
-    let (ok, output) = cache(&[("JIG_CACHE", "off")], &["stats"]);
+    let (ok, output) = cache(&[("JIG_CACHE_DIR", "off")], &["stats"]);
     assert!(!ok);
     assert_contains(&output, "the cache is off");
     assert_contains(&cache(&[], &["gc", "--max-size", "lots"]).1, "\"lots\" is not a size");
@@ -1683,19 +1684,19 @@ fn cache_command() {
     // what a build adds, which is collected, then cleared, as rig fills it
     let dir = home.join("cache").display().to_string();
     let project = Project::new("cache-command", &[("Jig", "crate a 'a.rs'\n"), ("a.rs", "")]);
-    project.configure_with(&[("JIG_CACHE", &dir)]).ok();
-    let output = jig_command().arg("build").env("JIG_CACHE", &dir).current_dir(&project.dir).output().unwrap();
+    project.configure_with(&[("JIG_CACHE_DIR", &dir)]).ok();
+    let output = jig_command().arg("build").env("JIG_CACHE_DIR", &dir).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success());
-    let (_, output) = cache(&[("JIG_CACHE", &dir)], &["stats"]);
+    let (_, output) = cache(&[("JIG_CACHE_DIR", &dir)], &["stats"]);
     assert!(!output.contains("\n0 results"), "{output}");
-    let (ok, output) = cache(&[("JIG_CACHE", &dir)], &["gc", "--max-size=1G"]);
+    let (ok, output) = cache(&[("JIG_CACHE_DIR", &dir)], &["gc", "--max-size=1G"]);
     assert!(ok && output.starts_with("removed 0 results, 0 manifests and 0 blobs, 0 B\n"), "{output}");
-    let (ok, output) = cache(&[("JIG_CACHE", &dir)], &["gc", "--max-size", "0"]);
+    let (ok, output) = cache(&[("JIG_CACHE_DIR", &dir)], &["gc", "--max-size", "0"]);
     assert!(ok && output.ends_with("kept 0 results, 0 manifests and 0 blobs, 0 B\n"), "{output}");
-    let output = jig_command().arg("build").env("JIG_CACHE", &dir).current_dir(&project.dir).output().unwrap();
+    let output = jig_command().arg("build").env("JIG_CACHE_DIR", &dir).current_dir(&project.dir).output().unwrap();
     assert!(output.status.success());
-    assert!(cache(&[("JIG_CACHE", &dir)], &["clear"]).0);
-    assert_contains(&cache(&[("JIG_CACHE", &dir)], &["stats"]).1, "\n0 results, 0 manifests and 0 blobs, 0 B\n");
+    assert!(cache(&[("JIG_CACHE_DIR", &dir)], &["clear"]).0);
+    assert_contains(&cache(&[("JIG_CACHE_DIR", &dir)], &["stats"]).1, "\n0 results, 0 manifests and 0 blobs, 0 B\n");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -1765,7 +1766,7 @@ fn remote_cache_over_http() {
     let files = [("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() { let unused = 1; }\n")];
     let jig = |project: &Project, args: &[&str], local: &str, path: Option<&str>| {
         let mut command = jig_command();
-        command.args(args).env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        command.args(args).env("JIG_CONFIG", &config).env("JIG_CACHE_DIR", dir.join(local)).current_dir(&project.dir);
         if let Some(path) = path {
             command.env("PATH", path);
         }
@@ -1777,7 +1778,7 @@ fn remote_cache_over_http() {
     let first = Project::new("http-first", &files);
     jig(&first, &["generate"], "first", None);
     assert!(!jig(&first, &["build"], "first", None).contains("warning: the remote cache"));
-    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", dir.join("served/rig")).output().unwrap();
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", dir.join("served/rig")).output().unwrap();
     assert!(!String::from_utf8(stats.stdout).unwrap().contains("\n0 results"));
     let second = Project::new("http-second", &files);
     jig(&second, &["generate"], "second", None);
@@ -1799,7 +1800,7 @@ fn remote_cache_over_tcp() {
     std::fs::write(dir.join("token"), "secret\n").unwrap();
     let mut server = jig_command()
         .args(["serve", "--listen", "127.0.0.1:0", "--token-file", "token", "--push"])
-        .env("JIG_CACHE", dir.join("server"))
+        .env("JIG_CACHE_DIR", dir.join("server"))
         .current_dir(&dir)
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -1820,7 +1821,7 @@ set cache/push true
     let files = [("Jig", "crate a 'a.rs'\n"), ("a.rs", "pub fn f() { let unused = 1; }\n")];
     let build = |project: &Project, local: &str, path: Option<&str>| {
         let mut command = jig_command();
-        command.arg("build").env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        command.arg("build").env("JIG_CONFIG", &config).env("JIG_CACHE_DIR", dir.join(local)).current_dir(&project.dir);
         if let Some(path) = path {
             command.env("PATH", path);
         }
@@ -1831,7 +1832,8 @@ set cache/push true
     };
     let configure = |project: &Project, local: &str| {
         let mut command = jig_command();
-        command.arg("generate").env("JIG_CONFIG", &config).env("JIG_CACHE", dir.join(local)).current_dir(&project.dir);
+        command.arg("generate").env("JIG_CONFIG", &config).env("JIG_CACHE_DIR", dir.join(local));
+        command.current_dir(&project.dir);
         assert!(command.output().unwrap().status.success());
     };
     let first = Project::new("tcp-first", &files);
@@ -1852,6 +1854,44 @@ set cache/push true
 }
 
 #[test]
+fn settings_renamed_and_checked() {
+    // an old name of a setting sets the property it was renamed to, and reads it, with a note
+    let jig = "set download 'targets'\nlog note 'download is {workers/download}, read as {download}'\n";
+    let project = Project::new("settings-renamed", &[("Jig", jig)]);
+    project
+        .configure()
+        .ok()
+        .stderr("note[renamed-property]: `download` is now `workers/download`, which it sets; the old name will be removed")
+        .stderr("note: download is targets, read as targets\n");
+    // unless the project declares a property of the name itself
+    let own = "declare download\n    default 'mine'\nset download 'yours'\nlog note '{download}, {workers/download}'\n";
+    std::fs::write(project.dir.join("Jig"), own).unwrap();
+    let output = project.configure().ok();
+    output.stderr("note: yours, all\n");
+    assert!(!output.stderr.contains("renamed-property"), "{}", output.stderr);
+    // a setting which is not what it can be is an error where it is set
+    std::fs::write(project.dir.join("Jig"), "set workers/download 'some'\nset workers ['tcp://nope']\n").unwrap();
+    project
+        .configure()
+        .failed()
+        .stderr("error[invalid-setting]: `workers/download` is \"some\", which is not `'all'` or `'targets'`\n --> Jig:1:22")
+        .stderr("error[invalid-setting]: `workers/list` is \"tcp://nope\", which is not a worker: ")
+        .stderr(" --> Jig:2:13");
+    // unless a variable overrides it, whose own value is used, and checked as the settings are resolved, by the name
+    // it has now, or the name it had before
+    let overridden = [("JIG_WORKERS_DOWNLOAD", "all"), ("JIG_WORKERS", "")];
+    assert!(!project.configure_with(&overridden).ok().stderr.contains("invalid-setting"));
+    let old = [("JIG_DOWNLOAD", "all"), ("JIG_WORKERS_LIST", "")];
+    assert!(!project.configure_with(&old).ok().stderr.contains("invalid-setting"));
+    // where the name it has now is read before the old one
+    std::fs::write(project.dir.join("Jig"), "").unwrap();
+    project
+        .configure_with(&[("JIG_WORKERS_DOWNLOAD", "some"), ("JIG_DOWNLOAD", "all")])
+        .failed()
+        .stderr("\"some\" is not what is fetched of what workers build");
+}
+
+#[test]
 fn user_configuration() {
     // the user's configuration is processed before a project's, setting rig's cache, which a project depends on
     let dir = std::env::temp_dir().join(format!("jig-test-{}-user-config-home", std::process::id()));
@@ -1859,13 +1899,13 @@ fn user_configuration() {
     std::fs::create_dir_all(&dir).unwrap();
     let config = dir.join("config");
     let server = dir.join("server").display().to_string();
-    let remote = format!("{ENV} JIG_CACHE={server} {} serve --stdio --push", configure_path().display());
+    let remote = format!("{ENV} JIG_CACHE_DIR={server} {} serve --stdio --push", configure_path().display());
     // a path relative to the configuration, as in any file of it
     let settings = format!("set cache/dir path('cache')\nset cache/remote '{remote}'\nset cache/push true\n");
     std::fs::write(&config, &settings).unwrap();
     let jig = |cwd: &Path, args: &[&str]| {
         let mut command = jig_command();
-        command.args(args).env_remove("JIG_CACHE").env_remove("JIG_CACHE_SIZE").env("JIG_CONFIG", &config);
+        command.args(args).env_remove("JIG_CACHE_DIR").env_remove("JIG_CACHE_SIZE").env("JIG_CONFIG", &config);
         let output = command.current_dir(cwd).output().unwrap();
         let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         (output.status.success(), text)
@@ -1882,7 +1922,7 @@ fn user_configuration() {
     let (ok, output) = jig(&project.dir, &["build"]);
     assert!(ok && !output.contains("warning"), "{output}");
     // pushed to the remote cache
-    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &server).output().unwrap();
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", &server).output().unwrap();
     assert!(!String::from_utf8(stats.stdout).unwrap().contains("\n0 results"));
     // a change to it configures the project again, as does a variable which overrides it
     std::fs::write(&config, settings.replace("set cache/push true", "set cache/push false")).unwrap();
@@ -2029,7 +2069,7 @@ fn remote_cache() {
     let dir = std::env::temp_dir().join(format!("jig-test-{}-remote-cache", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let server = dir.join("server").display().to_string();
-    let remote = format!("{ENV} JIG_CACHE={server} {} serve --stdio --push", configure_path().display());
+    let remote = format!("{ENV} JIG_CACHE_DIR={server} {} serve --stdio --push", configure_path().display());
     let files = [
         ("Jig", "crate a 'a.rs'\ncrate app 'app.rs'\n    crate-type 'bin'\n    use a\n"),
         ("a.rs", "pub fn value() -> u32 { let unused = 1; 42 }\n"),
@@ -2037,7 +2077,7 @@ fn remote_cache() {
     ];
     let build = |project: &Project, local: &str, env: &[(&str, &str)]| {
         let mut command = jig_command();
-        command.arg("build").env("JIG_CACHE", local).env("JIG_REMOTE_CACHE", &remote).current_dir(&project.dir);
+        command.arg("build").env("JIG_CACHE_DIR", local).env("JIG_CACHE_REMOTE", &remote).current_dir(&project.dir);
         let output = command.envs(env.iter().copied()).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{stdout}");
@@ -2046,23 +2086,23 @@ fn remote_cache() {
     // the remote cache is part of how the project is configured, as is whether it is pushed to
     let first = Project::new("remote-first", &files);
     let local = dir.join("first").display().to_string();
-    first.configure_with(&[("JIG_CACHE", &local), ("JIG_REMOTE_CACHE", &remote), ("JIG_REMOTE_CACHE_PUSH", "1")]).ok();
-    let output = build(&first, &local, &[("JIG_REMOTE_CACHE_PUSH", "1")]);
+    first.configure_with(&[("JIG_CACHE_DIR", &local), ("JIG_CACHE_REMOTE", &remote), ("JIG_CACHE_PUSH", "1")]).ok();
+    let output = build(&first, &local, &[("JIG_CACHE_PUSH", "1")]);
     assert!(!output.contains("warning: the remote cache"), "{output}");
-    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &server).output().unwrap();
+    let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", &server).output().unwrap();
     let stats = String::from_utf8(stats.stdout).unwrap();
     assert!(!stats.contains("\n0 results"), "{stats}");
     let second = Project::new("remote-second", &files);
     let local = dir.join("second").display().to_string();
-    second.configure_with(&[("JIG_CACHE", &local), ("JIG_REMOTE_CACHE", &remote)]).ok();
+    second.configure_with(&[("JIG_CACHE_DIR", &local), ("JIG_CACHE_REMOTE", &remote)]).ok();
     assert_contains(&build(&second, &local, &[("PATH", "/nonexistent")]), "unused variable");
     let output = Command::new(second.dir.join(format!("build/{}/app", second.host()))).output().unwrap();
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "42");
     // a remote cache which fails is warned of, and the build goes on without it
     let third = Project::new("remote-failed", &files);
     let local = dir.join("third").display().to_string();
-    third.configure_with(&[("JIG_CACHE", &local)]).ok();
-    let output = build(&third, &local, &[("JIG_REMOTE_CACHE", &format!("{ENV} JIG_CACHE=off jig-no-such-server"))]);
+    third.configure_with(&[("JIG_CACHE_DIR", &local)]).ok();
+    let output = build(&third, &local, &[("JIG_CACHE_REMOTE", &format!("{ENV} JIG_CACHE_DIR=off jig-no-such-server"))]);
     assert_contains(&output, "warning: the remote cache failed, so the build went on without it");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2091,7 +2131,8 @@ fn pipelines_libraries() {
         ("app.rs", "fn main() { print!(\"{}\", b::value()); }\n"),
     ]);
     let mut command = jig_command();
-    let output = command.args(["build", "-j", "4"]).env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+    command.args(["build", "-j", "4"]).env("JIG_CACHE_DIR", "off").current_dir(&project.dir);
+    let output = command.output().unwrap();
     let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{shown}");
     // the library which uses the other is built once the other's metadata is written, before the other is, and the
@@ -2123,7 +2164,7 @@ fn workers() {
     std::os::unix::fs::symlink(dir.join("real-store"), dir.join("store")).unwrap();
     let store = dir.join("store").display().to_string();
     let jig = configure_path().display().to_string();
-    let worker = format!("{ENV} JIG_CACHE={store} {jig} worker --stdio --jobs 4 --tag fast");
+    let worker = format!("{ENV} JIG_CACHE_DIR={store} {jig} worker --stdio --jobs 4 --tag fast");
     let mut many = String::new();
     for i in 0..2000 {
         let _ = std::fmt::Write::write_fmt(&mut many, format_args!("pub fn f{i}(x: u64) -> u64 {{ x ^ {i} }}\n"));
@@ -2146,7 +2187,7 @@ fn workers() {
     ];
     let project = Project::new("workers", &files);
     let stats = |cache: &str| {
-        let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE", cache).output().unwrap();
+        let stats = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", cache).output().unwrap();
         String::from_utf8(stats.stdout).unwrap()
     };
     let host = project.host();
@@ -2156,7 +2197,8 @@ fn workers() {
     // the first build runs every edge here, without workers
     let first = dir.join("first").display().to_string();
     let mut command = jig_command();
-    command.args(["build", "-j", "1"]).env("JIG_CACHE", &first).env("JIG_WORKERS", "").current_dir(&project.dir);
+    command.args(["build", "-j", "1"]).env("JIG_CACHE_DIR", &first).env("JIG_WORKERS_LIST", "");
+    command.current_dir(&project.dir);
     let output = command.output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert_contains(&stats(&store), "and 0 blobs");
@@ -2165,7 +2207,7 @@ fn workers() {
     // reads, such as `inner.rs`, without compiling it, here first, and the worker writes what is written here
     let fresh = Project::new("workers-fresh", &files);
     let mut command = jig_command();
-    command.args(["build", "-j", "8"]).env("JIG_CACHE", dir.join("fresh")).env("JIG_WORKERS", &worker);
+    command.args(["build", "-j", "8"]).env("JIG_CACHE_DIR", dir.join("fresh")).env("JIG_WORKERS_LIST", &worker);
     let output = command.env("JIG_WORKERS_ONLY", "1").current_dir(&fresh.dir).output().unwrap();
     let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{shown}");
@@ -2177,7 +2219,7 @@ fn workers() {
     }
     // `jig workers` shows the worker's host, jobs and tags, and its toolchains, among them the one which built here,
     // which the worker keeps what identifies, as one which has run before does, so that it reports them at once
-    let shown = jig_command().arg("workers").env("JIG_WORKERS", &worker).output().unwrap();
+    let shown = jig_command().arg("workers").env("JIG_WORKERS_LIST", &worker).output().unwrap();
     let shown = String::from_utf8(shown.stdout).unwrap();
     assert_contains(&shown, &format!(": {host}, 4 jobs, tagged fast, "));
     assert_contains(&shown, " ms away\n");
@@ -2192,7 +2234,7 @@ fn workers() {
     std::fs::remove_dir_all(&outputs).unwrap();
     let second = dir.join("second").display().to_string();
     let mut command = jig_command();
-    command.args(["build", "-j", "8"]).env("JIG_CACHE", &second).env("JIG_WORKERS", &worker);
+    command.args(["build", "-j", "8"]).env("JIG_CACHE_DIR", &second).env("JIG_WORKERS_LIST", &worker);
     let output = command.env("JIG_WORKERS_ONLY", "1").current_dir(&project.dir).output().unwrap();
     let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
     assert!(output.status.success(), "{shown}");
@@ -2209,8 +2251,9 @@ fn workers() {
     // a worker which cannot be run builds nothing, and the build goes on without it
     std::fs::remove_dir_all(&outputs).unwrap();
     let mut command = jig_command();
-    command.args(["build", "-j", "1"]).env("JIG_CACHE", dir.join("third")).current_dir(&project.dir);
-    let output = command.env("JIG_WORKERS", format!("{ENV} JIG_CACHE=off jig-no-such-worker")).output().unwrap();
+    command.args(["build", "-j", "1"]).env("JIG_CACHE_DIR", dir.join("third")).current_dir(&project.dir);
+    let worker = format!("{ENV} JIG_CACHE_DIR=off jig-no-such-worker");
+    let output = command.env("JIG_WORKERS_LIST", worker).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2223,7 +2266,7 @@ fn leaves_outputs_on_workers() {
     let _ = std::fs::remove_dir_all(&dir);
     let jig = configure_path().display().to_string();
     let worker = |store: &str| {
-        format!("{ENV} JIG_CACHE={} {jig} worker --stdio --jobs 4", dir.join(store).display())
+        format!("{ENV} JIG_CACHE_DIR={} {jig} worker --stdio --jobs 4", dir.join(store).display())
     };
     let project = Project::new("leaves", &[
         ("Jig", "crate a 'a.rs'\ncrate b 'b.rs'\n    use a\ncrate app 'app.rs'\n    crate-type 'bin'\n    use b\n"),
@@ -2235,9 +2278,9 @@ fn leaves_outputs_on_workers() {
     let outputs = project.dir.join("build").join(&host);
     let build = |args: &[&str], cache: &str, worker: &str| {
         let mut command = jig_command();
-        command.arg("build").args(args).env("JIG_CACHE", dir.join(cache)).env("JIG_WORKERS", worker);
-        let output = command.env("JIG_WORKERS_ONLY", "1").env("JIG_DOWNLOAD", "targets").current_dir(&project.dir);
-        let output = output.output().unwrap();
+        command.arg("build").args(args).env("JIG_CACHE_DIR", dir.join(cache)).env("JIG_WORKERS_LIST", worker);
+        command.env("JIG_WORKERS_ONLY", "1").env("JIG_WORKERS_DOWNLOAD", "targets").current_dir(&project.dir);
+        let output = command.output().unwrap();
         let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{shown}");
         shown
@@ -2277,7 +2320,7 @@ fn tests_on_workers() {
     let _ = std::fs::remove_dir_all(&dir);
     let store = dir.join("store").display().to_string();
     let jig = configure_path().display().to_string();
-    let worker = format!("{ENV} JIG_CACHE={store} {jig} worker --stdio --jobs 2");
+    let worker = format!("{ENV} JIG_CACHE_DIR={store} {jig} worker --stdio --jobs 2");
     let passing = "#[test]\nfn reads() { assert_eq!(std::fs::read_to_string(\"data.txt\").unwrap(), \"sent\\n\"); }\n";
     let failing = "#[test]\nfn fails() { panic!(\"on the worker\") }\n";
     let project = Project::new("tests-on-workers", &[
@@ -2292,7 +2335,7 @@ fn tests_on_workers() {
     ]);
     let test = |workers: &str| {
         let mut command = jig_command();
-        command.args(["test", "--verbose"]).env("JIG_CACHE", dir.join("local")).env("JIG_WORKERS", workers);
+        command.args(["test", "--verbose"]).env("JIG_CACHE_DIR", dir.join("local")).env("JIG_WORKERS_LIST", workers);
         let output = command.current_dir(&project.dir).output().unwrap();
         String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
     };
@@ -2302,7 +2345,7 @@ fn tests_on_workers() {
     assert_contains(&shown, "test failing ... FAILED");
     assert_contains(&shown, &format!("failed on {worker}"));
     assert_contains(&shown, "on the worker");
-    let sent = jig_command().args(["cache", "stats"]).env("JIG_CACHE", &store).output().unwrap();
+    let sent = jig_command().args(["cache", "stats"]).env("JIG_CACHE_DIR", &store).output().unwrap();
     assert!(!String::from_utf8(sent.stdout).unwrap().contains("and 0 blobs"));
     // without a worker, they cannot run
     let shown = test("");
@@ -2324,7 +2367,7 @@ fn targets_which_workers_test() {
     )]);
     let shown = |workers: &str| {
         let mut command = jig_command();
-        command.arg("generate").env("JIG_WORKERS", workers).current_dir(&project.dir);
+        command.arg("generate").env("JIG_WORKERS_LIST", workers).current_dir(&project.dir);
         let output = command.output().unwrap();
         String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap()
     };
@@ -2348,7 +2391,7 @@ fn cached_commands_run_the_chosen_toolchain() {
     ]);
     let jig = |args: &[&str], toolchain: &str| {
         let mut command = jig_command();
-        command.args(args).env("JIG_CACHE", &cache).env("RUSTUP_TOOLCHAIN", toolchain).current_dir(&project.dir);
+        command.args(args).env("JIG_CACHE_DIR", &cache).env("RUSTUP_TOOLCHAIN", toolchain).current_dir(&project.dir);
         let output = command.output().unwrap();
         let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{text}");
@@ -2403,7 +2446,7 @@ custom plain
     };
     let build = |project: &Project| {
         let mut command = jig_command();
-        command.arg("build").env("JIG_CACHE", &cache_dir).env("PATH", path(project)).current_dir(&project.dir);
+        command.arg("build").env("JIG_CACHE_DIR", &cache_dir).env("PATH", path(project)).current_dir(&project.dir);
         let output = command.output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
         String::from_utf8(output.stdout).unwrap()
@@ -2414,7 +2457,7 @@ custom plain
     };
     let project = Project::new("custom-cache", &files);
     tool(&project);
-    project.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&project))]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", &cache_dir), ("PATH", &path(&project))]).ok();
     build(&project);
     assert_eq!((runs(&project, "copy"), runs(&project, "plain")), (1, 1));
     for output in ["out.txt", "plain.txt"] {
@@ -2426,7 +2469,7 @@ custom plain
     // as it is in another checkout, whose program is in another directory, but the same
     let other = Project::new("custom-cache-other", &files);
     let tool = tool(&other);
-    other.configure_with(&[("JIG_CACHE", &cache_dir), ("PATH", &path(&other))]).ok();
+    other.configure_with(&[("JIG_CACHE_DIR", &cache_dir), ("PATH", &path(&other))]).ok();
     build(&other);
     assert_eq!((runs(&other, "copy"), runs(&other, "plain")), (0, 1));
     assert_eq!(std::fs::read_to_string(other.dir.join("build/out.txt")).unwrap(), "in\n");
@@ -2463,7 +2506,7 @@ log note app.pass-env
         let mut command = jig_command();
         command.arg("build").env("JIG_TEST_PASSED", passed).env("JIG_TEST_HIDDEN", "hidden").current_dir(&project.dir);
         if cached {
-            command.env("JIG_CACHE", &cache_dir);
+            command.env("JIG_CACHE_DIR", &cache_dir);
         }
         let output = command.output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();
@@ -2482,7 +2525,7 @@ log note app.pass-env
     // and a cached command inherits only what it passes on
     let [(_, jig), (_, app)] = files("    cache");
     let project = Project::new("pass-env-cached", &[("Jig", &jig), ("app.rs", &app)]);
-    project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", &cache_dir)]).ok();
     assert_eq!(run(&project, true, "three"), (true, "three\nunset\n".into(), "three".into()));
     let project = Project::new("pass-env-invalid", &[("Jig", "custom c\n    output 'c'\n    command 'true'\n    pass-env 'A=B'\n")]);
     project.configure().failed().stderr("A=B");
@@ -2497,11 +2540,11 @@ fn rig_rebuilds_when_a_crate_variable_changes() {
         ("Jig", "crate app 'app.rs'\n    crate-type 'bin'\n"),
         ("app.rs", "fn main() { print!(\"{}\", env!(\"JIG_TEST_CRATE_VALUE\")); }\n"),
     ]);
-    project.configure_with(&[("JIG_CACHE", "off")]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", "off")]).ok();
     let run = |value: &str| {
         let output = jig_command()
             .arg("run")
-            .env("JIG_CACHE", "off")
+            .env("JIG_CACHE_DIR", "off")
             .env("JIG_TEST_CRATE_VALUE", value)
             .current_dir(&project.dir)
             .output()
@@ -2537,9 +2580,9 @@ fn main() {
 "),
         ("value.s", &assembly(1)),
     ]);
-    project.configure_with(&[("JIG_CACHE", "off")]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", "off")]).ok();
     let run = || {
-        let output = jig_command().arg("run").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("run").env("JIG_CACHE_DIR", "off").current_dir(&project.dir).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
     };
@@ -2661,9 +2704,9 @@ crate util 'util.rs'
         ("include/uart.h", "#define ONE 1\n"),
         ("util.rs", ""),
     ]);
-    project.configure_with(&[("JIG_CACHE", "off")]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", "off")]).ok();
     let build = || {
-        let output = jig_command().arg("build").env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        let output = jig_command().arg("build").env("JIG_CACHE_DIR", "off").current_dir(&project.dir).output().unwrap();
         let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{shown}");
         shown
@@ -2802,7 +2845,7 @@ static-library uart
     };
     let build = |project: &Project| {
         let mut command = jig_command();
-        command.arg("build").env("JIG_CACHE", &cache_dir).current_dir(&project.dir);
+        command.arg("build").env("JIG_CACHE_DIR", &cache_dir).current_dir(&project.dir);
         let output = command.output().unwrap();
         let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{shown}");
@@ -2814,7 +2857,7 @@ static-library uart
     };
     let project = Project::new("c-cache", &files);
     compiler(&project);
-    project.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", &cache_dir)]).ok();
     let host = project.host();
     let object = project.dir.join(format!("build/{host}/c/uart/uart.c.o"));
     build(&project);
@@ -2831,7 +2874,7 @@ static-library uart
     // which rig replaces in the keys of the cache
     let other = Project::new("c-cache-other", &files);
     let other_compiler = compiler(&other);
-    other.configure_with(&[("JIG_CACHE", &cache_dir)]).ok();
+    other.configure_with(&[("JIG_CACHE_DIR", &cache_dir)]).ok();
     build(&other);
     assert_eq!(runs(&other), 0);
     assert!(other.dir.join(format!("build/{host}/c/uart/libuart.a")).is_file());
@@ -2870,10 +2913,10 @@ crate app 'app.rs'
         ("util.rs", "unsafe extern \"C\" {\n    fn sum(value: i32) -> i32;\n}\npub fn two() -> i32 {\n    unsafe { sum(2) }\n}\n"),
         ("app.rs", "fn main() {\n    print!(\"{}\", util::two());\n}\n"),
     ]);
-    project.configure_with(&[("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")]).ok();
+    project.configure_with(&[("JIG_CACHE_DIR", "off"), ("CC", "cc"), ("AR", "ar")]).ok();
     let output = jig_command()
         .arg("run")
-        .env("JIG_CACHE", "off")
+        .env("JIG_CACHE_DIR", "off")
         .env("CC", "cc")
         .env("AR", "ar")
         .current_dir(&project.dir)
@@ -2999,7 +3042,7 @@ int main(int argc, char **argv) {
 }
 "),
     ]);
-    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")];
+    let env = [("JIG_CACHE_DIR", "off"), ("CC", "cc"), ("AR", "ar")];
     project.configure_with(&env).ok();
     let run = |args: &[&str]| {
         let output = jig_command().arg("run").args(args).envs(env).current_dir(&project.dir).output().unwrap();
@@ -3145,7 +3188,7 @@ fn encodes() {
 "),
         ("app.rs", "fn main() {\n    print!(\"{}\", wrap::two());\n}\n"),
     ]);
-    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("AR", "ar")];
+    let env = [("JIG_CACHE_DIR", "off"), ("CC", "cc"), ("AR", "ar")];
     project.configure_with(&env).ok();
     let run = |name: &str| {
         let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
@@ -3248,10 +3291,10 @@ fn book_kernel_boots() {
     assert_eq!(files.len(), 6, "{:?}", files.iter().map(|(path, _)| path).collect::<Vec<_>>());
     let files: Vec<(&str, &str)> = files.iter().map(|(path, contents)| (path.as_str(), contents.as_str())).collect();
     let project = Project::new("book-kernel", &files);
-    project.configure_with(&[("JIG_CACHE", "off")]).ok().stderr("[name-shadows-system]");
+    project.configure_with(&[("JIG_CACHE_DIR", "off")]).ok().stderr("[name-shadows-system]");
     let mut child = jig_command()
         .args(["run", "kernel"])
-        .env("JIG_CACHE", "off")
+        .env("JIG_CACHE_DIR", "off")
         .current_dir(&project.dir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3376,7 +3419,7 @@ extern \"C\" int sum(int n) {
         ("tool.c", "#include <stdio.h>\nint sum(int);\nint twice(int);\nint main(void) { printf(\"%d %d\", sum(4), twice(6)); return 0; }\n"),
         ("app.rs", "unsafe extern \"C\" {\n    fn sum(n: i32) -> i32;\n}\nfn main() {\n    print!(\"{}\", unsafe { sum(8) });\n}\n"),
     ]);
-    let env = [("JIG_CACHE", "off"), ("CC", "cc"), ("CXX", "c++"), ("AR", "ar")];
+    let env = [("JIG_CACHE_DIR", "off"), ("CC", "cc"), ("CXX", "c++"), ("AR", "ar")];
     project.configure_with(&env).ok();
     let run = |name: &str| {
         let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
@@ -3495,7 +3538,7 @@ pub extern \"C\" fn greeting() -> *const core::ffi::c_char {
         ("count.c", "#include <stdio.h>\nint count(int);\nint main(void) { printf(\"%d\", count(2)); return 0; }\n"),
         ("greet.c", "#include <stdio.h>\nconst char *greeting(void);\nint main(void) { printf(\"%s\", greeting()); return 0; }\n"),
     ]);
-    let env = [("JIG_CACHE", "off"), ("CC", "cc")];
+    let env = [("JIG_CACHE_DIR", "off"), ("CC", "cc")];
     project.configure_with(&env).ok();
     let run = |name: &str| {
         let output = jig_command().args(["run", name]).envs(env).current_dir(&project.dir).output().unwrap();
@@ -3568,7 +3611,8 @@ fn removed_crates_are_not_needed() {
         ("app.rs", "extern crate util;\nfn main() { print!(\"{}\", util::value()); }\n"),
     ]);
     let build = || {
-        let output = jig_command().args(["build"]).env("JIG_CACHE", "off").current_dir(&project.dir).output().unwrap();
+        let build = jig_command().args(["build"]).env("JIG_CACHE_DIR", "off").current_dir(&project.dir).output();
+        let output = build.unwrap();
         let shown = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
         assert!(output.status.success(), "{shown}");
         shown
@@ -4454,7 +4498,7 @@ test greets
     let project = Project::new("command-attributes", &[("Jig", &jig), ("uart.c", ""), ("app.rs", "fn main() {}\n"), ("lib.rs", "")]);
     let host = project.host();
     let cache = project.dir.join("cache").display().to_string();
-    let output = project.configure_with(&[("JIG_CACHE", &cache)]).ok();
+    let output = project.configure_with(&[("JIG_CACHE_DIR", &cache)]).ok();
     let generated = output.build("gen.txt");
     assert_contains(generated, " GREETING=hi ");
     assert_contains(generated, "\n    tags = fast");
@@ -4476,7 +4520,8 @@ test greets
     let lib = output.build(&format!("{host}/liblib.rlib"));
     assert_contains(lib, "\n    cache = ");
     // a test runs with its `env`
-    let test = jig_command().args(["test", "-v", "greets"]).env("JIG_CACHE", &cache).current_dir(&project.dir).output().unwrap();
+    let mut test = jig_command();
+    let test = test.args(["test", "-v", "greets"]).env("JIG_CACHE_DIR", &cache).current_dir(&project.dir).output().unwrap();
     let stdout = String::from_utf8(test.stdout).unwrap();
     assert!(test.status.success(), "{stdout}");
     assert_contains(&stdout, "    me\n");

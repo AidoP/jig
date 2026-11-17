@@ -53,6 +53,8 @@ Hiding or lowering an error does not make the configuration valid, so what is ge
 | `undeclared-property` | a property which is used, or set, and never declared |
 | `redeclare-property` | a property which is declared again, or a builtin one which is declared |
 | `read-only-property` | a read-only property which is set when it can't be |
+| `renamed-property` | a builtin property which is set by the name it had before, which sets the one it is now, a note |
+| `invalid-setting` | a setting of the cache or the workers which isn't what it can be, such as a size which isn't one |
 | `unset-property` | a property which is used where it has no value |
 | `none-selected` | a `select` of which none of the properties has a value |
 | `mismatched-type` | a value of another type than the property's |

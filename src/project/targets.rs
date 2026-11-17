@@ -369,9 +369,9 @@ impl Project {
         let default = target.test.is_none() && !target.is_custom();
         target.on_workers || (default && name != self.host() && !self.can_run(name) && self.has_workers())
     }
-    /// Whether there are workers, by `JIG_WORKERS`, if it is set, and otherwise the `workers` property.
+    /// Whether there are workers, by their variable, if it is set, and otherwise the `workers/list` property.
     pub(super) fn has_workers(&mut self) -> bool {
-        match self.read_env(crate::cache::WORKERS) {
+        match crate::cache::WORKERS.read(&mut |variable| self.read_env(variable)) {
             Some(workers) => workers.to_string_lossy().split(';').any(|worker| !worker.trim().is_empty()),
             None => self.cache_properties().workers.iter().any(|worker| !worker.trim().is_empty()),
         }
