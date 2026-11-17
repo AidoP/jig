@@ -51,8 +51,8 @@
 //!   strings: the reply is `OK`, or `ERROR` with the reason, such as that the server does not take pushes, or that
 //!   what was sent is not valid. A worker always takes blobs, as they are the inputs of the actions it runs, but
 //!   takes results and manifests only if it takes pushes.
-//! - `EXECUTE`, with a [`crate::worker::Request`]: a worker replies `FOUND` with whether the action succeeded (`1`
-//!   or `0`) and its result in the form a cache stores, whose blobs the worker has. It replies `NOT_FOUND` if it does
+//! - `EXECUTE`, with a [`crate::worker::Request`]: a worker replies `FOUND` with whether the action succeeded (`1`),
+//!   failed (`0`), or was killed as it ran longer than the request's timeout (`2`), and its result in the form a cache stores, whose blobs the worker has. It replies `NOT_FOUND` if it does
 //!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
 //!   requests for blobs are answered while they run. Before the reply, the worker reports each early output of the
 //!   action, such as rustc's metadata, once it has the output's blob: in a `MORE` frame with the id of the request,
@@ -96,7 +96,7 @@ use crate::cache::{Cache, Discovery, Hash};
 use crate::worker::{Executed, Refused, Request};
 
 const MAGIC: &[u8; 4] = b"RIGR";
-const VERSION: u32 = 11;
+const VERSION: u32 = 12;
 
 const HELLO: u8 = 1;
 const GET_MANIFEST: u8 = 2;
@@ -463,6 +463,8 @@ impl Link {
 /// A remote cache, which is connected to when it is first used.
 pub struct Remote {
     transport: Transport,
+    /// The name it is shown by.
+    name: String,
     /// The token which proves the client to a server which needs one.
     token: Option<Vec<u8>>,
     /// Whether results are pushed to it, if it takes them.
@@ -498,7 +500,23 @@ impl Remote {
         let (manifests, pusher) = (Mutex::default(), Mutex::default());
         let (refused, reported) = (Mutex::default(), Mutex::default());
         let (state, link) = (Mutex::new(state), Mutex::new((Link::default(), false)));
-        Self { transport, token: None, push, state, manifests, pusher, http: None, refused, reported, link }
+        let name = match &transport {
+            Transport::Command(command) => command.join(" "),
+            Transport::Tcp(address) => format!("tcp://{address}"),
+            Transport::Http | Transport::Streams => String::new(),
+        };
+        Self { transport, name, token: None, push, state, manifests, pusher, http: None, refused, reported, link }
+    }
+    /// Name it as it was given, such as `ssh://host`, in what is shown of it, in place of how it is reached.
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        name.clone_into(&mut self.name);
+        self
+    }
+    /// The name it is shown by, as it was given, or how it is reached.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
     }
     /// A remote cache served by a command on its stdin and stdout, such as `ssh host jig serve --stdio`. With
     /// `push`, results are pushed to it, if it takes them.
@@ -1698,6 +1716,7 @@ mod tests {
             inputs: vec![Input { path: "in".into(), blob, executable: false }],
             outputs: vec!["out".into()],
             early: Vec::new(),
+            timeout: None,
         };
         // a cache which is not a worker runs nothing, and does not take blobs
         let plain = cache("not-a-worker");

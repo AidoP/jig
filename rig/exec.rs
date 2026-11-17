@@ -420,6 +420,7 @@ impl Dispatch {
             inputs,
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
             early: self.early.clone(),
+            timeout: None,
         };
         // An early output is fetched as soon as it is reported, as edges which need only it are waiting. If it is
         // to be left on the worker instead, the file here is stale, and is removed.
