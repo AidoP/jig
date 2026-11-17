@@ -5,11 +5,8 @@ use std::process::Command;
 use crate::Error;
 use crate::configured::{Configured, Output};
 
-/// The edition the crates are formatted with, which they are built with.
-const EDITION: &str = "2024";
-
 /// Format the roots of the crates which are edited, which rustfmt follows to their modules, with the project's
-/// toolchain, and the sources of C and C++, with clang-format if it is installed, each by the configuration files they
+/// toolchain and each crate's edition, and the sources of C and C++, with clang-format if it is installed, each by the configuration files they
 /// find, such as `rustfmt.toml` and `.clang-format`. With `check`, nothing is changed, and it fails if a file is not
 /// formatted, showing how it would change.
 pub fn fmt(check: bool) -> Result<(), Error> {
@@ -17,16 +14,21 @@ pub fn fmt(check: bool) -> Result<(), Error> {
     let bytes = project.read()?;
     let database = project.parse(&bytes)?;
     let mut formatted = true;
-    if !database.rust_roots.is_empty() {
+    // rustfmt is run once for each edition, with the roots of that edition
+    let mut editions: Vec<&str> = database.rust_editions.clone();
+    editions.sort_unstable();
+    editions.dedup();
+    for edition in editions {
         let mut rustfmt = Command::new("rustfmt");
-        rustfmt.current_dir(&project.root).args(["--edition", EDITION]);
+        rustfmt.current_dir(&project.root).args(["--edition", edition]);
         if check {
             rustfmt.arg("--check");
         }
         if let Some(toolchain) = &project.toolchain {
             rustfmt.env("RUSTUP_TOOLCHAIN", toolchain);
         }
-        rustfmt.args(&database.rust_roots);
+        let roots = database.rust_roots.iter().zip(&database.rust_editions);
+        rustfmt.args(roots.filter(|&(_, of)| *of == edition).map(|(root, _)| root));
         formatted &= run(rustfmt)?;
     }
     if !database.c_sources.is_empty() {

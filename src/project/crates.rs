@@ -83,6 +83,8 @@ impl Project {
         // a crate is cached by default, when rig caches
         let mut running = Running::default();
         let mut kind = rust::Kind::Lib;
+        // as the property where it is declared says, unless its own attribute does
+        let mut edition = self.value("edition", parser.file).and_then(|value| rust::edition(&value.data));
         let mut link_script = None;
         let mut codegen = Vec::new();
         // the defaults of the install attributes depend on the crate type, so they are applied once it is known
@@ -120,6 +122,13 @@ impl Project {
                 "doc" => {
                     if let Some(value) = self.flag(&attribute.operand()) {
                         doc = value;
+                    }
+                },
+                "edition" => {
+                    let operand = attribute.operand();
+                    match rust::edition(&operand.data) {
+                        Some(given) => edition = Some(given),
+                        None => self.invalid_operand(&operand, "an edition, `2015`, `2018`, `2021` or `2024`", false),
                     }
                 },
                 "tag" => {
@@ -262,6 +271,7 @@ impl Project {
                         target_span,
                         dir,
                         kind,
+                        edition: edition.clone().unwrap_or_else(|| "2024".into()),
                         builtin,
                         default,
                         test,

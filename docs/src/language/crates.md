@@ -10,6 +10,9 @@ A `crate` statement may be followed by indented attributes:
   computed in `{}`, such as a property, `use {drivers}`, whose items are names, or crates which have been declared, so
   the crates a crate uses can be chosen by the configuration. A name can also be a [static](static-libraries.md) or
   [shared library](shared-libraries.md) for the same target, which the crate links
+- `edition <edition>`: the edition of Rust the crate is compiled with, `2015`, `2018`, `2021` or `2024`, as a number or
+  a string, in place of the `edition` property at its declaration, which is `2024` by default. rust-analyzer and
+  [jig fmt](../commands/fmt.md) are given it too
 - `cfg <option>`: a configuration option, given with `--cfg`, as a name, a list of names, or a dict of names to values
   or lists of them, as `<name>="<value>"`, such as `cfg [feature: ['uart', 'plic']]`. It can be repeated, and is also
   given to rust-analyzer

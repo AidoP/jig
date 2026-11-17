@@ -199,6 +199,11 @@ impl Project {
             self.invalid_operand(&operand, "`'timestamp'` or `'hash'`", false);
             return false;
         }
+        // as must the edition of the crates
+        if ident == "edition" && super::rust::edition(&operand.data).is_none() {
+            self.invalid_operand(&operand, "an edition, `2015`, `2018`, `2021` or `2024`", false);
+            return false;
+        }
         // as must the timeout of the tests
         if ident == "test-timeout" && super::customs::seconds(&operand.data).is_none() {
             self.invalid_operand(&operand, "a number of seconds above zero", false);

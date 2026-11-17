@@ -8420,3 +8420,29 @@ fn lint_checks_c_with_clang_tidy() {
     assert!(!success);
     assert_contains(&stderr, "nothing to lint named \"plain\"");
 }
+
+#[test]
+fn crates_have_editions() {
+    // the property gives the edition of what is declared while it is set, and a crate's own replaces it
+    let project = Project::new("editions", &[
+        ("Jig", "crate new 'new.rs'\nset edition 2018\ncrate old 'old.rs'\ncrate given 'given.rs'\n    edition '2021'\n"),
+        ("new.rs", ""),
+        ("old.rs", ""),
+        ("given.rs", ""),
+    ]);
+    let output = project.configure().ok();
+    let host = project.host();
+    for (name, edition) in [("new", "2024"), ("old", "2018"), ("given", "2021")] {
+        assert_contains(output.build(&format!("{host}/lib{name}.rlib")), &format!(" --edition={edition} "));
+    }
+    let analyzer = std::fs::read_to_string(project.dir.join(".rust-project.json")).unwrap();
+    assert_contains(&analyzer, "\"edition\": \"2018\"");
+    // one which is not an edition is an error, of the property or the attribute
+    let project = Project::new("editions-invalid", &[
+        ("Jig", "set edition 2019\ncrate a 'a.rs'\n    edition 'latest'\n"),
+        ("a.rs", ""),
+    ]);
+    let output = project.configure().failed();
+    assert_contains(&output.stderr, "error[invalid-operand]: unsigned value used where an edition, `2015`, `2018`, `2021` or `2024` is required\n --> Jig:1:13");
+    assert_contains(&output.stderr, "error[invalid-operand]: str value used where an edition");
+}

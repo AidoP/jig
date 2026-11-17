@@ -531,6 +531,13 @@ fn declare_builtins(
             install_prefix,
         ),
         (
+            project::Property::new("edition".into(), project::Type::Any).info(
+                "the edition of Rust the crates declared while it is set are compiled with, `2015`, `2018`, `2021` or \
+                 `2024`, as their own `edition` replaces",
+            ),
+            "2024".into(),
+        ),
+        (
             project::Property::new("change-detection".into(), project::Type::String).info(
                 "how rig finds that a file has changed: `'timestamp'`, by its time and size, or `'hash'`, by its \
                  contents too, so that what is written again unchanged builds nothing more",

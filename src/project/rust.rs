@@ -12,6 +12,8 @@ pub struct Crate {
     /// The directory of the outputs for the target, `<build-dir>/<target>`.
     pub dir: PathBuf,
     pub kind: Kind,
+    /// The edition rustc compiles it with, from its `edition` or the property where it is declared.
+    pub edition: String,
     pub builtin: bool,
     /// Whether the crate is built by `jig build` without targets.
     pub default: bool,
@@ -64,6 +66,20 @@ pub enum Kind {
     StaticLib,
     /// A shared library for C, as a shared library of C is named.
     CDylib,
+}
+
+/// The editions of Rust which a crate may have.
+pub const EDITIONS: [&str; 4] = ["2015", "2018", "2021", "2024"];
+
+/// Returns the edition a value gives, as a string or a number, if it is one of [`EDITIONS`].
+pub fn edition(data: &super::value::Data) -> Option<String> {
+    use super::value::Data;
+    let edition = match data {
+        Data::Str(edition) => edition.clone(),
+        Data::Unsigned(edition) => edition.to_string(),
+        _ => return None,
+    };
+    EDITIONS.contains(&edition.as_str()).then_some(edition)
 }
 
 impl Kind {

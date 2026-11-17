@@ -159,6 +159,8 @@ pub struct Unit {
     pub label: String,
     pub name: String,
     pub root: PathBuf,
+    /// The edition rustc compiles it with.
+    pub edition: String,
     pub target: String,
     /// The specification of the target, if it is a custom target.
     pub spec: Option<PathBuf>,
@@ -371,6 +373,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             // a library is checked without `--test`, as its metadata is used by the crates which depend on it
             test: c.test && !matches!(c.kind, Kind::Lib | Kind::ProcMacro | Kind::StaticLib | Kind::CDylib),
             kind: c.kind,
+            edition: c.edition.clone(),
             output: c.output(),
             deps,
             member,
@@ -654,7 +657,8 @@ fn write_graph(
         let tmpdir = Path::new("tmp").join(&c.target).join(&c.name);
         let linked = c.kind != Kind::Lib;
         let crate_flags = if linked { &linked_flags } else { &flags };
-        let rust = Rust { crate_type, name: &c.name, input: &input, env: &c.env, pass_env: &c.pass_env, toolchain };
+        let (edition, env, pass_env) = (&c.edition, &c.env, &c.pass_env);
+        let rust = Rust { crate_type, name: &c.name, edition, input: &input, env, pass_env, toolchain };
         // a library also writes its metadata, as an early output, which rustc reports to rig in JSON as it writes it
         let metadata = (c.kind == Kind::Lib).then(|| at.path(&c.metadata()));
         let mut leading = rustc_emit(&tmpdir, &output).to_vec();
@@ -767,7 +771,8 @@ fn write_graph(
         let mut flags = rustc_flags(&target, &outdir, unit.kind, &deps, &codegen, &root, at);
         flags.cfg(&unit.cfg);
         let (crate_type, name, env) = (unit.kind.crate_type(), &unit.name, &unit.env);
-        let rust = Rust { crate_type, name, input: &root, env, pass_env: &unit.pass_env, toolchain };
+        let edition = &unit.edition;
+        let rust = Rust { crate_type, name, edition, input: &root, env, pass_env: &unit.pass_env, toolchain };
         // a check writes metadata, rather than linking
         let placement = placement(unit, units, project, false);
         let deps: Vec<_> = deps.iter().map(|d| d.path.as_path()).collect();
@@ -1338,10 +1343,11 @@ fn write_database(
         let inside = path.starts_with(&at.root) && !path.starts_with(&at.build_dir);
         inside.then(|| path.strip_prefix(&at.root).unwrap_or(&path).display().to_string())
     };
-    let mut rust_roots: Vec<String> = Vec::new();
-    for root in units.iter().filter(|unit| unit.member).filter_map(|unit| in_project(&unit.root)) {
-        if !rust_roots.contains(&root) {
+    let (mut rust_roots, mut rust_editions): (Vec<String>, Vec<&str>) = (Vec::new(), Vec::new());
+    for unit in units.iter().filter(|unit| unit.member) {
+        if let Some(root) = in_project(&unit.root) && !rust_roots.contains(&root) {
             rust_roots.push(root);
+            rust_editions.push(&unit.edition);
         }
     }
     let mut c_sources: Vec<String> = Vec::new();
@@ -1395,6 +1401,7 @@ fn write_database(
         rustc_verbose_version: &rustc.verbose_version,
         library_path: library_path.iter().map(String::as_str).collect(),
         rust_roots: rust_roots.iter().map(String::as_str).collect(),
+        rust_editions,
         c_sources: c_sources.iter().map(String::as_str).collect(),
         ..Default::default()
     };
@@ -1585,6 +1592,7 @@ impl Flags {
 struct Rust<'a> {
     crate_type: &'a str,
     name: &'a str,
+    edition: &'a str,
     /// The root of the crate, rebased.
     input: &'a Path,
     /// The environment variables of the crate.
@@ -1599,7 +1607,7 @@ impl Rust<'_> {
     fn exec(&self, program: &str, leading: &[String], flags: &Flags, stderr: Option<&Path>) -> rig::Exec {
         let mut args = leading.to_vec();
         args.extend([format!("--crate-type={}", self.crate_type), format!("--crate-name={}", self.name)]);
-        args.push("--edition=2024".into());
+        args.push(format!("--edition={}", self.edition));
         args.extend(flags.args.iter().cloned());
         args.push(self.input.display().to_string());
         let mut env = toolchain_env(self.toolchain);

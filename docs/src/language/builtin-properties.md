@@ -19,6 +19,8 @@
 - `test-timeout`: the timeout of the tests declared while it is set, in seconds, such as `60` or `'0.5'`, which a
   test's own `timeout` replaces, with no value until it is set, so that a test has no timeout. Any other value is the
   error `invalid-operand` where it is set
+- `edition`: the edition of Rust the crates declared while it is set are compiled with, `2015`, `2018`, `2021` or
+  `2024`, which is the default, as a crate's own `edition` replaces
 - `change-detection`: how rig finds that a file has changed, `'timestamp'` by default, by its modification time and
   size, or `'hash'`, by a BLAKE3 hash of its contents too. With `'hash'`, a file which is written again unchanged, or
   changed and changed back, rebuilds nothing, and what depends on an output which is written unchanged is not rebuilt.
