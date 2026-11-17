@@ -8319,3 +8319,35 @@ fn clean_removes_what_was_built() {
     assert!(!ok);
     assert_contains(&output, "unknown target \"nothing\"");
 }
+
+#[test]
+fn doc_documents_crates_and_shows_where() {
+    let project = Project::new("doc", &[
+        ("Jig", "crate util 'util.rs'\n    doc\ncrate app 'app.rs'\n    crate-type 'bin'\n    use util\n    doc\ncrate plain 'plain.rs'\n"),
+        ("util.rs", "//! The utilities.\npub fn f() {}\n"),
+        ("app.rs", "fn main() { util::f() }\n"),
+        ("plain.rs", ""),
+    ]);
+    let jig = |args: &[&str]| {
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    let host = project.host();
+    let (ok, output) = jig(&["doc", "util"]);
+    assert!(ok, "{output}");
+    let page = format!("build/{host}/doc/util/index.html");
+    assert_contains(&output, &format!("\nutil: {page}\n"));
+    assert!(std::fs::read_to_string(project.dir.join(&page)).unwrap().contains("The utilities."));
+    assert!(!project.dir.join(format!("build/{host}/doc/app/index.html")).exists());
+    // every crate with `doc`, from a directory below the root, relative to which the pages are shown
+    std::fs::create_dir_all(project.dir.join("sub")).unwrap();
+    let output = jig_command().arg("doc").current_dir(project.dir.join("sub")).output().unwrap();
+    let shown = String::from_utf8(output.stdout).unwrap();
+    assert!(output.status.success(), "{shown}");
+    assert_contains(&shown, &format!("app: {}", project.dir.join(format!("build/{host}/doc/app/index.html")).display()));
+    // a crate without `doc` is not one to document
+    let (ok, output) = jig(&["doc", "plain"]);
+    assert!(!ok);
+    assert_contains(&output, "no crate to document named \"plain\"");
+}

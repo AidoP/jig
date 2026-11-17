@@ -11,8 +11,8 @@
 //! numbers is its length followed by its items, and a `bool` is the number `0` or `1`.
 //!
 //! The database is the magic bytes and the format version, followed by the fields of [`Database`] in the order
-//! [`write`] writes them, and then the sections: the flychecks, the tests, the lints, the programs and the
-//! installed files. A section is the number of its records followed by each record.
+//! [`write`] writes them, and then the sections: the flychecks, the tests, the lints, the documentation,
+//! the programs and the installed files. A section is the number of its records followed by each record.
 
 use std::io::Write;
 
@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 34;
+const VERSION: u32 = 35;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -80,6 +80,7 @@ pub struct Database<'a> {
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
+    pub docs: Vec<Doc<'a>>,
     pub programs: Vec<Program<'a>>,
     pub installs: Vec<Install<'a>>,
 }
@@ -109,6 +110,16 @@ pub struct Test<'a> {
     pub libtest: bool,
     /// The tags of the test, by which `jig test` chooses it.
     pub tags: Vec<&'a str>,
+}
+
+/// The documentation of a crate by rustdoc, which `jig doc` builds and shows the first page of.
+#[derive(Debug, PartialEq)]
+pub struct Doc<'a> {
+    /// The name of the crate, with its target if that is not the host target. Its target in the graph is
+    /// `doc/<name>`.
+    pub name: &'a str,
+    /// Its first page, relative to the project root.
+    pub index: &'a str,
 }
 
 /// The lint of a crate by clippy, which `jig lint` builds and shows the diagnostics of.
@@ -215,6 +226,11 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         w.str(lint.name);
         w.str(lint.diagnostics);
     }
+    w.len(database.docs.len());
+    for doc in &database.docs {
+        w.str(doc.name);
+        w.str(doc.index);
+    }
     w.len(database.programs.len());
     for program in &database.programs {
         w.str(program.name);
@@ -281,6 +297,9 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
     }
     for _ in 0..r.u32()? {
         database.lints.push(Lint { name: r.str()?, diagnostics: r.str()? });
+    }
+    for _ in 0..r.u32()? {
+        database.docs.push(Doc { name: r.str()?, index: r.str()? });
     }
     for _ in 0..r.u32()? {
         let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, flag(&mut r)?);
@@ -359,6 +378,7 @@ mod tests {
                 Test { name: "app", libtest: true, tags: vec![] },
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
+            docs: vec![Doc { name: "app", index: "build/x86_64/doc/app/index.html" }],
             programs: vec![
                 Program { name: "app", path: "build/host/app", target: "host/app", runner: vec![], default: true },
                 Program {
