@@ -1854,41 +1854,27 @@ set cache/push true
 }
 
 #[test]
-fn settings_renamed_and_checked() {
-    // an old name of a setting sets the property it was renamed to, and reads it, with a note
-    let jig = "set download 'targets'\nlog note 'download is {workers/download}, read as {download}'\n";
-    let project = Project::new("settings-renamed", &[("Jig", jig)]);
-    project
-        .configure()
-        .ok()
-        .stderr("note[renamed-property]: `download` is now `workers/download`, which it sets; the old name will be removed")
-        .stderr("note: download is targets, read as targets\n");
-    // unless the project declares a property of the name itself
-    let own = "declare download\n    default 'mine'\nset download 'yours'\nlog note '{download}, {workers/download}'\n";
-    std::fs::write(project.dir.join("Jig"), own).unwrap();
-    let output = project.configure().ok();
-    output.stderr("note: yours, all\n");
-    assert!(!output.stderr.contains("renamed-property"), "{}", output.stderr);
+fn settings_checked() {
     // a setting which is not what it can be is an error where it is set
-    std::fs::write(project.dir.join("Jig"), "set workers/download 'some'\nset workers ['tcp://nope']\n").unwrap();
+    let jig = "set workers/download 'some'\nset workers/list ['tcp://nope']\n";
+    let project = Project::new("settings-checked", &[("Jig", jig)]);
     project
         .configure()
         .failed()
         .stderr("error[invalid-setting]: `workers/download` is \"some\", which is not `'all'` or `'targets'`\n --> Jig:1:22")
         .stderr("error[invalid-setting]: `workers/list` is \"tcp://nope\", which is not a worker: ")
-        .stderr(" --> Jig:2:13");
-    // unless a variable overrides it, whose own value is used, and checked as the settings are resolved, by the name
-    // it has now, or the name it had before
-    let overridden = [("JIG_WORKERS_DOWNLOAD", "all"), ("JIG_WORKERS", "")];
+        .stderr(" --> Jig:2:18");
+    // unless its variable overrides it, whose own value is used, and checked as the settings are resolved
+    let overridden = [("JIG_WORKERS_DOWNLOAD", "all"), ("JIG_WORKERS_LIST", "")];
     assert!(!project.configure_with(&overridden).ok().stderr.contains("invalid-setting"));
-    let old = [("JIG_DOWNLOAD", "all"), ("JIG_WORKERS_LIST", "")];
-    assert!(!project.configure_with(&old).ok().stderr.contains("invalid-setting"));
-    // where the name it has now is read before the old one
     std::fs::write(project.dir.join("Jig"), "").unwrap();
     project
-        .configure_with(&[("JIG_WORKERS_DOWNLOAD", "some"), ("JIG_DOWNLOAD", "all")])
+        .configure_with(&[("JIG_WORKERS_DOWNLOAD", "some")])
         .failed()
         .stderr("\"some\" is not what is fetched of what workers build");
+    // the names the settings of the workers had before are no longer properties
+    std::fs::write(project.dir.join("Jig"), "set download 'targets'\n").unwrap();
+    project.configure().failed().stderr("error[undeclared-property]: ");
 }
 
 #[test]

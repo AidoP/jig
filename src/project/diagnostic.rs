@@ -140,7 +140,6 @@ pub(crate) const DIAGNOSTIC_IDS: &[&str] = &[
     "undeclared-property",
     "redeclare-property",
     "read-only-property",
-    "renamed-property",
     "invalid-setting",
     "unknown-declaration-attribute",
     "unknown-crate-attribute",
@@ -292,11 +291,6 @@ pub enum Message {
         id: usize,
         name: String,
         builtin: bool,
-    },
-    /// A property which was renamed is set by its old name, which sets the property it was renamed to.
-    RenamedProperty {
-        old: String,
-        now: &'static str,
     },
     /// A setting of the cache or the workers which is not what it can be, as [`crate::cache::invalid`] says.
     InvalidSetting {
@@ -570,9 +564,6 @@ impl core::fmt::Display for Message {
             },
             Self::RedeclareProperty { name, builtin: false, .. } => write!(f, "redeclaration of property {name:?}"),
             Self::RedeclareProperty { name, builtin: true, .. } => write!(f, "redeclaration of builtin property {name:?}"),
-            Self::RenamedProperty { old, now } => {
-                write!(f, "`{old}` is now `{now}`, which it sets; the old name will be removed")
-            },
             Self::InvalidSetting { name, value, expected } => {
                 write!(f, "`{name}` is {value:?}, which is not {expected}")
             },
@@ -784,7 +775,6 @@ impl Message {
             Self::ExpectedExact { .. } => "expected-exact",
             Self::UndeclaredProperty { .. } => "undeclared-property",
             Self::RedeclareProperty { .. } => "redeclare-property",
-            Self::RenamedProperty { .. } => "renamed-property",
             Self::InvalidSetting { .. } => "invalid-setting",
             Self::ReadOnlyProperty { .. } => "read-only-property",
             Self::UnknownDeclarationAttribute { .. } => "unknown-declaration-attribute",

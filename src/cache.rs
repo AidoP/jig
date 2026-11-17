@@ -3,7 +3,7 @@
 //!
 //! The cache and the workers are configured by builtin properties, which the user's configuration
 //! ([`crate::config`]) usually sets. An environment variable named after each overrides it, as [`Setting`]
-//! describes, and the names the variables had before are still read.
+//! describes.
 //!
 //! - `cache/dir`, or `JIG_CACHE_DIR`: the directory of the cache. `off`, or an empty value, turns the cache off. The
 //!   default is `$XDG_CACHE_HOME/jig`, or failing that `$HOME/.cache/jig`, and on Windows `%LOCALAPPDATA%\jig\cache`.
@@ -34,9 +34,6 @@
 //! recorded in the project's database, where a build reads them. A value the configuration gives which is not what
 //! its setting can be is the error `invalid-setting` where it is set, while a variable's is an error when the
 //! settings are resolved.
-//!
-//! `workers`, `workers-only` and `download` were renamed to `workers/list`, `workers/only` and `workers/download`.
-//! The old names still set them and read them, with the note `renamed-property`, until they are removed.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -44,52 +41,38 @@ use std::time::Duration;
 
 use crate::Error;
 
-/// A setting of the cache or the workers: its builtin property, and the environment variables which override it.
-///
-/// The first variable is named after the property, as `JIG_` followed by its name in capitals, with `_` for `/` and
-/// `-`. Any others are the names it had before, which are still read, but only when the variables before them are
-/// not set, so that the configuration depends on no more variables than it needs.
+/// A setting of the cache or the workers: its builtin property, and the environment variable which overrides it,
+/// which is named after the property, as `JIG_` followed by its name in capitals, with `_` for `/` and `-`.
 pub struct Setting {
     pub property: &'static str,
-    pub variables: &'static [&'static str],
+    pub variable: &'static str,
 }
 impl Setting {
-    /// Returns the value of the first of the setting's variables which is set, as `env` gives them.
+    /// Returns the value of the setting's variable, if it is set, as `env` gives it.
     pub fn read(&self, env: &mut impl FnMut(&str) -> Option<OsString>) -> Option<OsString> {
-        self.variables.iter().find_map(|variable| env(variable))
+        env(self.variable)
     }
 }
 
 /// The directory of the cache, or `off` to turn it off.
-pub const DIR: Setting = Setting { property: "cache/dir", variables: &["JIG_CACHE_DIR", "JIG_CACHE"] };
+pub const DIR: Setting = Setting { property: "cache/dir", variable: "JIG_CACHE_DIR" };
 /// The size the cache is collected down to.
-pub const SIZE: Setting = Setting { property: "cache/size", variables: &["JIG_CACHE_SIZE"] };
+pub const SIZE: Setting = Setting { property: "cache/size", variable: "JIG_CACHE_SIZE" };
 /// The remote cache.
-pub const REMOTE: Setting = Setting { property: "cache/remote", variables: &["JIG_CACHE_REMOTE", "JIG_REMOTE_CACHE"] };
-/// Whether results are pushed to the remote cache, which the variables give as `1`.
-pub const PUSH: Setting = Setting { property: "cache/push", variables: &["JIG_CACHE_PUSH", "JIG_REMOTE_CACHE_PUSH"] };
+pub const REMOTE: Setting = Setting { property: "cache/remote", variable: "JIG_CACHE_REMOTE" };
+/// Whether results are pushed to the remote cache, which the variable gives as `1`.
+pub const PUSH: Setting = Setting { property: "cache/push", variable: "JIG_CACHE_PUSH" };
 /// The file of the token for the remote cache and the workers.
-pub const TOKEN_FILE: Setting = Setting { property: "cache/token-file", variables: &["JIG_CACHE_TOKEN_FILE"] };
-/// The workers, which the variables separate by `;`.
-pub const WORKERS: Setting = Setting { property: "workers/list", variables: &["JIG_WORKERS_LIST", "JIG_WORKERS"] };
-/// Whether what a worker may build waits for a worker, which the variables give as `1`.
-pub const WORKERS_ONLY: Setting = Setting { property: "workers/only", variables: &["JIG_WORKERS_ONLY"] };
+pub const TOKEN_FILE: Setting = Setting { property: "cache/token-file", variable: "JIG_CACHE_TOKEN_FILE" };
+/// The workers, which the variable separates by `;`.
+pub const WORKERS: Setting = Setting { property: "workers/list", variable: "JIG_WORKERS_LIST" };
+/// Whether what a worker may build waits for a worker, which the variable gives as `1`.
+pub const WORKERS_ONLY: Setting = Setting { property: "workers/only", variable: "JIG_WORKERS_ONLY" };
 /// How much of what workers build is fetched, `all` or `targets`.
-pub const DOWNLOAD: Setting =
-    Setting { property: "workers/download", variables: &["JIG_WORKERS_DOWNLOAD", "JIG_DOWNLOAD"] };
+pub const DOWNLOAD: Setting = Setting { property: "workers/download", variable: "JIG_WORKERS_DOWNLOAD" };
 
 /// Every setting, in the order the book lists them.
 pub const SETTINGS: [&Setting; 8] = [&DIR, &SIZE, &REMOTE, &PUSH, &TOKEN_FILE, &WORKERS, &WORKERS_ONLY, &DOWNLOAD];
-
-/// The properties of the workers which were renamed, by their old names, with the names they have now. Setting one
-/// sets the property it was renamed to, with the note `renamed-property`.
-const RENAMED: [(&str, &str); 3] =
-    [("workers", WORKERS.property), ("workers-only", WORKERS_ONLY.property), ("download", DOWNLOAD.property)];
-
-/// Returns the name a property has now, if it is the old name of one which was renamed.
-pub fn renamed(name: &str) -> Option<&'static str> {
-    RENAMED.iter().find(|(old, _)| *old == name).map(|&(_, now)| now)
-}
 
 /// Checks the value of a setting which can be invalid: a size, a remote cache, a worker, or what is fetched of what
 /// workers build. Returns what it must be, for a diagnostic, which follows "is not", if it is not that.
@@ -312,7 +295,7 @@ fn read_token(path: &std::path::Path) -> Result<Vec<u8>, Error> {
     Ok(token.trim_ascii().to_vec())
 }
 
-/// Returns the command which serves a remote cache, from the value of `JIG_REMOTE_CACHE`. Returns `None` if the
+/// Returns the command which serves a remote cache, from the value of `cache/remote`. Returns `None` if the
 /// value is empty, or is an `ssh://` address without a host. `push` is whether results are pushed to it.
 ///
 /// An `ssh://` address runs `jig`, or the path given after the host, with `serve --stdio`, and with `--push` to
@@ -616,13 +599,13 @@ mod tests {
         };
         assert_eq!(settings, expected);
         let overridden = env(&[
-            ("JIG_CACHE", "/c"),
+            ("JIG_CACHE_DIR", "/c"),
             ("JIG_CACHE_SIZE", "2M"),
-            ("JIG_REMOTE_CACHE", "ssh://other"),
-            ("JIG_REMOTE_CACHE_PUSH", "0"),
-            ("JIG_WORKERS", "tcp://a:1; env jig worker --stdio ;"),
+            ("JIG_CACHE_REMOTE", "ssh://other"),
+            ("JIG_CACHE_PUSH", "0"),
+            ("JIG_WORKERS_LIST", "tcp://a:1; env jig worker --stdio ;"),
             ("JIG_WORKERS_ONLY", "0"),
-            ("JIG_DOWNLOAD", "all"),
+            ("JIG_WORKERS_DOWNLOAD", "all"),
         ]);
         let settings = resolved(Settings::resolve(&properties, overridden));
         let expected = Settings {
@@ -638,7 +621,7 @@ mod tests {
         };
         assert_eq!(settings, expected);
         // and turns it off, or has no remote cache
-        let off = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE", "off"), ("JIG_REMOTE_CACHE", " ")])));
+        let off = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE_DIR", "off"), ("JIG_CACHE_REMOTE", " ")])));
         assert_eq!((off.dir, off.remote), (None, None));
         let empty = Properties {
             dir: String::new(),
@@ -653,11 +636,11 @@ mod tests {
         assert_eq!(resolved(Settings::resolve(&empty, env(&[]))).dir, None);
         // what is not a size or a remote cache is an error
         assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_SIZE", "lots")])), Err(Error::InvalidSize(_))));
-        let download = Settings::resolve(&properties, env(&[("JIG_DOWNLOAD", "some")]));
+        let download = Settings::resolve(&properties, env(&[("JIG_WORKERS_DOWNLOAD", "some")]));
         assert!(matches!(download, Err(Error::InvalidDownload(_))));
-        assert!(matches!(Settings::resolve(&properties, env(&[("JIG_REMOTE_CACHE", "ssh://")])), Err(Error::InvalidRemote(_))));
+        assert!(matches!(Settings::resolve(&properties, env(&[("JIG_CACHE_REMOTE", "ssh://")])), Err(Error::InvalidRemote(_))));
         let workers: [&'static [(&str, &str)]; 3] =
-            [&[("JIG_WORKERS", "http://cache")], &[("JIG_WORKERS", "ssh://")], &[("JIG_WORKERS", "tcp://worker")]];
+            [&[("JIG_WORKERS_LIST", "http://cache")], &[("JIG_WORKERS_LIST", "ssh://")], &[("JIG_WORKERS_LIST", "tcp://worker")]];
         for workers in workers {
             let resolved = Settings::resolve(&properties, env(workers));
             assert!(matches!(resolved, Err(Error::InvalidWorker(_))), "{workers:?}");
@@ -665,27 +648,16 @@ mod tests {
     }
 
     #[test]
-    fn reads_each_setting_by_its_variables() {
+    fn reads_each_setting_by_its_variable() {
         let env = |vars: &'static [(&'static str, &'static str)]| {
             move |name: &str| vars.iter().find(|(var, _)| *var == name).map(|(_, value)| OsString::from(value))
         };
-        // the first variable of each is named after its property
+        // each variable is named after its property
         for setting in SETTINGS {
             let named = format!("JIG_{}", setting.property.to_uppercase().replace(['/', '-'], "_"));
-            assert_eq!(setting.variables[0], named);
+            assert_eq!(setting.variable, named);
         }
-        // which is read first, and an old name only when it is not set, so that the configuration does not depend on
-        // the old name then
-        let both = env(&[("JIG_CACHE_DIR", "/new"), ("JIG_CACHE", "/old")]);
-        let mut read = Vec::new();
-        let value = DIR.read(&mut |name| {
-            read.push(name.to_string());
-            both(name)
-        });
-        assert_eq!((value, read), (Some("/new".into()), vec!["JIG_CACHE_DIR".to_string()]));
-        assert_eq!(DIR.read(&mut env(&[("JIG_CACHE", "/old")])), Some("/old".into()));
-        assert_eq!(DIR.read(&mut env(&[])), None);
-        // the token file has a variable too
+        // the token file has one too
         let properties = Properties {
             dir: String::new(),
             size: "1G".into(),
@@ -698,11 +670,6 @@ mod tests {
         };
         let settings = resolved(Settings::resolve(&properties, env(&[("JIG_CACHE_TOKEN_FILE", "/variable")])));
         assert_eq!(settings.token_file, Some(std::path::absolute("/variable").unwrap()));
-        // the properties which were renamed
-        assert_eq!(renamed("workers"), Some("workers/list"));
-        assert_eq!(renamed("workers-only"), Some("workers/only"));
-        assert_eq!(renamed("download"), Some("workers/download"));
-        assert_eq!(renamed("workers/list"), None);
         // and what each setting can be
         let checks = [
             (&SIZE, "10G", "lots"),
@@ -746,7 +713,7 @@ mod tests {
         );
         assert_eq!(command("ssh://", false), None);
         assert_eq!(command("ssh://ci@", false), None);
-        assert_eq!(command("env JIG_CACHE=/srv jig serve --stdio", false).as_deref(), Some("env JIG_CACHE=/srv jig serve --stdio"));
+        assert_eq!(command("env JIG_CACHE_DIR=/srv jig serve --stdio", false).as_deref(), Some("env JIG_CACHE_DIR=/srv jig serve --stdio"));
         assert_eq!(command("  ", false), None);
         assert_eq!(remote_transport("tcp://cache:7000", true), Some(Transport::Tcp("cache:7000".into())));
         assert_eq!(remote_transport("tcp://[::1]:7000", false), Some(Transport::Tcp("[::1]:7000".into())));

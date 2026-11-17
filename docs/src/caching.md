@@ -21,9 +21,7 @@ After a build, once a day, the cache is collected as by `jig cache gc`, down to 
 default, which the `JIG_CACHE_SIZE` environment variable overrides. `jig cache` takes the settings of the user's
 configuration, rather than a project's.
 
-The variables which were named `JIG_CACHE`, `JIG_REMOTE_CACHE` and `JIG_REMOTE_CACHE_PUSH` before are still read
-when the new ones are not set, as [builtin properties](language/builtin-properties.md) describes. A size or a remote
-cache which is not one is the error `invalid-setting` where the configuration sets it.
+A size or a remote cache which is not one is the error `invalid-setting` where the configuration sets it.
 
 ```
 ./build/bootstrap/jig cache stats
