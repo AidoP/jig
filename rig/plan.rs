@@ -14,6 +14,8 @@
 //! run. A generator edge does not run when its command changes, as the generator itself writes the graph which holds
 //! that command.
 //!
+//! An edge which runs [`always`](crate::Edge::always) must run whenever it is wanted, whatever its record says.
+//!
 //! An alias is out of date if an edge which produces one of its inputs must run, or if it has no inputs and is not a
 //! file. An edge which takes an alias as an input takes the alias's inputs in its place, so that it runs when one of
 //! them changes.
@@ -50,6 +52,8 @@ pub enum Reason {
     EnvChanged(String),
     /// An alias without inputs, which is not a file, which is always out of date.
     Forced,
+    /// An edge which runs on every build which wants it, as a test does.
+    Always,
 }
 impl std::fmt::Display for Reason {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -66,6 +70,7 @@ impl std::fmt::Display for Reason {
             Self::DiscoveredChanged(path) => write!(f, "discovered input {path:?} has changed"),
             Self::EnvChanged(name) => write!(f, "environment variable {name:?} has changed"),
             Self::Forced => write!(f, "it is an alias without inputs, which is always out of date"),
+            Self::Always => write!(f, "it runs every time"),
         }
     }
 }
@@ -506,6 +511,9 @@ pub(crate) fn reason(
         let forced = edge.inputs().is_empty() && edge.dependencies().is_empty();
         let missing = edge.outputs().iter().any(|&output| !stamps.node(output).exists());
         return (forced && missing).then_some(Reason::Forced);
+    }
+    if edge.always() {
+        return Some(Reason::Always);
     }
     let outputs = edge.outputs();
     let Some(record) = outputs.first().and_then(|&first| state.get(graph.path(first))) else {

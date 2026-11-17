@@ -4,7 +4,7 @@ use std::collections::hash_map::Entry;
 use std::path::{Path, PathBuf};
 
 use super::codegen::{CodegenAttribute, is_codegen_option};
-use super::customs::{Custom, CustomKind};
+use super::customs::{Custom, CustomKind, TestRun};
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
 use super::statements::Name;
@@ -74,6 +74,8 @@ impl Project {
         let mut tested = Tested::All(false);
         let mut doc = false;
         let mut tags = Vec::new();
+        // how its test runs, from `timeout` and `serial`
+        let mut test_run = self.default_test_run(parser.file);
         let mut targets = None;
         let mut uses = Vec::new();
         let mut depends = Vec::new();
@@ -125,6 +127,7 @@ impl Project {
                         tags.extend(new);
                     }
                 },
+                name @ ("timeout" | "serial") => self.test_run_attribute(&mut test_run, name, &attribute.operand()),
                 "crate-type" => {
                     let span = attribute.data_span;
                     let Some(crate_type) = self.str_operand(attribute.operand()) else {
@@ -282,7 +285,7 @@ impl Project {
                         let name = c.short_name(&host);
                         let harness = c.test_harness();
                         let depends = c.depends.clone();
-                        self.add_crate_test(name, span, harness, depends, tags.clone());
+                        self.add_crate_test(name, span, harness, depends, tags.clone(), test_run.clone());
                     }
                 },
             }
@@ -390,7 +393,15 @@ impl Project {
     /// Register the test harness of a crate, like a `test` statement which runs it.
     ///
     /// The harness is run directly, until the runner of its target is known.
-    fn add_crate_test(&mut self, name: String, span: Span, harness: PathBuf, depends: Vec<PathBuf>, tags: Vec<String>) {
+    fn add_crate_test(
+        &mut self,
+        name: String,
+        span: Span,
+        harness: PathBuf,
+        depends: Vec<PathBuf>,
+        tags: Vec<String>,
+        run: TestRun,
+    ) {
         let command = vec![Path::new(".").join(&harness).display().to_string()];
         self.add_custom(Custom {
             name,
@@ -399,7 +410,7 @@ impl Project {
             depends,
             command,
             program: None,
-            kind: CustomKind::Test { runner: None, harness: true, on_workers: None },
+            kind: CustomKind::Test { runner: None, harness: true, on_workers: None, run },
             tags,
             running: Running::default(),
             cache: None,
@@ -447,7 +458,8 @@ impl Project {
                 },
             };
             if let Some(declared) = declared {
-                self.customs[declared].kind = CustomKind::Test { runner, harness: true, on_workers };
+                let run = self.customs[declared].test_run().cloned().unwrap_or_default();
+                self.customs[declared].kind = CustomKind::Test { runner, harness: true, on_workers, run };
             }
         }
         if !removed.is_empty() {

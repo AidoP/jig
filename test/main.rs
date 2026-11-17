@@ -5077,7 +5077,7 @@ log note run({'HELPER'}, '--rig-test-helper', 'echo', 'a string')
     let stdout = String::from_utf8(test.stdout).unwrap();
     assert_contains(&stdout, "booted Some(\"by name\")");
     // `which` is `boot`, which isn't a program in `PATH`
-    assert_contains(&stdout, "failed to run \"boot\"");
+    assert_contains(&stdout, "failed to run `boot`");
 }
 
 #[test]
@@ -5128,6 +5128,67 @@ test words
     let (passed, _, stderr) = test(&["-j", "0"]);
     assert!(!passed);
     assert_contains(&stderr, "\"0\" is not a number of jobs");
+}
+
+#[test]
+fn tests_declare_how_they_run() {
+    // each test which runs here is an edge of rig's graph which runs always, with its timeout, which `test-timeout`
+    // gives by default, and in the serial pool if it is serial, as is a crate's test
+    let helper = "command 'HELPER' '--rig-test-helper'";
+    let jig = format!("\
+set test-timeout 30
+test counted
+    {helper} 'echo' 'ran' '>>' 'count'
+test stuck
+    {helper} 'echo' 'stuck started' '&&' 'sleep' '120'
+    timeout '0.5'
+test alone
+    {helper} 'true'
+    serial
+crate app 'app.rs'
+    crate-type 'bin'
+    test
+    timeout 20
+    serial
+");
+    let project = Project::new("test-run", &[("Jig", &jig), ("app.rs", "fn main() {}\n#[test]\nfn t() {}\n")]);
+    let output = project.configure().ok();
+    let counted = output.build("test-run/counted");
+    assert_contains(counted, "\n    timeout = 30\n");
+    assert!(counted.ends_with("\n    always = true"), "{counted}");
+    assert_contains(counted, "\n    inputs = test/counted\n");
+    assert_contains(output.build("test-run/stuck"), "\n    timeout = 0.5\n");
+    assert_contains(output.build("test-run/alone"), "\n    pool = serial\n");
+    let app = output.build("test-run/app");
+    assert_contains(app, "\n    pool = serial\n");
+    assert_contains(app, "\n    timeout = 20\n");
+    let test = |args: &[&str]| {
+        let output = jig_command().arg("test").args(args).current_dir(&project.dir).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+        (output.status.success(), stdout, stderr)
+    };
+    // it runs every time it is asked for, though nothing it reads changed
+    for _ in 0..2 {
+        let (passed, stdout, _) = test(&["counted", "alone", "app"]);
+        assert!(passed, "{stdout}");
+    }
+    assert_eq!(std::fs::read_to_string(project.dir.join("count")).unwrap(), "ran\nran\n");
+    // one which runs for longer than its own timeout is killed, and fails, with what it printed until then
+    let started = std::time::Instant::now();
+    let (passed, stdout, _) = test(&["stuck"]);
+    assert!(!passed, "{stdout}");
+    assert!(started.elapsed() < std::time::Duration::from_mins(1), "{:?}", started.elapsed());
+    assert_contains(&stdout, "---- stuck ----\ntimed out after 0.50s\nstuck started\n");
+    // a timeout must be a number of seconds above zero, where it is given, or set
+    let invalid = format!("test bad\n    {helper} 'true'\n    timeout 0\nset test-timeout 'soon'\n");
+    std::fs::write(project.dir.join("Jig"), invalid).unwrap();
+    project
+        .configure()
+        .failed()
+        .stderr("error[invalid-operand]: ")
+        .stderr("a number of seconds above zero")
+        .stderr(" --> Jig:3:13")
+        .stderr(" --> Jig:4:18");
 }
 
 #[test]

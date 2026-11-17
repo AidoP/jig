@@ -449,12 +449,30 @@ fn write_graph(
 
     let mut tests = Vec::new();
     for custom in &project.customs {
-        // a test is run by `jig test`, which first builds this alias of the test's inputs and program
+        // A test has an alias of its inputs and program. One which runs here is also an edge which runs always,
+        // after them, which `jig test` builds, while one which runs on a worker is sent there by `jig test` itself.
         let CustomKind::Command { outputs, default, edge, .. } = &custom.kind else {
             let alias = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
             let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
             graph.alias(&alias, &as_paths(&inputs))?;
+            if let Some(run) = custom.test_run().filter(|_| custom.on_workers().is_none()) {
+                // from the project root, with the toolchain, and its own variables after it
+                let command = custom.command(&project.runners);
+                let mut env = toolchain_env(toolchain);
+                env.extend(custom.running.env.iter().cloned());
+                let exec = program(&command[0], command[1..].to_vec(), Some(&at.path(&at.root)), env);
+                graph.edge(Edge {
+                    description: format!("TEST {}", custom.name),
+                    outputs: &[Path::new(&test_run(&custom.name))],
+                    inputs: &[&alias],
+                    exec,
+                    serial: run.serial,
+                    always: true,
+                    timeout: run.timeout,
+                    ..Default::default()
+                })?;
+            }
             tests.push(alias);
             continue;
         };
@@ -1592,6 +1610,11 @@ fn metadata_emit(outdir: &Path, output: &Path, lint: bool) -> [String; 4] {
         format!("--emit=metadata={}", output.display()),
         format!("--emit=dep-info={}.d", output.display()),
     ]
+}
+
+/// Returns the first output of the edge which runs a test here, which is no file, as the test writes none.
+pub fn test_run(name: &str) -> String {
+    format!("test-run/{name}")
 }
 
 /// Returns the environment which selects the toolchain, if there is one.

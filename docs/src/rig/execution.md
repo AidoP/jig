@@ -24,7 +24,13 @@ instead. A jobserver given as file descriptors, by an older make, isn't joined.
 
 Each command runs without a shell, in the build directory, or the directory it gives, with stdin closed. Its stdout and
 stderr go to one pipe, and what it printed is shown in one piece once it has finished. A command in the console pool
-runs alone with the terminal.
+runs alone with the terminal. A command in the serial pool starts once nothing else is running, and nothing else starts
+until it has finished.
+
+A command which runs for longer than its edge's timeout is killed, with its process group, and fails with
+`Outcome::TimedOut`. An edge which runs `always`, as a test does, is planned to run whenever it is wanted, with the
+reason `Always`. `Options::given` gives such an edge arguments, variables and a timeout beside its own, as `jig test`
+gives its tests what it was given, which is not part of the edge's action, as such an edge is never cached.
 
 Each command, but a console one, leads a process group of its own, or on Windows, a job object. An interrupted build,
 by `SIGINT`, `SIGTERM` or `SIGHUP`, or Ctrl-C, Ctrl-Break or the console closing on Windows, or by

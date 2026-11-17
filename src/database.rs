@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 32;
+const VERSION: u32 = 33;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {

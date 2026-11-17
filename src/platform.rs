@@ -194,14 +194,20 @@ pub const LIBRARY_PATH: &str = if cfg!(windows) {
 /// Give a command the directories of shared libraries, relative to `root`, before those of [`LIBRARY_PATH`] it
 /// inherits, so that a program which links them finds them as it runs.
 pub fn add_library_path(command: &mut std::process::Command, root: &std::path::Path, dirs: &[&str]) {
+    if let Some(path) = library_path(root, dirs) {
+        command.env(LIBRARY_PATH, path);
+    }
+}
+
+/// Returns the value of [`LIBRARY_PATH`] which gives a program the directories of shared libraries, relative to
+/// `root`, before those it inherits, or `None` if there are none, or they cannot be joined.
+pub fn library_path(root: &std::path::Path, dirs: &[&str]) -> Option<std::ffi::OsString> {
     if dirs.is_empty() {
-        return;
+        return None;
     }
     let inherited = std::env::var_os(LIBRARY_PATH).unwrap_or_default();
     let paths = dirs.iter().map(|dir| root.join(dir)).chain(std::env::split_paths(&inherited));
-    if let Ok(joined) = std::env::join_paths(paths) {
-        command.env(LIBRARY_PATH, joined);
-    }
+    std::env::join_paths(paths).ok()
 }
 
 #[cfg(test)]

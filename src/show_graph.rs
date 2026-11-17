@@ -25,8 +25,9 @@
 //!   its variables, the program and its arguments, and the file stderr is written to, if it has one, with `2>`.
 //! - `depfile`, `discover`, the command which writes the depfile without running the edge, `early`, the outputs it
 //!   reports as it writes them, `pass-env`, the variables it passes on, a word each.
-//! - `pool = console`, `cache`, the identity it is cached by, `target`, `tags` and `any-host`, which workers run it.
-//! - `generator`, `restat` and `hashed`, each `= true`, if it is.
+//! - `pool = console` or `pool = serial`, `timeout`, in seconds, `cache`, the identity it is cached by, `target`,
+//!   `tags` and `any-host`, which workers run it.
+//! - `generator`, `restat`, `hashed` and `always`, each `= true`, if it is.
 //!
 //! The JSON is an object of `edges`, an array of an object for each, and of `defaults`, an array of paths. An edge has
 //! `outputs`, then the keys of the text, in its order, but for `command`, which it has in parts: `program`, `args`,
@@ -69,6 +70,8 @@ pub fn show(json: bool, outputs: &[String]) -> Result<(), Error> {
 /// of words.
 enum Value {
     Text(String),
+    /// A number, which JSON gives as one rather than as a string.
+    Number(f64),
     Words(Vec<String>),
     Pairs(Vec<(String, String)>),
     Flag,
@@ -135,8 +138,13 @@ fn finish(
     if !edge.pass_env().is_empty() {
         fields.push(("pass-env", Value::Words(edge.pass_env().to_vec())));
     }
-    if edge.pool() == rig::Pool::Console {
-        fields.push(("pool", Value::Text("console".into())));
+    match edge.pool() {
+        rig::Pool::Console => fields.push(("pool", Value::Text("console".into()))),
+        rig::Pool::Serial => fields.push(("pool", Value::Text("serial".into()))),
+        rig::Pool::Default => (),
+    }
+    if let Some(timeout) = edge.timeout() {
+        fields.push(("timeout", Value::Number(timeout.as_secs_f64())));
     }
     if let Some(cache) = edge.cache() {
         fields.push(("cache", Value::Text(cache.into())));
@@ -153,6 +161,7 @@ fn finish(
         ("generator", edge.generator()),
         ("restat", edge.restat()),
         ("hashed", edge.hashed()),
+        ("always", edge.always()),
     ];
     fields.extend(flags.into_iter().filter(|&(_, set)| set).map(|(key, _)| (key, Value::Flag)));
     fields
@@ -167,6 +176,7 @@ fn to_text(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
         for (key, value) in fields(graph, edge, true) {
             match value {
                 Value::Text(value) => _ = writeln!(text, "    {key} = {value}"),
+                Value::Number(number) => _ = writeln!(text, "    {key} = {number}"),
                 Value::Words(words) => {
                     let words: Vec<String> = words.iter().map(|word| quote(word)).collect();
                     let _ = writeln!(text, "    {key} = {}", words.join(" "));
@@ -206,6 +216,7 @@ fn to_json(graph: &rig::Graph, edges: &[rig::EdgeRef<'_>], defaults: bool) -> St
         for (key, value) in fields(graph, edge, false) {
             let value = match value {
                 Value::Text(value) => string(&value),
+                Value::Number(number) => number.to_string(),
                 Value::Words(words) => list(&mut words.iter().map(|word| string(word))),
                 Value::Pairs(pairs) => {
                     list(&mut pairs.iter().map(|(name, value)| format!("[{}, {}]", string(name), string(value))))

@@ -1,5 +1,7 @@
 //! The build graph: files, and the edges which produce them.
 
+use std::time::Duration;
+
 use crate::Error;
 
 /// A file, or the name of an alias, in a [`Graph`].
@@ -72,6 +74,9 @@ pub enum Pool {
     Default,
     /// The edge runs alone, with the terminal.
     Console,
+    /// The edge runs with nothing else running, with its output captured, as a test which times what it runs, or
+    /// which shares files with others, must.
+    Serial,
 }
 
 /// An edge to add to a [`Graph`].
@@ -116,6 +121,11 @@ pub struct Edge {
     /// A program which writes the edge's depfile without doing the edge's work, such as rustc with
     /// `--emit=dep-info` alone. It finds the inputs of an edge which has not run, so that it can be sent to a worker.
     pub discover: Option<Exec>,
+    /// Whether the edge runs on every build which wants it, as a test does, whose results depend on more than it
+    /// declares. Such an edge is never up to date, and is neither cached nor sent to a worker, whatever `cache` says.
+    pub always: bool,
+    /// How long the edge may run before it is killed, with what it started, and fails.
+    pub timeout: Option<Duration>,
     /// Outputs which the action writes, and reports, before it finishes, such as a crate's metadata, which rustc
     /// reports with `--json=artifacts`. Edges which need only these outputs start as soon as they are written. An
     /// edge with early outputs must print what rustc prints with `--error-format=json`; the rendered diagnostics in
@@ -157,6 +167,8 @@ struct EdgeData {
     placement: Placement,
     discover: Option<Exec>,
     early: Vec<NodeId>,
+    always: bool,
+    timeout: Option<Duration>,
     /// The start and end of each list of nodes in [`Graph::ids`].
     lists: [(u32, u32); LISTS],
 }
@@ -286,6 +298,8 @@ impl Graph {
             placement: edge.placement,
             discover: edge.discover,
             early: edge.early,
+            always: edge.always,
+            timeout: edge.timeout,
             lists,
         });
         Ok(id)
@@ -411,7 +425,7 @@ impl<'a> EdgeRef<'a> {
     /// Whether the edge's files are stamped by their contents, which they are if it is hashed or cached.
     #[must_use]
     pub fn hashed(&self) -> bool {
-        self.data.hashed || self.data.cache.is_some()
+        self.data.hashed || self.cache().is_some()
     }
     /// The edge's own `hashed` flag, which does not include being cached.
     pub(crate) fn hashed_flag(&self) -> bool {
@@ -427,12 +441,29 @@ impl<'a> EdgeRef<'a> {
     /// produces.
     #[must_use]
     pub fn hermetic(&self) -> bool {
-        self.data.cache.is_some()
+        self.cache().is_some()
     }
-    /// The edge's cache identity, if its results are cached. See [`Edge::cache`].
+    /// The edge's cache identity, if its results are cached. See [`Edge::cache`]. An edge which runs [`always`] has
+    /// none.
+    ///
+    /// [`always`]: Edge::always
     #[must_use]
     pub fn cache(&self) -> Option<&'a str> {
+        self.data.cache.as_deref().filter(|_| !self.data.always)
+    }
+    /// The cache identity the edge was given, whether or not it runs [`always`](Edge::always), as it is saved.
+    pub(crate) fn given_cache(&self) -> Option<&'a str> {
         self.data.cache.as_deref()
+    }
+    /// Whether the edge runs on every build which wants it. See [`Edge::always`].
+    #[must_use]
+    pub fn always(&self) -> bool {
+        self.data.always
+    }
+    /// How long the edge may run before it is killed, if it has a limit.
+    #[must_use]
+    pub fn timeout(&self) -> Option<Duration> {
+        self.data.timeout
     }
     /// Which workers the edge may run on, if it is cached.
     #[must_use]
@@ -469,6 +500,8 @@ impl<'a> EdgeRef<'a> {
             placement: self.data.placement.clone(),
             discover: self.data.discover.clone(),
             early: self.data.early.clone(),
+            always: self.data.always,
+            timeout: self.data.timeout,
         }
     }
     fn list(&self, list: usize) -> &'a [NodeId] {

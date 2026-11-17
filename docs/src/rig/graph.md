@@ -26,10 +26,13 @@ An edge runs a command, or is an alias, which runs nothing and is up to date onc
 - **a command,** an `Exec`: a program, its arguments, environment variables, a working directory relative to the
   build directory, and a file its stderr is written to;
 - **a description,** shown while it runs;
-- **its pool,** `Default`, or `Console`, whose edges run one at a time with the terminal;
+- **its pool,** `Default`; `Console`, whose edges run one at a time with the terminal; or `Serial`, whose edges each
+  run with nothing else running;
 - **flags:** `generator`, for the edge which generates the graph; `restat`, for an edge whose outputs are stamped again
-  once it has run, so that what depends on an output it left alone isn't rebuilt; and `hashed`, for one whose files are
-  stamped by their contents;
+  once it has run, so that what depends on an output it left alone isn't rebuilt; `hashed`, for one whose files are
+  stamped by their contents; and `always`, for one which runs on every build which wants it, as a test does, which is
+  never cached or sent to a worker;
+- **a timeout,** how long it may run before it is killed and fails;
 - **a cache identity,** for an edge whose results the cache keeps, which identifies its toolchain;
 - **the variables it passes on,** of those it inherits, which are its inputs (see [environment
   variables](environment.md));

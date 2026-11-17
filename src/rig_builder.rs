@@ -31,6 +31,69 @@ pub struct Request<'a> {
     /// Build what can be built after a command fails, rather than stopping.
     pub keep_going: bool,
     pub output: Output,
+    /// Edges whose outcomes are collected rather than shown, as `jig test` shows its tests' itself.
+    pub tests: Option<&'a std::cell::RefCell<Tests>>,
+}
+
+/// The edges which run tests in a build, by their first outputs, with what each is given beside its action, and what
+/// each printed and how it finished, which are collected rather than shown.
+#[derive(Default)]
+pub struct Tests {
+    pub given: HashMap<String, rig::exec::Given>,
+    /// What each test which ran printed, how it finished, and how long it ran.
+    pub finished: HashMap<String, (rig::exec::Outcome, Vec<u8>, std::time::Duration)>,
+    /// How many of the other edges failed, as what the tests need.
+    pub others_failed: usize,
+}
+
+/// An observer which collects what the edges of tests print and how they finish, rather than passing them on, and
+/// passes everything else on to the observer which shows the build. The console still shows a test running and
+/// finishing, as an edge which succeeded and printed nothing.
+struct Collecting<'a> {
+    inner: &'a mut dyn rig::exec::Observer,
+    tests: &'a std::cell::RefCell<Tests>,
+    started: HashMap<rig::EdgeId, std::time::Instant>,
+}
+impl Collecting<'_> {
+    fn is_test(&self, graph: &rig::Graph, edge: rig::EdgeId) -> bool {
+        let output = graph.edge(edge).outputs().first().map(|&node| graph.path(node));
+        output.is_some_and(|output| self.tests.borrow().given.contains_key(output))
+    }
+}
+impl rig::exec::Observer for Collecting<'_> {
+    fn started(&mut self, graph: &rig::Graph, edge: rig::EdgeId, reason: &rig::plan::Reason, progress: rig::exec::Progress) {
+        self.started.insert(edge, std::time::Instant::now());
+        self.inner.started(graph, edge, reason, progress);
+    }
+    fn finished(
+        &mut self,
+        graph: &rig::Graph,
+        edge: rig::EdgeId,
+        outcome: &rig::exec::Outcome,
+        output: &[u8],
+        progress: rig::exec::Progress,
+    ) {
+        let took = self.started.remove(&edge).map(|started| started.elapsed()).unwrap_or_default();
+        if !self.is_test(graph, edge) {
+            if !outcome.succeeded() && !matches!(outcome, rig::exec::Outcome::Interrupted) {
+                self.tests.borrow_mut().others_failed += 1;
+            }
+            return self.inner.finished(graph, edge, outcome, output, progress);
+        }
+        let first = graph.path(graph.edge(edge).outputs()[0]).to_string();
+        self.tests.borrow_mut().finished.insert(first, (outcome.clone(), output.to_vec(), took));
+        self.inner.finished(graph, edge, &rig::exec::Outcome::Succeeded, b"", progress);
+    }
+    fn unstarted(&mut self, graph: &rig::Graph, edge: rig::EdgeId) {
+        self.started.remove(&edge);
+        self.inner.unstarted(graph, edge);
+    }
+    fn tick(&mut self) {
+        self.inner.tick();
+    }
+    fn done(&mut self) {
+        self.inner.done();
+    }
 }
 
 /// The directory of the state of the build, in the build directory.
@@ -150,6 +213,7 @@ impl Rig<'_> {
         options: &rig::exec::Options,
         console: Console,
         output: Output,
+        tests: Option<&std::cell::RefCell<Tests>>,
     ) -> Result<bool, Error> {
         let (graph, mut state, file) = self.loaded()?;
         // rustc and clippy always print in colour; the colour is removed if the output does not take it
@@ -163,11 +227,19 @@ impl Rig<'_> {
         if colour && let Some(width) = rig::exec::terminal_width(fd) {
             console = console.in_place(width);
         }
+        let mut collecting;
+        let shown: &mut dyn rig::exec::Observer = match tests {
+            Some(tests) => {
+                collecting = Collecting { inner: &mut console, tests, started: HashMap::new() };
+                &mut collecting
+            },
+            None => &mut console,
+        };
         let built = if crate::timings::enabled() {
-            let mut observer = Timed { inner: &mut console, started: HashMap::new() };
+            let mut observer = Timed { inner: shown, started: HashMap::new() };
             rig::exec::build(&graph, &mut state, options, targets, &mut observer)
         } else {
-            rig::exec::build(&graph, &mut state, options, targets, &mut console)
+            rig::exec::build(&graph, &mut state, options, targets, shown)
         };
         // say how many edges ran on workers, which nothing else shows
         if let Ok(report) = &built
@@ -288,8 +360,11 @@ impl Rig<'_> {
         if build.dry_run {
             return self.dry_run(request.targets, request.output);
         }
+        if let Some(tests) = request.tests {
+            options.given.clone_from(&tests.borrow().given);
+        }
         let console = Console { quiet: request.quiet || build.quiet, verbose: build.verbose };
-        self.run(request.targets, &options, console, request.output)
+        self.run(request.targets, &options, console, request.output, request.tests)
     }
     /// Generate the graph again if it is out of date. What that shows is written to `output`, unless `quiet`.
     /// Nothing is shown if the graph was up to date.
@@ -301,7 +376,7 @@ impl Rig<'_> {
             return Ok(());
         }
         let console = Console { quiet, verbose: false };
-        if self.run(&[rig_graph::FILE], &self.options()?, console, output)? { Ok(()) } else { Err(Error::BuildFailed) }
+        if self.run(&[rig_graph::FILE], &self.options()?, console, output, None)? { Ok(()) } else { Err(Error::BuildFailed) }
     }
     /// Returns whether a target is up to date, without building it or generating the graph again.
     pub fn up_to_date(&self, target: &str) -> Result<bool, Error> {

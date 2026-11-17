@@ -91,9 +91,16 @@ impl Graphs {
             edge.description = binding("description").map_or_else(|| scope.text(command), |text| scope.text(text));
             edge.depfile = binding("depfile").map(|depfile| scope.text(depfile));
             edge.discover = binding("discover").map(|discover| scope.program(discover));
-            edge.pool = if binding("pool") == Some("console") { Pool::Console } else { Pool::Default };
+            edge.pool = match binding("pool") {
+                Some("console") => Pool::Console,
+                Some("serial") => Pool::Serial,
+                _ => Pool::Default,
+            };
             edge.generator = binding("generator").is_some();
             edge.restat = binding("restat").is_some();
+            edge.always = binding("always").is_some();
+            let seconds = binding("timeout").map(|seconds| seconds.parse::<f64>().expect("a timeout in seconds"));
+            edge.timeout = seconds.map(std::time::Duration::from_secs_f64);
             edge.hashed = self.hashed;
             edge.cache.clone_from(&self.cache);
             edge.placement = self.placement.clone();

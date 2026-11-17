@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::diagnostic::{Diagnostic, Item, Message, Severity};
 use super::install::Install;
@@ -64,7 +65,32 @@ pub enum CustomKind {
         /// For a crate's test harness which runs on a worker, rather than here: its target, which the worker must be
         /// able to run.
         on_workers: Option<String>,
+        /// How it runs, as its edge does.
+        run: TestRun,
     },
+}
+
+/// How a test runs here, from its `timeout` and `serial` attributes, or a crate's for its test.
+#[derive(Clone, Default)]
+pub struct TestRun {
+    /// How long it may run before it is killed, with what it started, and fails: its `timeout`, or else the
+    /// `test-timeout` property where it is declared.
+    pub timeout: Option<Duration>,
+    /// Whether it runs with nothing else running.
+    pub serial: bool,
+}
+
+/// Returns a number of seconds above zero, as a timeout is given: an integer, or a `str` which may have a fraction,
+/// such as `'1.5'`.
+pub(super) fn seconds(data: &Data) -> Option<Duration> {
+    match data {
+        Data::Unsigned(seconds) => (*seconds > 0).then(|| Duration::from_secs(*seconds)),
+        Data::Str(seconds) => {
+            let seconds = seconds.parse::<f64>().ok().filter(|seconds| seconds.is_finite() && *seconds > 0.0)?;
+            Duration::try_from_secs_f64(seconds).ok()
+        },
+        _ => None,
+    }
 }
 
 /// What a custom command's edge has beside its command, from `depfile`, `restat`, `dir`, `description` and `console`.
@@ -107,6 +133,13 @@ impl Custom {
     pub fn is_libtest(&self) -> bool {
         matches!(self.kind, CustomKind::Test { runner: None, harness: true, .. })
     }
+    /// How a test runs here, if it is a test.
+    pub fn test_run(&self) -> Option<&TestRun> {
+        match &self.kind {
+            CustomKind::Test { run, .. } => Some(run),
+            CustomKind::Command { .. } => None,
+        }
+    }
     /// The target of a test which runs on a worker rather than here, if it does.
     pub fn on_workers(&self) -> Option<&str> {
         match &self.kind {
@@ -125,8 +158,29 @@ impl Custom {
 }
 
 impl Project {
+    /// Returns how a test declared in a file runs before its attributes say otherwise: with the `test-timeout`
+    /// property's value there, if it has one, and not serial.
+    pub(super) fn default_test_run(&self, file: usize) -> TestRun {
+        let timeout = self.value("test-timeout", file).and_then(|value| seconds(&value.data));
+        TestRun { timeout, serial: false }
+    }
+    /// Take a test's `timeout` or `serial` attribute into how it runs, reporting a value which is not one.
+    pub(super) fn test_run_attribute(&mut self, run: &mut TestRun, name: &str, operand: &Operand) {
+        match name {
+            "timeout" => match seconds(&operand.data) {
+                Some(timeout) => run.timeout = Some(timeout),
+                None => self.invalid_operand(operand, "a number of seconds above zero", false),
+            },
+            "serial" => {
+                if let Some(serial) = self.flag(operand) {
+                    run.serial = serial;
+                }
+            },
+            _ => unreachable!("not an attribute of how a test runs: {name}"),
+        }
+    }
     /// Take a `custom` statement, with `input`, `output`, `depends`, `command`, `default` and install attributes, or a
-    /// `test` statement, with `input`, `depends`, `command` and `tag` attributes.
+    /// `test` statement, with `input`, `depends`, `command`, `tag`, `timeout` and `serial` attributes.
     ///
     /// A command's output is a file named after it in the build directory, unless an `output` attribute replaces it.
     /// While the attributes are evaluated, the `input` and `output` properties hold the paths of the inputs and
@@ -156,6 +210,7 @@ impl Project {
         let mut edge = CommandEdge::default();
         let mut default = false;
         let mut tags = Vec::new();
+        let mut run = self.default_test_run(parser.file);
         let mut running = Running::default();
         let mut install = Install::data();
         // an attribute which failed has already been reported, so it is not reported as missing too
@@ -206,6 +261,14 @@ impl Project {
                         continue;
                     };
                     tags.extend(self.tags(&operand).unwrap_or_default());
+                },
+                "timeout" | "serial" if test => {
+                    let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
+                        parser.skip_line();
+                        failed = true;
+                        continue;
+                    };
+                    self.test_run_attribute(&mut run, attribute, &operand);
                 },
                 "default" | "install" | "install-dir" | "install-mode" if !test => {
                     let Some(operand) = self.parse_attribute_value(parser, attribute_span) else {
@@ -318,7 +381,7 @@ impl Project {
         // declare the outputs as a property named after the command, now that the name is known to be unique
         let reference = Ref { referent: Referent::Custom(name.clone()), paths: outputs.clone() };
         let kind = if test {
-            CustomKind::Test { runner: None, harness: false, on_workers: None }
+            CustomKind::Test { runner: None, harness: false, on_workers: None, run }
         } else {
             CustomKind::Command { outputs, default, install, edge }
         };

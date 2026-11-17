@@ -76,8 +76,8 @@ commands:
                          build and run the tests without tags and those with a tag in `test-tags`, or only those named
                          or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the
                          output of each test, such as the tests of a crate's test harness, rather than only those which
-                         fail, `-j` builds with as many jobs and runs as many tests at once, `--timeout` fails a test
-                         which runs for longer, and each test is given the arguments after `--`
+                         fail, `-j` builds and runs the tests with as many jobs, `--timeout` fails a test which runs
+                         for longer in place of its own timeout, and each test is given the arguments after `--`
     run [<name>] [--] [<argument> ...]
                          build a binary crate and run it with arguments, by its target's runner if it has one, where
                          a crate for a target other than the host is `<name>@<target>`, unless it is the only one with
@@ -610,6 +610,12 @@ fn declare_builtins(
     let rust_version = project::Property::new("rust-version".into(), project::Type::String)
         .info("the minimum supported Rust version, such as `1.95.0`, which `use msrv` requires of rustc");
     project.declare("rust-version".into(), Some(rust_version));
+    // nor do the tests have a timeout unless it sets one
+    let test_timeout = project::Property::new("test-timeout".into(), project::Type::Any).info(
+        "the timeout of the tests declared while it is set, in seconds, such as `60` or `'0.5'`, which their own \
+         `timeout` replaces",
+    );
+    project.declare("test-timeout".into(), Some(test_timeout));
     project.declare_builtin_files();
     project.declare_codegen_options();
     project.declare_native_properties();
