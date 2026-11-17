@@ -161,6 +161,8 @@ pub struct Unit {
     pub root: PathBuf,
     /// The edition rustc compiles it with.
     pub edition: String,
+    /// The arguments of rustc from the crate's `flags`, which rustdoc is not given, as it does not take all of them.
+    pub flags: Vec<String>,
     pub target: String,
     /// The specification of the target, if it is a custom target.
     pub spec: Option<PathBuf>,
@@ -374,6 +376,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             test: c.test && !matches!(c.kind, Kind::Lib | Kind::ProcMacro | Kind::StaticLib | Kind::CDylib),
             kind: c.kind,
             edition: c.edition.clone(),
+            flags: c.flags.clone(),
             output: c.output(),
             deps,
             member,
@@ -580,6 +583,7 @@ fn write_graph(
                 flags.plain(&["-L", &unwind_search]);
             }
             flags.cfg(&c.cfg);
+            flags.extend(&c.flags);
             flags
         };
         let deps_of = |externs: &[Extern]| -> Vec<PathBuf> { externs.iter().map(|d| d.path.clone()).collect() };
@@ -803,6 +807,7 @@ fn write_graph(
             everything.push(alias.clone());
             docs.push(alias);
         }
+        flags.extend(&unit.flags);
         if unit.test {
             flags.plain(&["--test"]);
         }

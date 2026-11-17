@@ -13,6 +13,10 @@ A `crate` statement may be followed by indented attributes:
 - `edition <edition>`: the edition of Rust the crate is compiled with, `2015`, `2018`, `2021` or `2024`, as a number or
   a string, in place of the `edition` property at its declaration, which is `2024` by default. rust-analyzer and
   [jig fmt](../commands/fmt.md) are given it too
+- `flags <arguments>`: arguments of rustc which aren't codegen options, as a string or a list of them, such as
+  `flags ['-l', 'static=boot', '--check-cfg', 'cfg(board, values("qemu"))']` or `-Z` options on nightly, given after
+  those jig gives, when the crate is compiled, checked and linted, but not documented, as rustdoc doesn't take all of
+  them. rustc runs in the build directory, so a path in them is relative to it. It can be repeated
 - `cfg <option>`: a configuration option, given with `--cfg`, as a name, a list of names, or a dict of names to values
   or lists of them, as `<name>="<value>"`, such as `cfg [feature: ['uart', 'plic']]`. It can be repeated, and is also
   given to rust-analyzer

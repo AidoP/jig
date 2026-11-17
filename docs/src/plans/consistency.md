@@ -234,7 +234,8 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   or a string, checked where it is set, and `jig fmt` formats each crate with its own, recorded with its root. A
   crate's edition is readable by reference, as `app.edition`. The proxy `jig install --proxy` builds keeps its own.
 - `flags <arguments>` on a crate, for what rustc takes which is not a codegen option, such as `-l`, `-L`,
-  `--check-cfg` and `-Z` on nightly.
+  `--check-cfg` and `-Z` on nightly (done). They follow jig's own arguments when the crate is compiled, checked and
+  linted, but rustdoc is not given them, as it rejects `-l`.
 - `doctest` on a crate with `doc`: a test which runs `rustdoc --test`, named `<name>-doc`.
 - `bench` on a crate: its harness built with the options of `profile/release`, run by `jig bench`, which is a
   command of its own, as a benchmark is not a test which passes or fails.
