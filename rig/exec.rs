@@ -330,6 +330,10 @@ struct Dispatch {
     /// The early outputs, which it reports as it writes them, and which are fetched as they are reported.
     early: Vec<String>,
     fetcher: Arc<Fetcher>,
+    /// How long it may run on the worker before the worker kills it.
+    timeout: Option<Duration>,
+    /// For an edge which runs only on workers, the name of the worker, as it never runs here.
+    only_there: Option<String>,
 }
 /// Outputs left on a worker, by path, with their stamps.
 type Left = Vec<(String, Stamp)>;
@@ -343,6 +347,9 @@ enum Sent {
     Lost(Vec<String>),
     /// It ran there, and failed, or did not write every output.
     Failed,
+    /// It ran there and failed, and as it runs only on workers, it is not run here: holds what it printed, and
+    /// whether it was killed as it ran past its timeout.
+    FailedThere(Vec<u8>, bool),
     /// It was not run there.
     NotRun,
 }
@@ -420,7 +427,7 @@ impl Dispatch {
             inputs,
             outputs: self.outputs.iter().chain(&self.stderr).cloned().collect(),
             early: self.early.clone(),
-            timeout: None,
+            timeout: self.timeout,
         };
         // An early output is fetched as soon as it is reported, as edges which need only it are waiting. If it is
         // to be left on the worker instead, the file here is stale, and is removed.
@@ -443,6 +450,11 @@ impl Dispatch {
         let (executed, ran) = self.worker.execute_timed(dir, &request, &early).map_err(|_| Sent::NotRun)?;
         if executed.succeeded {
             self.worker.timed(ran, self.took);
+        }
+        if !executed.succeeded && self.only_there.is_some() {
+            self.worker.fetch_blobs(&self.cache, &[executed.entry.printed]);
+            let printed = self.cache.read_blob(&executed.entry.printed).unwrap_or_default();
+            return Err(Sent::FailedThere(printed, executed.timed_out));
         }
         let written = |path: &String| executed.entry.outputs.iter().any(|output| output.path == *path);
         if !executed.succeeded || !self.outputs.iter().all(written) {
@@ -474,6 +486,23 @@ impl Dispatch {
             (output.path, Stamp::Remote { hash: output.blob, executable: output.executable })
         });
         Ok((printed, left.collect()))
+    }
+    /// Returns how an edge which runs only on workers finished, from what became of it there, and what it printed. It
+    /// is never given back to run here.
+    fn outcome_there(&self, name: &str, sent: Sent, interrupted: bool) -> (Outcome, Vec<u8>, Vec<String>) {
+        match sent {
+            Sent::Ran(printed, _) => (Outcome::Succeeded, printed, Vec::new()),
+            Sent::FailedThere(printed, true) => {
+                (Outcome::TimedOut(self.timeout.unwrap_or_default()), printed, Vec::new())
+            },
+            Sent::FailedThere(printed, false) => (Outcome::Error(format!("failed on {name}")), printed, Vec::new()),
+            Sent::Lost(lost) => {
+                let why = format!("{} were left on workers which no longer have them", lost.join(" "));
+                (Outcome::Error(why), Vec::new(), lost)
+            },
+            _ if interrupted => (Outcome::Interrupted, Vec::new(), Vec::new()),
+            Sent::Failed | Sent::NotRun => (Outcome::Error(format!("{name} failed to run it")), Vec::new(), Vec::new()),
+        }
     }
     /// Returns the cache and key under which the edge is marked to run here. It is marked if it fails on the worker
     /// and then succeeds here, which shows that it depends on something it neither declares nor discovers. The mark
@@ -1112,6 +1141,15 @@ impl Run<'_, '_> {
                         Some(dispatch) if !cached => dispatch.run(dir, &reported_as),
                         _ => Sent::NotRun,
                     };
+                    if let Some(dispatch) = &dispatch && let Some(name) = &dispatch.only_there {
+                        let (outcome, output, lost) = dispatch.outcome_there(name, sent, stop.load(Ordering::SeqCst));
+                        let (left, stamped, duration) = (Vec::new(), Vec::new(), clock.elapsed());
+                        let finished = Finished {
+                            index, outcome, output, start, duration, cached, remote: true, left, lost, stamped,
+                        };
+                        let _ = sender.send(Message::Finished(finished));
+                        continue;
+                    }
                     let (mut left, mut lost) = (Vec::new(), Vec::new());
                     let (ran, failed_there) = match sent {
                         // what the worker sends is the edge's raw output, which is rendered as it would be here
@@ -1127,7 +1165,7 @@ impl Run<'_, '_> {
                             lost = paths;
                             (None, false)
                         },
-                        Sent::Failed => (None, true),
+                        Sent::Failed | Sent::FailedThere(..) => (None, true),
                         Sent::NotRun => (None, false),
                     };
                     let remote = ran.is_some();
@@ -1185,7 +1223,8 @@ impl Run<'_, '_> {
                 scope.spawn(job_thread());
             }
             // start connecting to the workers straight away, if some edge may run on one
-            if (0..self.edges.len()).any(|index| self.remote_identity(index).is_some()) {
+            let sends = |index| self.remote_identity(index).is_some() || self.only_on(index).is_some();
+            if (0..self.edges.len()).any(sends) {
                 for worker in &self.options.workers {
                     scope.spawn(|| worker.capabilities());
                 }
@@ -1254,12 +1293,22 @@ impl Run<'_, '_> {
                 while !self.stopping() && !self.serial {
                     // An edge runs here while the build has a free job, and otherwise on a worker, if one can run
                     // it. An edge which waits for a worker never runs here.
-                    let here = (self.local < self.options.jobs.max(1)).then(|| self.next_ready()).flatten();
-                    let next = here.map(|index| (index, None));
-                    let Some((index, worker)) = next.or_else(|| {
-                        self.next_for_worker().map(|(index, worker)| (index, Some(worker)))
-                    }) else {
-                        break;
+                    let (index, worker) = match self.next_only_there() {
+                        Some((index, Ok(worker))) => (index, Some(worker)),
+                        Some((index, Err(why))) => {
+                            self.refuse(index, why, observer);
+                            continue;
+                        },
+                        None => {
+                            let here = (self.local < self.options.jobs.max(1)).then(|| self.next_ready()).flatten();
+                            let next = here.map(|index| (index, None));
+                            let Some(next) = next.or_else(|| {
+                                self.next_for_worker().map(|(index, worker)| (index, Some(worker)))
+                            }) else {
+                                break;
+                            };
+                            next
+                        },
                     };
                     if self.restat_clean(index) {
                         self.report.restat_skipped += 1;
@@ -1291,7 +1340,10 @@ impl Run<'_, '_> {
                         inherit.extend(edge.pass_env().iter().cloned());
                         inherit
                     });
-                    let dispatch = worker.and_then(|worker| self.dispatch(index, worker));
+                    let dispatch = worker.and_then(|worker| match self.only_on(index) {
+                        Some(_) => self.dispatch_there(index, worker),
+                        None => self.dispatch(index, worker),
+                    });
                     match worker {
                         Some(worker) => {
                             if !self.spawned[worker] {
@@ -1387,7 +1439,7 @@ impl Run<'_, '_> {
             let pool = self.graph.edge(self.edges[index]).pool();
             let console = self.console && pool == Pool::Console;
             let serial = pool == Pool::Serial && self.progress.running > 0;
-            !console && !serial && !self.waits_for_workers(index)
+            !console && !serial && self.only_on(index).is_none() && !self.waits_for_workers(index)
         })?;
         self.ready.remove(&entry);
         Some(entry.1)
@@ -1403,9 +1455,90 @@ impl Run<'_, '_> {
             remote.usable() && (remote.connected_jobs() == 0 || remote.reported().is_none() || self.runs(index, worker))
         }) && self.remote_identity(index).is_some()
     }
-    /// Whether an edge which is ready waits for a worker.
+    /// Whether an edge which is ready waits for a worker: one which runs only on workers, unless the build is
+    /// stopping, or one which waits with [`Options::workers_only`].
     fn waiting_for_workers(&self) -> bool {
-        self.options.workers_only && self.ready.iter().any(|&(_, index)| self.waits_for_workers(index))
+        self.ready.iter().any(|&(_, index)| {
+            (self.only_on(index).is_some() && !self.stopping())
+                || (self.options.workers_only && self.waits_for_workers(index))
+        })
+    }
+    /// Returns the target a worker's host must run for an edge which runs only on workers, if it is one.
+    fn only_on(&self, index: usize) -> Option<&str> {
+        self.graph.edge(self.edges[index]).placement().runs.as_deref()
+    }
+    /// Returns why a worker does not run an edge which runs only on workers, going by what it reported of itself, or
+    /// `None` if it does.
+    fn why_not_there(&self, index: usize, capabilities: &crate::worker::Capabilities) -> Option<String> {
+        let edge = self.graph.edge(self.edges[index]);
+        let target = edge.placement().runs.as_deref().unwrap_or_default();
+        // the program, if it is a file here, may be linked statically, and so run on another Linux
+        let action = self.action(index);
+        let program = self.options.dir.join(action.dir.as_deref().unwrap_or_default()).join(&action.program);
+        if !crate::worker::runs_on(&capabilities.host, target, &program) {
+            return Some(format!("runs {}", capabilities.host));
+        }
+        let missing = edge.placement().tags.iter().filter(|tag| !capabilities.tags.contains(tag));
+        let missing: Vec<&str> = missing.map(String::as_str).collect();
+        (!missing.is_empty()).then(|| format!("lacks the tags {}", missing.join(" ")))
+    }
+    /// Returns the highest-priority edge which is ready and runs only on workers, with the worker to run it on: of
+    /// those with a free job which run it, the one running the fewest edges for each of its jobs. An edge which no
+    /// worker can run, as each has failed or runs another host, is returned with why. An edge in the serial pool waits
+    /// until nothing runs. Returns `None` if no such edge can start yet.
+    fn next_only_there(&mut self) -> Option<(usize, Result<usize, String>)> {
+        let ready: Vec<(std::cmp::Reverse<u64>, usize)> =
+            self.ready.iter().copied().filter(|&(_, index)| self.only_on(index).is_some()).collect();
+        for entry in ready {
+            let index = entry.1;
+            if self.graph.edge(self.edges[index]).pool() == Pool::Serial && self.progress.running > 0 {
+                continue;
+            }
+            if self.options.cache.is_none() {
+                self.ready.remove(&entry);
+                return Some((index, Err("it runs only on workers, which need rig's cache, which is off".into())));
+            }
+            let (mut why, mut may) = (Vec::new(), false);
+            let mut chosen: Option<usize> = None;
+            for (worker, remote) in self.options.workers.iter().enumerate() {
+                let name = remote.name();
+                if !remote.usable() {
+                    let error = remote.error().unwrap_or_else(|| "it cannot be reached".into());
+                    why.push(format!("{name} failed: {error}"));
+                    continue;
+                }
+                // a worker which is connecting may run it
+                let Some(capabilities) = remote.reported() else {
+                    may = true;
+                    continue;
+                };
+                if let Some(not) = self.why_not_there(index, &capabilities) {
+                    why.push(format!("{name} {not}"));
+                    continue;
+                }
+                may = true;
+                let jobs = remote.connected_jobs();
+                // fewer edges for each job, compared without dividing
+                let less = |other: usize| {
+                    self.on_worker[worker] * self.options.workers[other].connected_jobs()
+                        < self.on_worker[other] * jobs
+                };
+                if self.on_worker[worker] < jobs && chosen.is_none_or(less) {
+                    chosen = Some(worker);
+                }
+            }
+            if let Some(worker) = chosen {
+                self.ready.remove(&entry);
+                return Some((index, Ok(worker)));
+            }
+            if !may {
+                self.ready.remove(&entry);
+                let target = self.only_on(index).unwrap_or_default();
+                let why = if why.is_empty() { "there are none".to_string() } else { why.join(", ") };
+                return Some((index, Err(format!("no worker runs {target}, as {why}"))));
+            }
+        }
+        None
     }
     /// Whether a worker may run an edge, going by what the worker reported of itself, and has not refused the edge's
     /// toolchain.
@@ -1595,6 +1728,61 @@ impl Run<'_, '_> {
             leave: self.leaves(index),
             early: edge.early().iter().map(|&node| self.graph.path(node).to_string()).collect(),
             fetcher: Arc::clone(&self.fetcher),
+            timeout: self.timeout(index),
+            only_there: None,
+        })
+    }
+    /// Returns how to run a started edge which runs only on workers on one, with the inputs it declares which can be
+    /// expressed relative to the build's directory: those which cannot, such as the worker's own tools, are not sent.
+    /// It runs without a toolchain, inheriting the variables which locate the worker's tools, its home and its
+    /// temporary directory. Returns `None` if there is no cache, which [`Self::next_only_there`] checks first.
+    fn dispatch_there(&mut self, index: usize, worker: usize) -> Option<Dispatch> {
+        let edge = self.graph.edge(self.edges[index]);
+        let cache = self.options.cache.as_ref()?.without_remote();
+        let leads = |path: &String| crate::worker::ups(path).is_some();
+        let declared = self.inputs.get(&index)?.iter().map(|(path, _)| path);
+        let mut inputs: Vec<String> = declared.filter(|path| leads(path)).cloned().collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        self.on_workers[worker].extend(inputs.iter().cloned());
+        self.sent_to.insert(index, worker);
+        let mut env = self.options.env.clone();
+        for name in edge.pass_env() {
+            if let Some(value) = std::env::var_os(name) {
+                env.push((name.clone(), value.to_string_lossy().into_owned()));
+            }
+        }
+        let mut locating = self.options.locating.clone();
+        for name in ["PATH", "HOME", "TMPDIR"] {
+            if !locating.iter().any(|locates| locates == name) {
+                locating.push(name.into());
+            }
+        }
+        let action = plan::relocated(&self.given_action(index), &self.relocation);
+        let stderr = action.stderr.clone().filter(leads);
+        let remote = &self.options.workers[worker];
+        Some(Dispatch {
+            worker: Arc::clone(remote),
+            cache,
+            key: None,
+            took: self.took(index),
+            identity: String::new(),
+            release: String::new(),
+            install: String::new(),
+            target: String::new(),
+            action,
+            env,
+            locating,
+            inputs,
+            outputs: Vec::new(),
+            stderr,
+            discovery: None,
+            remote: self.remote_inputs(index),
+            leave: Vec::new(),
+            early: Vec::new(),
+            fetcher: Arc::clone(&self.fetcher),
+            timeout: self.timeout(index),
+            only_there: Some(remote.name().to_string()),
         })
     }
     /// Returns what the thread which runs a hashed edge here hashes once the edge succeeds: its outputs and depfile,
@@ -1791,6 +1979,20 @@ impl Run<'_, '_> {
         let changed = |edge: EdgeId| !hashed && changed(graph, edge, index_of, status, &mut HashSet::new());
         plan::reason(graph, self.state, &mut self.stamps, self.edges[index], &changed).is_none()
     }
+    /// Returns how long an edge may run: as [`Options::given`] gives it, if it runs always, or its own timeout.
+    fn timeout(&self, index: usize) -> Option<Duration> {
+        let (edge, data) = (self.edges[index], self.graph.edge(self.edges[index]));
+        let given = data.always().then(|| self.options.given.get(plan::first_output(self.graph, edge))).flatten();
+        given.and_then(|given| given.timeout).or(data.timeout())
+    }
+    /// Start an edge which runs only on workers, and fail it at once, as no worker runs it.
+    fn refuse(&mut self, index: usize, why: String, observer: &mut dyn Observer) {
+        self.start(index, observer);
+        let finished = Finished { index, outcome: Outcome::Error(why), output: Vec::new(), start: SystemTime::now(),
+            duration: Duration::ZERO, cached: false, remote: false, left: Vec::new(), lost: Vec::new(),
+            stamped: Vec::new() };
+        self.finish(finished, observer);
+    }
     fn start(&mut self, index: usize, observer: &mut dyn Observer) {
         self.started.insert(index, Instant::now());
         let edge = self.edges[index];
@@ -1830,9 +2032,7 @@ impl Run<'_, '_> {
             self.serial = true;
         }
         // a console edge is in rig's own process group, which cannot be killed alone
-        let given = data.always().then(|| self.options.given.get(plan::first_output(self.graph, edge))).flatten();
-        let timeout = given.and_then(|given| given.timeout).or(data.timeout());
-        if let Some(timeout) = timeout.filter(|_| data.pool() != Pool::Console) {
+        if let Some(timeout) = self.timeout(index).filter(|_| data.pool() != Pool::Console) {
             self.timeouts.insert(index, timeout);
         }
         self.status[index] = Status::Running;
@@ -2999,6 +3199,63 @@ mod tests {
         let capabilities = crate::worker::Capabilities { toolchains, ..Default::default() };
         let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 3, move || capabilities.clone());
         Arc::new(crate::remote::served_worker(cache.0.clone(), executor))
+    }
+
+    /// Returns a worker on a host, with tags and no toolchains, named after its host.
+    fn worker_on(cache: &TempCache, host: &str, tags: &[&str]) -> Arc<Remote> {
+        let tags = tags.iter().map(|&tag| tag.to_string()).collect();
+        let capabilities = crate::worker::Capabilities { host: host.into(), tags, ..Default::default() };
+        let executor = crate::worker::Executor::new(cache.0.dir().join("work"), 2, move || capabilities.clone());
+        Arc::new(crate::remote::served_worker(cache.0.clone(), executor).named(host))
+    }
+
+    #[test]
+    fn runs_what_runs_only_on_workers_there() {
+        let placed = |tags: &[&str]| crate::Placement {
+            runs: Some("riscv".into()),
+            tags: tags.iter().map(|&tag| tag.to_string()).collect(),
+            ..crate::Placement::default()
+        };
+        let graph = graph()
+            .placed(placed(&[]))
+            .rule("test", &[("command", "cat $in && echo ran"), ("always", "")])
+            .rule("failing", &[("command", "echo failing && exit 1"), ("always", "")])
+            .rule("stuck", &[("command", "sleep 60"), ("always", ""), ("timeout", "0.3")])
+            .edge("test", &["passed"], &["source"])
+            .edge("failing", &["failed"], &[])
+            .edge("stuck", &["stuck"], &[])
+            .placed(placed(&["gpu"]))
+            .edge("test", &["tagged"], &["source"])
+            .finish();
+        let mut build = Build::new("only-there", graph, &[("source", "a\n")]);
+        let cache = TempCache::new("only-there");
+        build.options.cache = Some(cache.0.clone());
+        build.options.keep_going = 0;
+        let (other, there) = (TempCache::new("only-there-other"), TempCache::new("only-there-there"));
+        build.options.workers = vec![worker_on(&other, "x86", &["gpu"]), worker_on(&there, "riscv", &[])];
+        let mut recorder = Recorder::default();
+        let report = super::build(&build.graph, &mut build.state, &build.options, &[], &mut recorder).unwrap();
+        let printed: HashMap<String, String> = recorder.finished.into_iter().collect();
+        assert_eq!(printed["passed"], "a\nran\n");
+        assert_eq!(printed["failed"], "failing\n");
+        assert_eq!((report.failed, report.remote), (3, 3), "{printed:?}");
+        let mut events = Events::default();
+        super::build(&build.graph, &mut build.state, &build.options, &[], &mut events).unwrap();
+        let outcomes: HashMap<String, String> = events.outcomes.into_iter().collect();
+        assert_eq!(outcomes["passed"], "Succeeded");
+        assert_eq!(outcomes["failed"], "Error(\"failed on riscv\")");
+        assert_eq!(outcomes["stuck"], "TimedOut(300ms)");
+        // none of them ran here, nor wrote their outputs, and only the worker which runs them was sent their inputs
+        assert!(!build.dir.join("passed").exists());
+        assert!(there.0.has_blob(&crate::blake3::hash(b"a\n")));
+        assert!(!other.0.has_blob(&crate::blake3::hash(b"a\n")));
+        assert_eq!(outcomes["tagged"], "Error(\"no worker runs riscv, as x86 runs x86, riscv lacks the tags gpu\")");
+        // with no workers, none of them runs
+        build.options.workers = Vec::new();
+        let mut events = Events::default();
+        super::build(&build.graph, &mut build.state, &build.options, &[], &mut events).unwrap();
+        assert_eq!(events.outcomes[0].1, "Error(\"no worker runs riscv, as there are none\")");
+        assert_eq!(events.outcomes.len(), 4);
     }
 
     #[test]
