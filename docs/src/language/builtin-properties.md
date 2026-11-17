@@ -63,12 +63,8 @@
 - `diagnostic/<id>`: the severity of a diagnostic, as [diagnostics](diagnostics.md) describes
 
 The variable which overrides a setting of the cache or the workers is named after it, as `JIG_` and its name in
-capitals, with `_` for `/` and `-`. The names the variables had before, `JIG_CACHE`, `JIG_REMOTE_CACHE`,
-`JIG_REMOTE_CACHE_PUSH`, `JIG_WORKERS` and `JIG_DOWNLOAD`, are still read when the new one is not set. `workers`,
-`workers-only` and `download` were renamed to `workers/list`, `workers/only` and `workers/download`, and still set and
-read them, with the note `renamed-property`, until they are removed. A size, a remote cache, a worker, or what is
-fetched of what workers build, which is not one is the error `invalid-setting` where it is set, unless a variable
-overrides it.
+capitals, with `_` for `/` and `-`. A size, a remote cache, a worker, or what is fetched of what workers build, which
+is not one is the error `invalid-setting` where it is set, unless its variable overrides it.
 
 ```jig
 set build-dir 'out'

@@ -283,11 +283,9 @@ impl Project {
         self.values.push(value);
         id
     }
-    /// Returns the value of a property, or of a local, where a statement in `file` reads it. A builtin property
-    /// which was renamed is read by its old name too.
+    /// Returns the value of a property, or of a local, where a statement in `file` reads it.
     fn value(&self, name: &str, file: usize) -> Option<&Value> {
-        let idx = self.files[file].locals.get(name);
-        let idx = idx.or_else(|| self.values_idx.get(self.renamed(name).unwrap_or(name)));
+        let idx = self.files[file].locals.get(name).or_else(|| self.values_idx.get(name));
         Some(&self.values[*idx?])
     }
     /// Returns the names of the properties which are declared, in no order.
