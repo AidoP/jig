@@ -8351,3 +8351,38 @@ fn doc_documents_crates_and_shows_where() {
     assert!(!ok);
     assert_contains(&output, "no crate to document named \"plain\"");
 }
+
+#[test]
+fn fmt_formats_the_sources() {
+    let unformatted = "pub mod inner;\npub fn f( ) ->u32{1}\n";
+    let project = Project::new("fmt", &[
+        ("Jig", "crate lib 'src/lib.rs'\nstatic-library codec\n    source 'codec.c'\n"),
+        ("src/lib.rs", unformatted),
+        ("src/inner.rs", "pub fn g( ){}\n"),
+        ("codec.c", "int  f(void){return 1;}\n"),
+    ]);
+    let jig = |args: &[&str]| {
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    let (ok, output) = jig(&["generate"]);
+    assert!(ok, "{output}");
+    // checking changes nothing, and fails, showing how it would change, as for the modules the root uses
+    let (ok, output) = jig(&["fmt", "--check"]);
+    assert!(!ok);
+    assert_contains(&output, "inner.rs");
+    assert_eq!(std::fs::read_to_string(project.dir.join("src/lib.rs")).unwrap(), unformatted);
+    let (ok, output) = jig(&["fmt"]);
+    assert!(ok, "{output}");
+    assert_contains(&std::fs::read_to_string(project.dir.join("src/lib.rs")).unwrap(), "pub fn f() -> u32 {");
+    assert_contains(&std::fs::read_to_string(project.dir.join("src/inner.rs")).unwrap(), "pub fn g() {}");
+    let clang_format = Command::new("clang-format").arg("--version").output().is_ok_and(|output| output.status.success());
+    if clang_format {
+        assert_eq!(std::fs::read_to_string(project.dir.join("codec.c")).unwrap(), "int f(void) { return 1; }\n");
+    } else {
+        assert_contains(&output, "clang-format is not installed");
+    }
+    let (ok, output) = jig(&["fmt", "--check"]);
+    assert!(ok, "{output}");
+}

@@ -23,6 +23,7 @@ build](commands/build.md) describes them.
 | [`jig test`](commands/test.md) | builds and runs the tests |
 | [`jig lint`](commands/lint.md) | lints the crates with clippy |
 | [`jig doc`](commands/doc.md) | documents the crates with rustdoc |
+| [`jig fmt`](commands/fmt.md) | formats the crates and the sources of C |
 | [`jig check <label>`](commands/check.md) | checks a crate for rust-analyzer |
 | [`jig install`](commands/install.md) | installs what the project installs |
 | [`jig graph`](commands/graph.md) | shows rig's graph of the project |

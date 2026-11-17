@@ -12,6 +12,7 @@
   - [jig test](commands/test.md)
   - [jig lint](commands/lint.md)
   - [jig doc](commands/doc.md)
+  - [jig fmt](commands/fmt.md)
   - [jig check and rust-analyzer](commands/check.md)
   - [jig install](commands/install.md)
   - [jig graph](commands/graph.md)

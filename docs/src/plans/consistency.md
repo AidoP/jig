@@ -217,8 +217,10 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   records. It uses the graph which was last generated, without configuring the project again.
 - `jig doc [--open] [<name> ...]` (done): builds `doc`, or `doc/<name>`, and says where the first page is. The database
   records each documented crate's first page, so `jig doc` shows each of them, and `--open` opens the first.
-- `jig fmt [--check]`: runs rustfmt on the root of each crate which is edited, with the project's toolchain and
-  edition, and `clang-format` on the sources of the C statements, if it is installed.
+- `jig fmt [--check]` (done): runs rustfmt on the root of each crate which is edited, with the project's toolchain and
+  edition, and `clang-format` on the sources of the C statements, if it is installed. The database records the roots
+  and sources in the project, but not in the build directory, and assembly is left out. jig's own sources are not
+  formatted by rustfmt, so it is not run on them.
 - `jig lint` runs `clang-tidy` on the sources of the C statements with a `c/tidy` property, from the compile
   commands jig already writes for clangd.
 

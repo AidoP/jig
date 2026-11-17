@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 35;
+const VERSION: u32 = 36;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -77,6 +77,11 @@ pub struct Database<'a> {
     /// The directories of the shared libraries of C, relative to the project root. `jig run` and `jig test` add
     /// them to the platform's search path for shared libraries, so that programs which link them find them.
     pub library_path: Vec<&'a str>,
+    /// The roots of the crates which are edited, which `jig fmt` formats with rustfmt, relative to the project root.
+    pub rust_roots: Vec<&'a str>,
+    /// The sources of C and C++ of the project, which `jig fmt` formats with clang-format, relative to the project
+    /// root.
+    pub c_sources: Vec<&'a str>,
     pub flychecks: Vec<Flycheck<'a>>,
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
@@ -205,6 +210,8 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
     w.strs(&database.rustc_targets);
     w.str(database.rustc_verbose_version);
     w.strs(&database.library_path);
+    w.strs(&database.rust_roots);
+    w.strs(&database.c_sources);
     w.len(database.flychecks.len());
     for flycheck in &database.flychecks {
         w.str(flycheck.label);
@@ -286,6 +293,8 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
         rustc_targets: r.strs()?,
         rustc_verbose_version: r.str()?,
         library_path: r.strs()?,
+        rust_roots: r.strs()?,
+        c_sources: r.strs()?,
         ..Default::default()
     };
     for _ in 0..r.u32()? {
@@ -369,6 +378,8 @@ mod tests {
             rustc_targets: vec!["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"],
             rustc_verbose_version: "rustc 1.101.0-nightly\nrelease: 1.101.0-nightly",
             library_path: vec!["build/x86_64/c/codec"],
+            rust_roots: vec!["src/main.rs", "src/lib é.rs"],
+            c_sources: vec!["c/codec.c"],
             flychecks: vec![
                 Flycheck { label: "app@x86_64", diagnostics: "a.json", member: true, deps: vec![1] },
                 Flycheck { label: "lib é", diagnostics: "b é.json", member: false, deps: vec![] },
