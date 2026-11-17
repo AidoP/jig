@@ -133,7 +133,8 @@ pub struct Edge {
     pub early: Vec<NodeId>,
 }
 
-/// Which workers a cached edge may run on, beside those whose toolchain has the edge's identity.
+/// Which workers a cached edge may run on, beside those whose toolchain has the edge's identity, or which an edge
+/// that runs only on workers runs on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Placement {
     /// Whether it may run with the same release of its toolchain on another host, as what it writes does not depend
@@ -143,6 +144,11 @@ pub struct Placement {
     pub target: Option<String>,
     /// The tags a worker must have.
     pub tags: Vec<String>,
+    /// For an edge which runs only on workers, never here, the target that a worker's host must run: it is sent to a
+    /// worker whose host is that target, or, if the program it runs is linked statically, any Linux of the same
+    /// architecture. It runs there without a toolchain, with the worker's own tools, and for what it prints and
+    /// whether it succeeds: its outputs are not fetched. It fails if no worker runs it.
+    pub runs: Option<String>,
 }
 
 /// The lists of nodes of an edge, in the order they are stored.

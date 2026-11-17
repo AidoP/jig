@@ -17,8 +17,9 @@
 //! - its timeout, in milliseconds, or `0` without one;
 //! - its cache identity, an optional string;
 //! - the environment variables it passes on, a list of strings;
-//! - its placement: `1` if it may run on any host or else `0`, its target as an optional string, and its tags as a
-//!   list of strings;
+//! - its placement: `1` if it may run on any host or else `0`, its target as an optional string, its tags as a list
+//!   of strings, and the target a worker's host must run, for an edge which runs only on workers, as an optional
+//!   string;
 //! - the program which discovers its inputs, an optional program;
 //! - its early outputs, a list of nodes;
 //! - its outputs, inputs, dependencies and what it is built after, each a list of nodes.
@@ -34,7 +35,7 @@ use crate::Error;
 const MAGIC: &[u8; 4] = b"RIGG";
 /// The version of the format. Change the version of jig's database with it, so that jig configures a project again
 /// rather than failing to load a graph of the old version.
-const VERSION: u32 = 11;
+const VERSION: u32 = 12;
 
 const GENERATOR: u32 = 1;
 const RESTAT: u32 = 2;
@@ -90,6 +91,7 @@ impl Graph {
             for tag in &placement.tags {
                 w.str(tag);
             }
+            w.optional(placement.runs.as_deref());
             match edge.discover() {
                 None => w.u32(0),
                 Some(exec) => {
@@ -182,7 +184,12 @@ impl Graph {
                 _ => return Err(Error::Format("invalid target")),
             };
             let tags = (0..r.u32()?).map(|_| r.str().map(String::from)).collect::<Result<Vec<_>, _>>()?;
-            let placement = crate::Placement { any_host, target, tags };
+            let runs = match r.u32()? {
+                0 => None,
+                1 => Some(r.str()?.into()),
+                _ => return Err(Error::Format("invalid host")),
+            };
+            let placement = crate::Placement { any_host, target, tags, runs };
             let discover = match r.u32()? {
                 0 => None,
                 1 => Some(r.exec()?),
@@ -392,6 +399,7 @@ mod tests {
                     any_host: true,
                     target: Some("riscv64gc".into()),
                     tags: vec!["fast".into()],
+                    runs: Some("x86_64-unknown-linux-musl".into()),
                 },
             })
             .unwrap();

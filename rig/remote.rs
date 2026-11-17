@@ -52,11 +52,12 @@
 //!   what was sent is not valid. A worker always takes blobs, as they are the inputs of the actions it runs, but
 //!   takes results and manifests only if it takes pushes.
 //! - `EXECUTE`, with a [`crate::worker::Request`]: a worker replies `FOUND` with whether the action succeeded (`1`),
-//!   failed (`0`), or was killed as it ran longer than the request's timeout (`2`), and its result in the form a cache stores, whose blobs the worker has. It replies `NOT_FOUND` if it does
-//!   not have the toolchain, or `ERROR` with why it could not run the action. Actions run on threads of their own, so
-//!   requests for blobs are answered while they run. Before the reply, the worker reports each early output of the
-//!   action, such as rustc's metadata, once it has the output's blob: in a `MORE` frame with the id of the request,
-//!   holding the output's hash, whether it is executable (`1` or `0`) and its path.
+//!   failed (`0`), or was killed as it ran longer than the request's timeout (`2`), and its result in the form a
+//!   cache stores, whose blobs the worker has. It replies `NOT_FOUND` if it does not have the toolchain, or `ERROR`
+//!   with why it could not run the action. Actions run on threads of their own, so requests for blobs are answered
+//!   while they run. Before the reply, the worker reports each early output of the action, such as rustc's metadata,
+//!   once it has the output's blob: in a `MORE` frame with the id of the request, holding the output's hash, whether
+//!   it is executable (`1` or `0`) and its path.
 //! - `GET_CAPABILITIES`: a worker replies `FOUND` with its [`crate::worker::Capabilities`].
 //! - `CANCEL`, which has no reply: a worker interrupts the actions it is running for the client, kills them a second
 //!   later if they have not stopped, and runs no more for it. The client sends it when its build is interrupted. A

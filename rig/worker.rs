@@ -339,7 +339,8 @@ pub fn ups(path: &str) -> Option<usize> {
 /// in that way.
 #[must_use]
 pub fn dir_ups(dir: &str) -> Option<usize> {
-    let only_ups = !dir.is_empty() && Path::new(dir).components().all(|component| matches!(component, Component::ParentDir | Component::CurDir));
+    let up = |component: Component| matches!(component, Component::ParentDir | Component::CurDir);
+    let only_ups = !dir.is_empty() && Path::new(dir).components().all(up);
     if only_ups { Some(Path::new(dir).components().filter(|c| *c == Component::ParentDir).count()) } else { ups(dir) }
 }
 
@@ -890,7 +891,8 @@ mod tests {
         assert!(!alive());
         // an action which finishes in time is not taken as timed out, even when it fails
         let action = crate::test_helper::exec(crate::test_helper::words("exit 3"));
-        let executed = executor.execute(&cache, &Request { action, timeout: Some(Duration::from_secs(60)), ..request }).unwrap();
+        let request = Request { action, timeout: Some(Duration::from_secs(60)), ..request };
+        let executed = executor.execute(&cache, &request).unwrap();
         assert!(!executed.succeeded && !executed.timed_out);
         let _ = std::fs::remove_dir_all(&dir);
     }
