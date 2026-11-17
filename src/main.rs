@@ -89,9 +89,10 @@ commands:
                          the name, and without a name, the only binary crate is run, where what follows the name, or
                          `--`, is the program's
     lint [-D] [<name> ...]
-                         lint the crates which are edited with clippy, or only those named, as the `clippy/<lint>`
-                         properties set where they are declared give the levels of the lints, where `-D` or
-                         `--deny-warnings` fails if there is a warning
+                         lint the crates which are edited with clippy, and the sources of C of what has `c/tidy` with
+                         clang-tidy, or only those named, as the `clippy/<lint>` properties set where they are
+                         declared give the levels of the lints, where `-D` or `--deny-warnings` fails if there is a
+                         warning
     doc [--open] [<name> ...]
                          document the crates with `doc`, or only those named, with rustdoc, and show where the first
                          page of each is, opening the first in the browser with `--open`
@@ -641,6 +642,12 @@ fn declare_builtins(
          `timeout` replaces",
     );
     project.declare("test-timeout".into(), Some(test_timeout));
+    // nor are the sources of C checked by clang-tidy
+    let tidy = project::Property::new("c/tidy".into(), project::Type::Any).info(
+        "the checks of clang-tidy which `jig lint` runs on the sources of C and C++ of what is declared while it is \
+         set, as its `--checks` takes them, such as `'-*,bugprone-*'`, or none if it is empty, as it is by default",
+    );
+    project.declare("c/tidy".into(), Some(tidy));
     project.declare_builtin_files();
     project.declare_codegen_options();
     project.declare_native_properties();
@@ -845,7 +852,9 @@ impl core::fmt::Display for Error {
             Self::LineBreak(path, text) => {
                 write!(f, "cannot write {text:?} to {path:?}, as a depfile cannot have a line break")
             },
-            Self::UnknownLint(name) => write!(f, "no crate to lint named {name:?}"),
+            Self::UnknownLint(name) => {
+                write!(f, "nothing to lint named {name:?}, as only a crate which is edited, or what has `c/tidy`, is")
+            },
             Self::UnknownDoc(name) => write!(f, "no crate to document named {name:?}, as only a crate with `doc` is"),
             Self::NoDocs => write!(f, "no crate to document, as none has `doc`"),
             Self::NotFormatted => write!(f, "the sources are not formatted, or could not be"),

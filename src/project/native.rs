@@ -109,6 +109,8 @@ pub struct Native {
     pub running: Running,
     /// Whether the library is built by `jig build` without targets.
     pub default: bool,
+    /// The checks of clang-tidy which `jig lint` runs on its sources, from `c/tidy` where it is declared, if any.
+    pub tidy: Option<String>,
     /// The compiler, and its first arguments.
     pub compiler: Vec<String>,
     /// The identity of the compiler in rig's cache, if rig caches and the compiler is found.
@@ -564,6 +566,8 @@ impl Project {
         // derive `-O` and `-g` from the codegen options in effect where the library is declared, so that a profile
         // applies to C too
         let codegen = self.codegen_options(span, rust::Kind::Lib, &[], &targets);
+        let tidy = self.value("c/tidy", span.file).map(|checks| checks.data.coerce_string());
+        let tidy = tidy.filter(|checks| !checks.is_empty());
         let build_dir = self.build_dir();
         for (i, target) in targets.iter().enumerate() {
             if targets[..i].contains(target) {
@@ -628,6 +632,7 @@ impl Project {
                 depends: depends.clone(),
                 running: running.clone(),
                 default,
+                tidy: tidy.clone(),
                 compiler,
                 cache: None,
                 archiver,

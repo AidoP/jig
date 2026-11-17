@@ -58,6 +58,9 @@
   [static libraries](static-libraries.md#compilers-and-flags) describes
 - `c/<target>/<name>`, `cxx/<target>/<name>` and `asm/<target>/<name>`: those of the static libraries for a target,
   which replace the others
+- `c/tidy`: the checks of clang-tidy, as its `--checks` takes them, such as `'-*,bugprone-*'`, which
+  [jig lint](../commands/lint.md) runs on the sources of C and C++ of the libraries and executables declared while it is
+  set. It is empty by default, so they are not checked
 - `clippy/<lint>`: the level of a clippy lint for the crates declared while it is set, which `jig lint` lints them with:
   `'allow'`, `'warn'`, `'force-warn'`, `'deny'` or `'forbid'`, such as `set clippy/needless_return 'deny'`, where
   `-` can be written for `_`. A group, such as `clippy/pedantic`, is given before the single lints, so that a lint in

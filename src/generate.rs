@@ -528,6 +528,12 @@ fn write_graph(
     let mut compile_commands = Vec::new();
     for library in project.natives() {
         let built = native_edges(&mut graph, project, crates, library, at, &mut compile_commands)?;
+        // what `jig lint` builds before it checks the sources with clang-tidy, as `jig build lint` does
+        if library.tidy.is_some() {
+            let alias = Path::new("tidy").join(library.short_name(&project.host()));
+            graph.alias(&alias, &as_paths(&built))?;
+            lints.push(alias);
+        }
         everything.extend(built.iter().cloned());
         if library.default {
             defaults.extend(built);
@@ -1346,6 +1352,18 @@ fn write_database(
             c_sources.push(source);
         }
     }
+    // what `jig lint` checks with clang-tidy, by name, with its checks, what is built first, and its sources
+    let mut tidies: Vec<(String, String, String, Vec<String>)> = Vec::new();
+    for library in project.natives() {
+        let Some(checks) = &library.tidy else {
+            continue;
+        };
+        let name = library.short_name(&host);
+        let target = rig_graph::path_string(&Path::new("tidy").join(&name));
+        let checked = library.sources.iter().filter(|source| source.language != crate::project::Language::Assembly);
+        let sources = checked.filter_map(|source| in_project(&source.path)).collect();
+        tidies.push((name, checks.clone(), target, sources));
+    }
     let test_tags = project.test_tags();
     let install_paths: Vec<_> = installed.iter().map(|file| file.path.display().to_string()).collect();
     let install_targets = installed.iter().map(|file| rig_graph::path_string(&at.path(&file.path)));
@@ -1389,6 +1407,10 @@ fn write_database(
         if let Some(name) = &unit.lint {
             database.lints.push(database::Lint { name, diagnostics });
         }
+    }
+    for (name, checks, target, sources) in &tidies {
+        let sources = sources.iter().map(String::as_str).collect();
+        database.tidies.push(database::Tidy { name, checks, target, sources });
     }
     for (unit, index) in units.iter().zip(&doc_indices) {
         if let Some(name) = &unit.doc {

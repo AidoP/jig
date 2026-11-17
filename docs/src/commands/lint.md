@@ -17,6 +17,18 @@ crate app 'app.rs'
     crate-type 'bin'
 ```
 
+It also checks the sources of C and C++ of the libraries and executables declared while the `c/tidy` property is set,
+with clang-tidy and the checks it gives, as `--checks` takes them, by the same names, from the compile commands jig
+writes for clangd. They are built first, so that what they include is there, and then checked every time, as
+clang-tidy's diagnostics aren't saved. Its warnings fail `jig lint -D` as clippy's do. Assembly isn't checked.
+
+```jig
+set c/tidy '-*,bugprone-*,clang-analyzer-*'
+
+static-library codec
+    source 'codec.c'
+```
+
 ```
 ./build/bootstrap/jig lint
 ./build/bootstrap/jig lint -D app

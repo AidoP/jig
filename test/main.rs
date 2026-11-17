@@ -4918,7 +4918,7 @@ log note clippy/
     assert_contains(&stderr, "linting raised warnings, which `-D` denies");
     let (success, _, stderr) = lint(&["nope"]);
     assert!(!success);
-    assert_contains(&stderr, "no crate to lint named \"nope\"");
+    assert_contains(&stderr, "nothing to lint named \"nope\"");
 }
 
 #[test]
@@ -8385,4 +8385,38 @@ fn fmt_formats_the_sources() {
     }
     let (ok, output) = jig(&["fmt", "--check"]);
     assert!(ok, "{output}");
+}
+
+#[test]
+fn lint_checks_c_with_clang_tidy() {
+    let found = Command::new("clang-tidy").arg("--version").output().is_ok_and(|output| output.status.success());
+    if !found {
+        return;
+    }
+    let suspicious = "int f(int x) {\n  if (x > 1);\n  return x;\n}\n";
+    let project = Project::new("lint-tidy", &[
+        (
+            "Jig",
+            "static-library plain\n    source 'plain.c'\nset c/tidy '-*,bugprone-suspicious-semicolon'\n\
+             static-library codec\n    source 'codec.c'\n",
+        ),
+        ("plain.c", suspicious),
+        ("codec.c", suspicious),
+    ]);
+    let lint = |args: &[&str]| {
+        let output = jig_command().arg("lint").args(args).current_dir(&project.dir).output().unwrap();
+        let (stdout, stderr) = (String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+        (output.status.success(), stdout, stderr)
+    };
+    // only what is declared while `c/tidy` is set is checked, once it is built, which a warning does not fail
+    let (success, stdout, stderr) = lint(&[]);
+    assert!(success, "{stdout}{stderr}");
+    assert_contains(&stdout, "codec.c:2:13: warning: potentially unintended semicolon [bugprone-suspicious-semicolon]");
+    assert!(!stdout.contains("plain.c:2"), "{stdout}");
+    let (success, stdout, stderr) = lint(&["-D", "codec"]);
+    assert!(!success, "{stdout}");
+    assert_contains(&stderr, "linting raised warnings, which `-D` denies");
+    let (success, _, stderr) = lint(&["plain"]);
+    assert!(!success);
+    assert_contains(&stderr, "nothing to lint named \"plain\"");
 }

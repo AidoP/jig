@@ -12,7 +12,7 @@
 //!
 //! The database is the magic bytes and the format version, followed by the fields of [`Database`] in the order
 //! [`write`] writes them, and then the sections: the flychecks, the tests, the lints, the documentation,
-//! the programs and the installed files. A section is the number of its records followed by each record.
+//! the sources clang-tidy checks, the programs and the installed files. A section is the number of its records followed by each record.
 
 use std::io::Write;
 
@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 36;
+const VERSION: u32 = 37;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -86,6 +86,7 @@ pub struct Database<'a> {
     pub tests: Vec<Test<'a>>,
     pub lints: Vec<Lint<'a>>,
     pub docs: Vec<Doc<'a>>,
+    pub tidies: Vec<Tidy<'a>>,
     pub programs: Vec<Program<'a>>,
     pub installs: Vec<Install<'a>>,
 }
@@ -115,6 +116,19 @@ pub struct Test<'a> {
     pub libtest: bool,
     /// The tags of the test, by which `jig test` chooses it.
     pub tags: Vec<&'a str>,
+}
+
+/// The sources of a library or executable of C which `jig lint` checks with clang-tidy.
+#[derive(Debug, PartialEq)]
+pub struct Tidy<'a> {
+    /// The name of the library or executable, with its target if that is not the host target.
+    pub name: &'a str,
+    /// The checks, as clang-tidy's `--checks` takes them.
+    pub checks: &'a str,
+    /// What is built before it is checked, `tidy/<name>` in the graph, so that what its sources include is.
+    pub target: &'a str,
+    /// Its sources of C and C++, relative to the project root.
+    pub sources: Vec<&'a str>,
 }
 
 /// The documentation of a crate by rustdoc, which `jig doc` builds and shows the first page of.
@@ -238,6 +252,13 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         w.str(doc.name);
         w.str(doc.index);
     }
+    w.len(database.tidies.len());
+    for tidy in &database.tidies {
+        w.str(tidy.name);
+        w.str(tidy.checks);
+        w.str(tidy.target);
+        w.strs(&tidy.sources);
+    }
     w.len(database.programs.len());
     for program in &database.programs {
         w.str(program.name);
@@ -309,6 +330,9 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
     }
     for _ in 0..r.u32()? {
         database.docs.push(Doc { name: r.str()?, index: r.str()? });
+    }
+    for _ in 0..r.u32()? {
+        database.tidies.push(Tidy { name: r.str()?, checks: r.str()?, target: r.str()?, sources: r.strs()? });
     }
     for _ in 0..r.u32()? {
         let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, flag(&mut r)?);
@@ -390,6 +414,7 @@ mod tests {
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             docs: vec![Doc { name: "app", index: "build/x86_64/doc/app/index.html" }],
+            tidies: vec![Tidy { name: "codec", checks: "-*,bugprone-*", target: "tidy/codec", sources: vec!["c/codec.c"] }],
             programs: vec![
                 Program { name: "app", path: "build/host/app", target: "host/app", runner: vec![], default: true },
                 Program {
