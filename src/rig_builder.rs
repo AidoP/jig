@@ -174,6 +174,13 @@ impl Rig<'_> {
     fn env(&self) -> Vec<(String, String)> {
         self.toolchain.map(|toolchain| ("RUSTUP_TOOLCHAIN".into(), toolchain.into())).into_iter().collect()
     }
+    /// Remove what the edges which build targets, and what they are built from, wrote, or with no targets, what every
+    /// edge but the generator wrote, and forget that they ran.
+    pub fn clean(&self, targets: &[&str]) -> Result<rig::clean::Cleaned, Error> {
+        let graph = self.graph()?;
+        let mut state = self.state()?;
+        rig::clean::clean(&graph, &mut state, self.build_dir, targets).map_err(Error::Rig)
+    }
     fn state(&self) -> Result<rig::state::State, Error> {
         rig::state::State::open(&self.build_dir.join(STATE)).map_err(Error::Rig)
     }

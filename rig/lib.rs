@@ -15,6 +15,7 @@
 pub mod blake3;
 pub mod bytes;
 pub mod cache;
+pub mod clean;
 pub mod depfile;
 pub mod exec;
 pub mod http;

@@ -7,6 +7,7 @@
 - [Installing](installing.md)
 - [Commands](commands.md)
   - [jig build and jig generate](commands/build.md)
+  - [jig clean](commands/clean.md)
   - [jig run](commands/run.md)
   - [jig test](commands/test.md)
   - [jig lint](commands/lint.md)

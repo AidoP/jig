@@ -155,6 +155,21 @@ impl State {
         self.records.insert(record.key().into(), record);
         Ok(())
     }
+    /// Forget the records of edges, by their keys, so that they run again, rewriting the log without them.
+    ///
+    /// # Errors
+    ///
+    /// If the log cannot be written.
+    pub fn forget(&mut self, keys: &[String]) -> Result<(), Error> {
+        let before = self.records.len();
+        for key in keys {
+            self.records.remove(key);
+        }
+        if self.records.len() == before {
+            return Ok(());
+        }
+        self.compact()
+    }
     /// Rewrite the log with only the records which have not been replaced.
     ///
     /// # Errors

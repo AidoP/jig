@@ -18,6 +18,7 @@ with a value takes it in the same argument or the next, as `-j4`, `-j 4`, `--job
 |---|---|
 | [`jig generate [<input>]`](commands/build.md) | configures the project from `Jig`, or the file given |
 | [`jig build`](commands/build.md) | builds the project, or the targets given |
+| [`jig clean`](commands/clean.md) | removes what the build wrote |
 | [`jig run`](commands/run.md) | builds a binary crate and runs it |
 | [`jig test`](commands/test.md) | builds and runs the tests |
 | [`jig lint`](commands/lint.md) | lints the crates with clippy |
