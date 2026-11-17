@@ -52,9 +52,11 @@ set workers/list ['ssh://build.example', 'ssh://ci@other.example/opt/bin/jig']
 ```
 
 Tests run on workers too, where the host cannot run them. With workers, a builtin target which the host cannot run, and
-which has no `test` attribute, is tested, so that `test {target}.test` tests its crates. `jig test` sends each of their
-tests to a worker whose host is its target, or for a test linked statically, any Linux of its architecture, such as an
-aarch64 or riscv64 machine, with its test harness and what it `depends` on, as a test which reads a file at run time
-must depend on it. It runs there, from where the project root is, with the worker's own tools, while the other tests run
-here, and its result is shown as if it had run here. A target whose `test` is `'workers'` has its tests run on workers
-even where the host can run them.
+which has no `test` attribute, is tested, so that `test {target}.test` tests its crates. Each of their tests
+is sent to a worker whose host is its target, or for a test linked statically, any Linux of its architecture, such as
+an aarch64 or riscv64 machine, and which has the crate's `worker-tag`s, with its test harness and what it `depends` on,
+as a test which reads a file at run time must depend on it. It runs there as soon as what it needs is built, from where
+the project root is, with the worker's own tools, while the other tests run here, and its result is shown as if it had
+run here, with its `timeout` and `serial` as here. The tests are spread over the workers which run them. A failure
+there names the worker, and a test which no worker runs fails, with what each worker runs. A target whose `test` is
+`'workers'` has its tests run on workers even where the host can run them.

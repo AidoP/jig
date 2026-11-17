@@ -17,8 +17,10 @@ on files and processes. `jig build -j` sets it. Each job runs its edges on a thr
 
 rig runs a GNU make jobserver, so that rustc's codegen threads and a nested `make` or `cargo` share the build's jobs.
 Commands are given it in `MAKEFLAGS` and `CARGO_MAKEFLAGS`: a FIFO, `--jobserver-auth=fifo:<path>`, on Unix, or a named
-semaphore on Windows. Each edge beyond the first takes a token. When rig is run by a jobserver, it joins that one
-instead. A jobserver given as file descriptors, by an older make, isn't joined.
+semaphore on Windows. Each edge beyond the first takes a token. An edge which runs `always`, as a test does, isn't given
+the jobserver rig creates, as a test which runs commands of its own at once would wait for tokens. When rig is run by a
+jobserver, it joins that one instead, which every command inherits. A jobserver given as file descriptors, by an older
+make, isn't joined.
 
 ## Commands
 

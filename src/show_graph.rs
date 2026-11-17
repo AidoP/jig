@@ -26,7 +26,8 @@
 //! - `depfile`, `discover`, the command which writes the depfile without running the edge, `early`, the outputs it
 //!   reports as it writes them, `pass-env`, the variables it passes on, a word each.
 //! - `pool = console` or `pool = serial`, `timeout`, in seconds, `cache`, the identity it is cached by, `target`,
-//!   `tags` and `any-host`, which workers run it.
+//!   `tags` and `any-host`, which workers run it, and `runs-on`, the target a worker's host must run, for an edge which
+//!   runs only on workers.
 //! - `generator`, `restat`, `hashed` and `always`, each `= true`, if it is.
 //!
 //! The JSON is an object of `edges`, an array of an object for each, and of `defaults`, an array of paths. An edge has
@@ -155,6 +156,9 @@ fn finish(
     }
     if !placement.tags.is_empty() {
         fields.push(("tags", Value::Words(placement.tags.clone())));
+    }
+    if let Some(runs) = &placement.runs {
+        fields.push(("runs-on", Value::Text(runs.clone())));
     }
     let flags = [
         ("any-host", placement.any_host),

@@ -64,12 +64,22 @@ reads it, or a worker which doesn't have it is sent an edge which reads it: from
 worker. One which no worker has any longer is lost, and the build runs again, up to three times, to build it again.
 Each build asks the workers about the files left on them, which keeps them from their caches' collection.
 
-## Tests
+## Edges which run only on workers
 
-A test of a target the host can't run goes to a worker whose host is its target, or for a test harness linked
-statically, to any Linux of its architecture. It is sent its harness and what it depends on, and runs from where the
-project root is, with the worker's own tools. What it printed is fetched through the cache. A test isn't cached, so it
-runs each time.
+An edge whose placement names a target in `runs` never runs here: it goes to a worker whose host is that target, or, if
+its program is linked statically, any Linux of its architecture, and which has its tags. jig places a test of a target
+the host can't run so. Of the workers which run it, it goes to the one running the fewest edges for each of its jobs,
+once one has a free job, and in the serial pool, once nothing else runs. It runs there without a toolchain, inheriting
+the worker's `PATH`, `HOME` and `TMPDIR`, with those of its inputs which lead from the build's directory, and its
+outputs aren't fetched: what it printed is, through the cache. A failure there is its outcome, `failed on <worker>`,
+rather than a reason to run it here. One which no worker runs fails with what each worker runs, or why it can't be
+reached.
+
+## Timeouts
+
+A request carries the edge's timeout. The worker kills the command's process group once it is past, and replies that it
+timed out, which the build reports as `Outcome::TimedOut` for an edge which runs only on workers. Any other edge is
+given back to run here, as after any failure there.
 
 ## Interrupts
 

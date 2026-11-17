@@ -449,18 +449,32 @@ fn write_graph(
 
     let mut tests = Vec::new();
     for custom in &project.customs {
-        // A test has an alias of its inputs and program. One which runs here is also an edge which runs always,
-        // after them, which `jig test` builds, while one which runs on a worker is sent there by `jig test` itself.
+        // A test has an alias of its inputs and program, and an edge which runs always, after them, which `jig test`
+        // builds. One which runs on workers is placed on a worker whose host runs its target, never here.
         let CustomKind::Command { outputs, default, edge, .. } = &custom.kind else {
             let alias = Path::new("test").join(&custom.name);
             let inputs = custom.inputs(&project.runners);
             let inputs = at.paths(inputs.iter().chain(&custom.program).chain(&custom.depends));
             graph.alias(&alias, &as_paths(&inputs))?;
-            if let Some(run) = custom.test_run().filter(|_| custom.on_workers().is_none()) {
-                // from the project root, with the toolchain, and its own variables after it
-                let command = custom.command(&project.runners);
-                let mut env = toolchain_env(toolchain);
+            if let Some(run) = custom.test_run() {
+                // from the project root, with the toolchain if it runs here, and its own variables after it
+                let mut command = custom.command(&project.runners);
+                let on_workers = custom.on_workers();
+                // A program in the build directory is given by its absolute path, which rig sends to a worker with
+                // the worker's build directory in its place, as that is not beside the project root there.
+                if on_workers.is_some() && is_path(&command[0]) {
+                    let program = normalize(&at.root, Path::new(&command[0]));
+                    if program.starts_with(&at.build_dir) {
+                        command[0] = program.display().to_string();
+                    }
+                }
+                let mut env = if on_workers.is_some() { Vec::new() } else { toolchain_env(toolchain) };
                 env.extend(custom.running.env.iter().cloned());
+                let placement = rig::Placement {
+                    runs: on_workers.map(String::from),
+                    tags: if on_workers.is_some() { custom.running.worker_tags.clone() } else { Vec::new() },
+                    ..Default::default()
+                };
                 let exec = program(&command[0], command[1..].to_vec(), Some(&at.path(&at.root)), env);
                 graph.edge(Edge {
                     description: format!("TEST {}", custom.name),
@@ -470,6 +484,7 @@ fn write_graph(
                     serial: run.serial,
                     always: true,
                     timeout: run.timeout,
+                    placement,
                     ..Default::default()
                 })?;
             }
@@ -1256,17 +1271,6 @@ fn write_rust_project(sysroot: &str, units: &[Unit]) -> Result<(), Error> {
     Ok(())
 }
 
-/// The command of a test, which the database borrows.
-struct TestCommand<'a> {
-    name: &'a str,
-    command: Vec<String>,
-    libtest: bool,
-    tags: &'a [String],
-    on_workers: &'a str,
-    inputs: Vec<String>,
-    env: &'a [(String, String)],
-}
-
 fn write_database(
     project: &Project,
     units: &[Unit],
@@ -1290,27 +1294,6 @@ fn write_database(
     // the database borrows the paths and commands
     let diagnostics: Vec<_> = units.iter().map(|unit| unit.diagnostics().display().to_string()).collect();
     let lint_diagnostics: Vec<_> = units.iter().map(|unit| unit.lint_diagnostics().display().to_string()).collect();
-    let mut commands = Vec::new();
-    for custom in &project.customs {
-        if custom.is_test() {
-            let command = custom.command(&project.runners);
-            let (name, libtest, tags) = (&custom.name, custom.is_libtest(), &custom.tags);
-            let on_workers = custom.on_workers().unwrap_or_default();
-            // the files sent to a worker which runs the test, relative to the project root, where the test runs
-            let inputs = if on_workers.is_empty() {
-                Vec::new()
-            } else {
-                let paths = custom.inputs.iter().chain(&custom.depends);
-                let relative = |path: &PathBuf| {
-                    let path = normalize(Path::new(""), path);
-                    if path.is_absolute() { relative_to(&at.root, &path) } else { path }
-                };
-                paths.map(|path| relative(path).display().to_string()).collect()
-            };
-            let env = &custom.running.env;
-            commands.push(TestCommand { name, command, libtest, tags, on_workers, inputs, env });
-        }
-    }
 
     // the binary crates, by the name of the crate with its target, as a test is named
     let host = project.host();
@@ -1384,13 +1367,9 @@ fn write_database(
             database.lints.push(database::Lint { name, diagnostics });
         }
     }
-    for test in &commands {
-        let command = test.command.iter().map(String::as_str).collect();
-        let tags = test.tags.iter().map(String::as_str).collect();
-        let inputs = test.inputs.iter().map(String::as_str).collect();
-        let (name, libtest, on_workers) = (test.name, test.libtest, test.on_workers);
-        let env = test.env.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
-        database.tests.push(database::Test { name, command, libtest, tags, on_workers, inputs, env });
+    for custom in project.customs.iter().filter(|custom| custom.is_test()) {
+        let tags = custom.tags.iter().map(String::as_str).collect();
+        database.tests.push(database::Test { name: &custom.name, libtest: custom.is_libtest(), tags });
     }
     for (name, path, target, runner, default) in &programs {
         let runner = runner.iter().map(String::as_str).collect();
@@ -1612,7 +1591,7 @@ fn metadata_emit(outdir: &Path, output: &Path, lint: bool) -> [String; 4] {
     ]
 }
 
-/// Returns the first output of the edge which runs a test here, which is no file, as the test writes none.
+/// Returns the first output of the edge which runs a test, which is no file, as the test writes none.
 pub fn test_run(name: &str) -> String {
     format!("test-run/{name}")
 }
@@ -1650,7 +1629,8 @@ fn placement(unit: &Unit, units: &[Unit], project: &Project, linked: bool) -> ri
     });
     let any_host = unit.kind != Kind::ProcMacro && !uses_proc_macro && (!linked || lld);
     let builtin = project.target(&unit.target).is_some_and(|target| !target.is_custom());
-    rig::Placement { any_host, target: builtin.then(|| unit.target.clone()), tags: unit.worker_tags.clone() }
+    let target = builtin.then(|| unit.target.clone());
+    rig::Placement { any_host, target, tags: unit.worker_tags.clone(), runs: None }
 }
 
 /// The environment variable through which a command which links is given its linker's identity. rustc does not read

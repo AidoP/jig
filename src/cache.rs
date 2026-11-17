@@ -223,8 +223,8 @@ impl Settings {
         }
         Ok(Some(cache.with_remote(std::sync::Arc::new(remote))))
     }
-    /// Returns the workers. Each is connected to when a build first sends it an edge. Over TCP, the client proves
-    /// itself with the token of `cache/token-file`, if there is one.
+    /// Returns the workers, each named as it is given. Each is connected to when a build first sends it an edge. Over
+    /// TCP, the client proves itself with the token of `cache/token-file`, if there is one.
     pub fn workers(&self) -> Result<Vec<std::sync::Arc<rig::remote::Remote>>, Error> {
         let token = match &self.token_file {
             Some(path) if self.workers.iter().any(|worker| worker.starts_with("tcp://")) => Some(read_token(path)?),
@@ -240,7 +240,7 @@ impl Settings {
                 })
             },
             Transport::Http(_) => None,
-        });
+        }.map(|remote| remote.named(worker)));
         Ok(workers.map(std::sync::Arc::new).collect())
     }
     /// Collect the cache after a build, if it was last collected a day ago or longer.
