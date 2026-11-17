@@ -4,14 +4,15 @@ A plan for the places where jig's commands, statements and settings disagree wit
 would expect of a build system which jig does not have yet. It comes from a survey of the commands, of the attributes
 each statement takes, and of the settings, in November 2026. **Phases 1a, 2, 3, 4 and 5 are done**, and the rest is not started.
 
-The phases are ordered by how much each is worth against what it costs, and each stands on its own. A phase which
-changes what a project writes says how what is written today keeps working.
+The phases are ordered by how much each is worth against what it costs, and each stands on its own. jig is not
+stable yet, so a phase which changes what a project writes, or the variables it reads, replaces the old form rather
+than keeping it for a while beside the new one.
 
 ## Phase 1: tests
 
 `jig test` builds what the tests need with rig, then runs each test itself, one at a time. So a test which hangs
-hangs `jig test`, one test of a crate's harness cannot be run alone, every test runs again whether or not anything
-it reads changed, and a machine with many cores runs one test at a time.
+hangs `jig test`, one test of a crate's harness cannot be run alone, and a machine with many cores runs one test at a
+time.
 
 ### 1a: jobs, a timeout and arguments (done)
 
@@ -38,23 +39,19 @@ tests which run here, not to those sent to workers.
   the test started too. rig's process groups are private to it, behind `rig::sys`, so this needs a small public
   interface in rig for running a program with a timeout, which a worker would then use for a test it is sent.
 
-### 1c: tests as edges
+### 1c: tests as edges (dropped)
 
-A test becomes an edge of rig's graph, whose output is a file of what it printed and how it ended, as a check's
-diagnostics are a file. This is the larger change, and replaces the test runner's own scheduling, and its own way of
-sending a test to a worker.
+This was to make each test an edge of rig's graph, so that a test whose inputs had not changed did not run again,
+and `jig test` showed what it printed when it last ran. It is dropped: tests are generally not pure, as they read
+files, the clock, the network and the machine beyond what they declare, so their results are not cached, and a test
+runs every time it is asked for. `jig test` keeps running the tests itself.
 
-- A test whose inputs have not changed does not run again, and `jig test` shows what it printed when it last ran.
-  `jig test --rerun` runs them regardless. A test reads what its command reads, which rig cannot see, so only a test
-  marked `cache`, or a crate's harness, whose inputs are those of its crate and its `depends`, is skipped this way.
-- Tests run in rig's jobs, share the jobserver with what they start, and are sent to workers by their placement,
-  as any cached edge is, in place of `Workers` in `src/test_runner.rs`.
-- A test which fails must not fail the build of the tests after it, so `jig test` builds with `-k 0`, and a failed
-  test's edge still writes its output, with the failure recorded in it rather than in its exit status.
-- An edge needs a timeout, which is 1b's interface, used by `rig::exec`.
+The rest of what it would have given does not need tests to be edges, and is left until a project needs it:
 
-Open questions: whether a skipped test is shown as `ok (cached)`, as a cached build edge is counted, and how
-`--timings` counts it.
+- Sharing the jobs of the build with what the tests start, which `jig test` can do by creating or joining a
+  jobserver itself, as rig does.
+- Sending tests to workers by the placement of their crates, as cached edges are, rather than by their targets, as
+  `Workers` in `src/test_runner.rs` does.
 
 ## Phase 2: the command line (done)
 
@@ -106,8 +103,8 @@ it builds first, how many operands it takes, and whether it passes arguments on.
 How it was done: `Project::running_attribute`, in `src/project/running.rs`, takes the five attributes into a
 `Running`, which crates, custom commands, tests and the statements of C call. Beside the plan:
 
-- `pass-env` is left out of a test, which takes only `env`: a test runs here with everything `jig test` inherits,
-  and is not cached, so which variables it reads means nothing until tests are edges, in 1c, which should add it.
+- `pass-env` is left out of a test, which takes only `env`: a test runs with everything `jig test` inherits, and is
+  never cached, so which variables it reads means nothing.
 - The statements of C keep hashing their files by default, whatever the `change-detection` property, as they did,
   and their own `change-detection` replaces that. A cached edge is hashed whatever it says, as before.
 - A static library linked as its objects is archived when it is installed, as there is otherwise no archive.
@@ -147,27 +144,24 @@ How it was done: a custom command's `CommandEdge`, in `src/project/customs.rs`, 
 
 - The settings of the cache are `cache/dir`, `cache/size`, `cache/remote`, `cache/push` and `cache/token-file`, but
   `workers`, `workers-only` and `download` beside them have no prefix. They become `workers/list`, `workers/only`
-  and `workers/download`, and the old names stay as properties which set the new ones, with a note,
-  `renamed-property`, for a release, before they are removed.
-- `JIG_REMOTE_CACHE_TOKEN_FILE` overrides `cache/token-file`, which is the only one of them without a variable.
-- The variables are named after their properties, `JIG_CACHE_DIR` and `JIG_CACHE_REMOTE`, and `JIG_CACHE` and
-  `JIG_REMOTE_CACHE` are still read.
+  and `workers/download`.
+- `cache/token-file` is the only one of them without a variable, and gets one.
+- The variables are named after their properties, such as `JIG_CACHE_DIR` and `JIG_CACHE_REMOTE`.
 - What `jig help` and the properties' own descriptions say of `cache/remote` and `cache/dir` matches the book, which
   has the `tcp://` and `http://` forms and the directory on Windows.
 - A size, remote, worker or `download` which is not valid is a diagnostic where the property was set, when it was
   set by the configuration rather than by a variable.
 
-How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its variables, and `SETTINGS` lists them.
-`Project::set_property` sets a renamed property by its new name, with the note, and checks a setting's value as it
-checks `change-detection`'s, with the error `invalid-setting`. Beside the plan:
+How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its variable, and `SETTINGS` lists them.
+`Project::set_property` checks a setting's value as it checks `change-detection`'s, with the error
+`invalid-setting`. Beside the plan:
 
-- Every variable follows one rule, `JIG_` and the property's name in capitals with `_` for `/` and `-`, so the token
-  file's is `JIG_CACHE_TOKEN_FILE`, rather than `JIG_REMOTE_CACHE_TOKEN_FILE`, and the others are `JIG_CACHE_PUSH`,
-  `JIG_WORKERS_LIST` and `JIG_WORKERS_DOWNLOAD`. An old variable is read only when the new one is not set, so the
-  configuration depends on it only then, and is read without a note, as nothing shows where a variable was set.
-- The old names of the properties are not declared. Setting one sets the new property, and reading one reads it, so
-  `defined(download)` and `{workers}` still work. A project which declares a property of an old name itself keeps
-  it as its own.
+- Every variable follows one rule, `JIG_` and the property's name in capitals with `_` for `/` and `-`, so they are
+  `JIG_CACHE_DIR`, `JIG_CACHE_SIZE`, `JIG_CACHE_REMOTE`, `JIG_CACHE_PUSH`, `JIG_CACHE_TOKEN_FILE`,
+  `JIG_WORKERS_LIST`, `JIG_WORKERS_ONLY` and `JIG_WORKERS_DOWNLOAD`.
+- The old names of the properties and the variables are gone, as jig is not stable yet: `JIG_CACHE`,
+  `JIG_REMOTE_CACHE`, `JIG_REMOTE_CACHE_PUSH`, `JIG_WORKERS` and `JIG_DOWNLOAD` are no longer read, and setting
+  `workers`, `workers-only` or `download` is the error `undeclared-property`.
 - A value is checked where it is set, rather than once the configuration ends, so a value which is replaced later is
   still reported. The errors of a variable's value are those of before, which do not name the variable.
 - jig's own tests use the new variables, so that a developer's `JIG_CACHE_DIR` does not replace the tests' cache.
