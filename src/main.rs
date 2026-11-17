@@ -72,6 +72,9 @@ commands:
                          commands have failed, `0` for any, or showing what would run, and why, with `-n`, the
                          commands rather than their descriptions with `-v`, or only what they print with `-q` or
                          `--quiet`
+    clean [<target> ...] remove what the build wrote, or what builds the targets given and what they are built from,
+                         by the outputs of the graph, so that it is built again, leaving the graph and what the build
+                         did not write
     test [-v] [-j <jobs>] [--timeout <seconds>] [--all] [--tag <tag> ...] [<name> ...] [-- <argument> ...]
                          build and run the tests without tags and those with a tag in `test-tags`, or only those named
                          or tagged with `--tag`, or all of them with `--all`, where `-v` or `--verbose` shows the
@@ -170,6 +173,16 @@ fn run(args: std::env::ArgsOs) -> Result<std::process::ExitCode, Error> {
             let request = rig_builder::Request { targets: &targets, build: args.build()?, ..Default::default() };
             project.build(&request).map(|()| ExitCode::SUCCESS)
         },
+        "clean" => {
+            // what the graph which was last generated builds, without configuring the project again first
+            let project = configured::Configured::locate()?;
+            let targets: Vec<String> = args.operands.iter().map(|target| rig_graph::path_string(Path::new(target))).collect();
+            let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+            let cleaned = project.builder().clean(&targets)?;
+            let plural = if cleaned.files == 1 { "" } else { "s" };
+            println!("removed {} file{plural}", cleaned.files);
+            Ok(ExitCode::SUCCESS)
+        },
         "check" => {
             let Some(label) = args.operands.first() else {
                 return Err(Error::MissingArg("label"));
@@ -256,9 +269,10 @@ const fn spec(name: &'static str, options: &'static [Opt], builds: bool, operand
 }
 
 /// Every command's [`Spec`], but for `jig build --proxy`, which the wrappers it installs run.
-const SPECS: [Spec; 14] = [
+const SPECS: [Spec; 15] = [
     spec("generate", &[], false, Some(1)),
     spec("build", &[switch("dry-run", Some('n')), VERBOSE], true, None),
+    spec("clean", &[], false, None),
     spec("check", &[], false, Some(1)),
     Spec { passes_on: true, ..spec("test", &[VERBOSE, switch("all", None), TAG, valued("timeout", None, "seconds")], true, None) },
     Spec { passes_on: true, ..spec("run", &[], true, Some(1)) },

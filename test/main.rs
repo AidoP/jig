@@ -8281,3 +8281,41 @@ fn other_jig_warning() {
         }
     }
 }
+
+#[test]
+fn clean_removes_what_was_built() {
+    let project = Project::new("clean", &[
+        ("Jig", "crate util 'util.rs'\ncrate app 'app.rs'\n    crate-type 'bin'\n    use util\ncrate other 'other.rs'\n"),
+        ("util.rs", "pub fn f() {}\n"),
+        ("app.rs", "fn main() { util::f() }\n"),
+        ("other.rs", ""),
+    ]);
+    let jig = |args: &[&str]| {
+        let output = jig_command().args(args).current_dir(&project.dir).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    let (ok, output) = jig(&["build"]);
+    assert!(ok, "{output}");
+    std::fs::write(project.dir.join("build/notes"), "mine").unwrap();
+    // a target and what it is built from are built again, and nothing else
+    let host = project.host();
+    let (ok, output) = jig(&["clean", &format!("{host}/app{EXE}")]);
+    assert!(ok && output.starts_with("removed ") && output != "removed 0 files\n", "{output}");
+    let (ok, output) = jig(&["build", "-n"]);
+    assert!(ok, "{output}");
+    assert_contains(&output, &format!("RUSTC {host}/libutil.rlib"));
+    assert!(!output.contains("libother"), "{output}");
+    // everything, which leaves the graph, so the project is not configured again, and what the build did not write
+    let (ok, output) = jig(&["clean"]);
+    assert!(ok, "{output}");
+    assert!(project.dir.join("build/graph").exists() && project.dir.join("build/notes").exists());
+    let (ok, output) = jig(&["clean"]);
+    assert!(ok && output == "removed 0 files\n", "{output}");
+    let (ok, output) = jig(&["build"]);
+    assert!(ok && !output.contains(configuring()), "{output}");
+    assert_contains(&output, &format!("RUSTC {host}/libother.rlib"));
+    let (ok, output) = jig(&["clean", "nothing"]);
+    assert!(!ok);
+    assert_contains(&output, "unknown target \"nothing\"");
+}

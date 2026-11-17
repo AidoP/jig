@@ -210,8 +210,11 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
 
 ## Phase 6: commands
 
-- `jig clean [<target> ...]`: removes what rig built, by the outputs of the graph, rather than the build directory,
-  so that what the project did not build is left, and the state forgets them.
+- `jig clean [<target> ...]` (done): removes what rig built, by the outputs of the graph, rather than the build
+  directory, so that what the project did not build is left, and the state forgets them. `rig::clean` removes the
+  outputs, depfiles and stderr files of every edge but the generators, or with targets, of the edges which build them
+  and what they are built from, and the directories left empty; `State::forget` rewrites the log without their
+  records. It uses the graph which was last generated, without configuring the project again.
 - `jig doc [--open] [<name> ...]`: builds `doc`, or `doc/<name>`, and says where the first page is.
 - `jig fmt [--check]`: runs rustfmt on the root of each crate which is edited, with the project's toolchain and
   edition, and `clang-format` on the sources of the C statements, if it is installed.
