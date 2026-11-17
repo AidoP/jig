@@ -230,7 +230,9 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
 ## Phase 7: crates
 
 - `edition <year>` on a crate, and an `edition` property, `'2024'` by default, in place of the `--edition=2024` in
-  `src/generate.rs` and in `.rust-project.json`.
+  `src/generate.rs` and in `.rust-project.json` (done). An edition is `2015`, `2018`, `2021` or `2024`, as a number
+  or a string, checked where it is set, and `jig fmt` formats each crate with its own, recorded with its root. A
+  crate's edition is readable by reference, as `app.edition`. The proxy `jig install --proxy` builds keeps its own.
 - `flags <arguments>` on a crate, for what rustc takes which is not a codegen option, such as `-l`, `-L`,
   `--check-cfg` and `-Z` on nightly.
 - `doctest` on a crate with `doc`: a test which runs `rustdoc --test`, named `<name>-doc`.

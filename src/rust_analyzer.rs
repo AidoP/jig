@@ -49,7 +49,7 @@ fn entry(unit: &Unit, units: &[Unit]) -> String {
     let mut entry = String::from("        {\n");
     let _ = writeln!(entry, "            \"display_name\": {},", string(&unit.name));
     let _ = writeln!(entry, "            \"root_module\": {},", path(&unit.root));
-    entry.push_str("            \"edition\": \"2024\",\n");
+    let _ = writeln!(entry, "            \"edition\": {},", string(&unit.edition));
     // a custom target is given to rustc as its specification
     let target = match &unit.spec {
         Some(spec) => path(spec),
