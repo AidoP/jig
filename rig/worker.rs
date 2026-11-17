@@ -47,7 +47,8 @@
 //! with its name, release, host and installed targets. Clients choose workers by them.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::cache::{Cache, Entry, Hash, Output};
 use crate::graph::Exec;
@@ -208,12 +209,16 @@ pub struct Request {
     /// The outputs it reports as it writes them, as rustc reports its metadata with JSON. The client is told of each
     /// as it is reported, before the action finishes.
     pub early: Vec<String>,
+    /// How long it may run before the worker kills it, with what it started, and it fails.
+    pub timeout: Option<Duration>,
 }
 
-/// What an action did on a worker: whether it succeeded, and its outputs and what it printed, as a cache's result.
+/// What an action did on a worker: whether it succeeded, or was killed as it ran for longer than its timeout, and
+/// its outputs and what it printed, as a cache's result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Executed {
     pub succeeded: bool,
+    pub timed_out: bool,
     pub entry: Entry,
 }
 
@@ -249,6 +254,8 @@ impl Request {
         }
         w.strs(&self.outputs);
         w.strs(&self.early);
+        // in milliseconds, at least one, as `0` is none
+        w.u32(self.timeout.map_or(0, |timeout| u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX).max(1)));
         w.0
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
@@ -261,7 +268,12 @@ impl Request {
         let (env, locating) = (pairs(&mut p)?, p.strings()?);
         let inputs = p.list(|p| Some(Input { path: p.string()?, blob: p.hash()?, executable: p.bool()? }))?;
         let (outputs, early) = (p.strings()?, p.strings()?);
-        let request = Self { identity, release, install, target, action, env, locating, inputs, outputs, early };
+        let timeout = match p.u32()? {
+            0 => None,
+            millis => Some(Duration::from_millis(u64::from(millis))),
+        };
+        let request =
+            Self { identity, release, install, target, action, env, locating, inputs, outputs, early, timeout };
         p.is_empty().then_some(request)
     }
     /// The blobs of its inputs, each once.
@@ -289,13 +301,20 @@ fn pairs(p: &mut Reader) -> Option<Vec<(String, String)>> {
 }
 
 impl Executed {
+    /// How it ended is a byte: `0` if it failed, `1` if it succeeded, and `2` if it was killed by its timeout.
     pub(crate) fn encode(&self) -> Vec<u8> {
-        [&[u8::from(self.succeeded)], crate::cache::encode_result(&self.entry).as_slice()].concat()
+        let ended = if self.timed_out { 2 } else { u8::from(self.succeeded) };
+        [&[ended], crate::cache::encode_result(&self.entry).as_slice()].concat()
     }
     pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         let mut r = Reader(bytes);
-        let succeeded = r.bool()?;
-        Some(Self { succeeded, entry: crate::cache::decode_result(r.0)? })
+        let (succeeded, timed_out) = match r.u8()? {
+            0 => (false, false),
+            1 => (true, false),
+            2 => (false, true),
+            _ => return None,
+        };
+        Some(Self { succeeded, timed_out, entry: crate::cache::decode_result(r.0)? })
     }
 }
 
@@ -313,6 +332,77 @@ pub fn ups(path: &str) -> Option<usize> {
         }
     }
     (names > 0).then_some(ups)
+}
+
+/// Returns how many `..` components begin the working directory of an action, which, unlike any other path, may be
+/// only those, as the project's root is to its build directory. Returns `None` for a directory which is not relative
+/// in that way.
+#[must_use]
+pub fn dir_ups(dir: &str) -> Option<usize> {
+    let only_ups = !dir.is_empty() && Path::new(dir).components().all(|component| matches!(component, Component::ParentDir | Component::CurDir));
+    if only_ups { Some(Path::new(dir).components().filter(|c| *c == Component::ParentDir).count()) } else { ups(dir) }
+}
+
+/// Whether a worker on a host runs what was built for a target: what was built for its own target, and what was
+/// linked statically for Linux, as `program` was, which needs no loader, on any Linux of the same architecture, such
+/// as a static binary of musl on a host of glibc.
+#[must_use]
+pub fn runs_on(host: &str, target: &str, program: &Path) -> bool {
+    host == target || runs(host, target, linked_statically(program))
+}
+
+/// Whether a worker on a host runs what was built for a target, and linked statically or not.
+fn runs(host: &str, target: &str, linked_statically: bool) -> bool {
+    let arch = |triple: &str| triple.split('-').next().map(String::from);
+    let linux = |triple: &str| triple.split('-').any(|part| part == "linux");
+    host == target || (linked_statically && linux(host) && linux(target) && arch(host) == arch(target))
+}
+
+/// Whether a file is an ELF executable which is linked statically: one without an interpreter, the dynamic loader,
+/// which runs on any kernel of its architecture, as a static PIE does, though it is relocated by itself.
+fn linked_statically(path: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| elf_without_interpreter(&bytes))
+}
+
+/// Whether bytes are an ELF executable without a program header of its interpreter, `PT_INTERP`.
+fn elf_without_interpreter(bytes: &[u8]) -> bool {
+    const PT_INTERP: u32 = 3;
+    if bytes.get(..4) != Some(b"\x7fELF") {
+        return false;
+    }
+    let (wide, little) = (bytes.get(4) == Some(&2), bytes.get(5) == Some(&1));
+    let number = |at: usize, len: usize| -> Option<u64> {
+        let field = bytes.get(at..at.checked_add(len)?)?;
+        let mut value = [0; 8];
+        if little {
+            value[..len].copy_from_slice(field);
+            Some(u64::from_le_bytes(value))
+        } else {
+            value[8 - len..].copy_from_slice(field);
+            Some(u64::from_be_bytes(value))
+        }
+    };
+    // where the program headers are, and how many and how large they are, which differ in place for 32 and 64 bits
+    let headers = if wide {
+        (number(0x20, 8), number(0x36, 2), number(0x38, 2))
+    } else {
+        (number(0x1c, 4), number(0x2a, 2), number(0x2c, 2))
+    };
+    let (Some(offset), Some(size), Some(count)) = headers else {
+        return false;
+    };
+    let Ok(offset) = usize::try_from(offset) else {
+        return false;
+    };
+    // the table of program headers is whole, so that one which is cut short is not taken as static
+    let end = offset.checked_add((count as usize).saturating_mul(size as usize));
+    if count == 0 || end.is_none_or(|end| end > bytes.len()) {
+        return false;
+    }
+    (0..count as usize).all(|index| {
+        let at = offset.saturating_add(index.saturating_mul(size as usize));
+        number(at, 4).is_some_and(|kind| kind != u64::from(PT_INTERP))
+    })
 }
 
 /// Counts the directories this process has made for actions, so that each has a new name.
@@ -405,14 +495,14 @@ impl Executor {
         let toolchain = self.toolchain(request).ok_or(Refused::Toolchain)?;
         let error = |message: String| Refused::Error(message);
         let inputs = request.inputs.iter().map(|input| input.path.as_str());
-        let mut paths: Vec<&str> = inputs.chain(request.outputs.iter().map(String::as_str)).collect();
-        if let Some(dir) = &request.action.dir {
-            paths.push(dir);
-        }
+        let paths: Vec<&str> = inputs.chain(request.outputs.iter().map(String::as_str)).collect();
+        let leads = |path: &str| error(format!("{path:?} does not lead from the build's directory"));
         let mut depth = 0;
         for path in paths {
-            let ups = ups(path).ok_or_else(|| error(format!("{path:?} does not lead from the build's directory")))?;
-            depth = depth.max(ups);
+            depth = depth.max(ups(path).ok_or_else(|| leads(path))?);
+        }
+        if let Some(dir) = &request.action.dir {
+            depth = depth.max(dir_ups(dir).ok_or_else(|| leads(dir))?);
         }
         let count = SANDBOXES.fetch_add(1, Ordering::Relaxed);
         let sandbox = Sandbox(self.root.join(format!("{}-{count}", std::process::id())));
@@ -464,7 +554,31 @@ impl Executor {
         let reports = (!request.early.is_empty()).then_some(&reported as &dyn Fn(&str));
         let environment =
             crate::exec::Environment { makeflags: None, env: &env, inherit: Some(&request.locating), reports };
-        let (outcome, printed) = crate::exec::run_command(&action, &build, false, &environment, spawned);
+        // kill the action, with what it started, once it has run for longer than its timeout
+        let (finished, wait) = std::sync::mpsc::channel::<()>();
+        let group = std::sync::Mutex::new(None);
+        let timed_out = AtomicBool::new(false);
+        let (outcome, printed) = std::thread::scope(|scope| {
+            if let Some(timeout) = request.timeout {
+                let (group, timed_out) = (&group, &timed_out);
+                scope.spawn(move || {
+                    if wait.recv_timeout(timeout) == Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                        && let Some(leader) = *group.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                    {
+                        timed_out.store(true, Ordering::SeqCst);
+                        crate::sys::signal_group(leader, crate::sys::SIGKILL);
+                    }
+                });
+            }
+            let started = |leader: u32| {
+                *group.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(leader);
+                spawned(leader);
+            };
+            let ran = crate::exec::run_command(&action, &build, false, &environment, &started);
+            drop(finished);
+            ran
+        });
+        let timed_out = timed_out.load(Ordering::SeqCst) && !outcome.succeeded();
         let mut outputs = Vec::new();
         for path in &request.outputs {
             let full = build.join(path);
@@ -478,7 +592,7 @@ impl Executor {
         }
         let printed = cache.put_bytes(&printed);
         let printed = printed.map_err(|failure| error(format!("failed to keep the output: {failure}")))?;
-        Ok(Executed { succeeded: outcome.succeeded(), entry: Entry { outputs, printed } })
+        Ok(Executed { succeeded: outcome.succeeded(), timed_out, entry: Entry { outputs, printed } })
     }
 }
 
@@ -542,12 +656,17 @@ mod tests {
             inputs: vec![Input { path: "../src/lib.rs".into(), blob, executable: true }],
             outputs: vec!["out/lib.rlib".into(), "out/lib.rmeta".into()],
             early: vec!["out/lib.rmeta".into()],
+            timeout: Some(Duration::from_millis(1500)),
         };
         assert_eq!(Request::decode(&request.encode()), Some(request.clone()));
+        let without = Request { timeout: None, ..request.clone() };
+        assert_eq!(Request::decode(&without.encode()), Some(without));
         assert_eq!(Request::decode(&request.encode()[1..]), None);
         let entry = Entry { outputs: vec![Output { path: "out".into(), blob, executable: false }], printed: blob };
-        let executed = Executed { succeeded: true, entry };
-        assert_eq!(Executed::decode(&executed.encode()), Some(executed));
+        let executed = Executed { succeeded: true, timed_out: false, entry };
+        assert_eq!(Executed::decode(&executed.encode()), Some(executed.clone()));
+        let timed_out = Executed { succeeded: false, timed_out: true, ..executed };
+        assert_eq!(Executed::decode(&timed_out.encode()), Some(timed_out));
     }
 
     #[test]
@@ -597,6 +716,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             early: Vec::new(),
+            timeout: None,
         };
         // without an installer, or a name, it is refused
         assert_eq!(executor.execute(&cache, &request), Err(Refused::Toolchain));
@@ -664,6 +784,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             early: Vec::new(),
+            timeout: None,
         };
         let printed = |request: &Request| {
             let executed = executor.execute(&cache, request).unwrap();
@@ -709,6 +830,7 @@ mod tests {
             inputs: vec![input(&cache, "../src/a.txt", "a\n"), input(&cache, "sub/b.txt", "b\n")],
             outputs: vec!["out/joined".into(), "out/unwritten".into()],
             early: Vec::new(),
+            timeout: None,
         };
         let executed = executor.execute(&cache, &request).unwrap();
         assert!(executed.succeeded);
@@ -726,6 +848,112 @@ mod tests {
         assert!(!executed.succeeded);
         assert_eq!(cache.read_blob(&executed.entry.printed).unwrap(), b"no\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn kills_an_action_which_runs_too_long() {
+        let dir = dir("timeout");
+        let cache = Cache::open(&dir.join("cache")).unwrap();
+        let executor = executor(&dir);
+        // the action starts a process of its own, which is killed with it
+        let pid = dir.join("pid");
+        let steps = vec!["spawn".to_string(), "60".into(), pid.display().to_string()];
+        let request = Request {
+            identity: "toolchain".into(),
+            release: String::new(),
+            install: String::new(),
+            target: String::new(),
+            action: crate::test_helper::exec(steps),
+            env: Vec::new(),
+            locating: vec!["PATH".into()],
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            early: Vec::new(),
+            timeout: Some(Duration::from_millis(300)),
+        };
+        let started = std::time::Instant::now();
+        let executed = executor.execute(&cache, &request).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(30), "{:?}", started.elapsed());
+        assert!(!executed.succeeded && executed.timed_out);
+        // what it spawned is gone, or dead and not yet reaped by whoever adopted it
+        let pid = std::fs::read_to_string(&pid).unwrap();
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                stat.rsplit(") ").next().is_some_and(|after| !after.starts_with('Z'))
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive());
+        // an action which finishes in time is not taken as timed out, even when it fails
+        let action = crate::test_helper::exec(crate::test_helper::words("exit 3"));
+        let executed = executor.execute(&cache, &Request { action, timeout: Some(Duration::from_secs(60)), ..request }).unwrap();
+        assert!(!executed.succeeded && !executed.timed_out);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finds_the_directories_actions_run_in() {
+        assert_eq!(dir_ups(".."), Some(1));
+        assert_eq!(dir_ups("../.."), Some(2));
+        assert_eq!(dir_ups("."), Some(0));
+        assert_eq!(dir_ups("../sub"), Some(1));
+        for dir in ["/tmp", "sub/../..", ""] {
+            assert_eq!(dir_ups(dir), None, "{dir:?}");
+        }
+    }
+
+    /// Returns the bytes of an ELF executable of 64 or 32 bits, little-endian, with program headers of these kinds.
+    fn elf(wide: bool, kinds: &[u32]) -> Vec<u8> {
+        let (header, entry) = if wide { (64, 56) } else { (52, 32) };
+        let mut bytes = vec![0; header];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = if wide { 2 } else { 1 };
+        bytes[5] = 1;
+        let (offset, size, count) = if wide { (0x20, 0x36, 0x38) } else { (0x1c, 0x2a, 0x2c) };
+        let len = if wide { 8 } else { 4 };
+        bytes[offset..offset + len].copy_from_slice(&(header as u64).to_le_bytes()[..len]);
+        bytes[size..size + 2].copy_from_slice(&(entry as u16).to_le_bytes());
+        bytes[count..count + 2].copy_from_slice(&(kinds.len() as u16).to_le_bytes());
+        for &kind in kinds {
+            let mut program = vec![0; entry];
+            program[..4].copy_from_slice(&kind.to_le_bytes());
+            bytes.extend(program);
+        }
+        bytes
+    }
+
+    #[test]
+    fn finds_what_is_linked_statically() {
+        // a program header of the loadable segment, of the dynamic section, and of the interpreter
+        let (load, dynamic, interp) = (1, 2, 3);
+        for wide in [true, false] {
+            assert!(elf_without_interpreter(&elf(wide, &[load, load])));
+            // as a static PIE has a dynamic section, but no interpreter
+            assert!(elf_without_interpreter(&elf(wide, &[load, dynamic])));
+            assert!(!elf_without_interpreter(&elf(wide, &[load, interp, dynamic])));
+        }
+        // what is not ELF, or is cut short, is not
+        assert!(!elf_without_interpreter(b"#!/bin/sh\n"));
+        assert!(!elf_without_interpreter(&elf(true, &[load])[..70]));
+        // jig itself is linked as its target is
+        let jig = std::env::current_exe().unwrap();
+        let _ = linked_statically(&jig);
+    }
+
+    #[test]
+    fn finds_which_workers_run_a_target() {
+        let (gnu, musl) = ("riscv64gc-unknown-linux-gnu", "riscv64gc-unknown-linux-musl");
+        assert!(runs(gnu, gnu, false));
+        assert!(!runs(gnu, musl, false));
+        // what is linked statically runs on any Linux of its architecture, but no other
+        assert!(runs(gnu, musl, true));
+        assert!(runs("x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu", true));
+        assert!(!runs("aarch64-unknown-linux-gnu", musl, true));
+        assert!(!runs("riscv64gc-unknown-freebsd", musl, true));
     }
 
     #[test]
@@ -751,6 +979,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             early: Vec::new(),
+            timeout: None,
         };
         let executed = executor.execute(&cache, &request).unwrap();
         assert!(executed.succeeded, "{}", String::from_utf8_lossy(&cache.read_blob(&executed.entry.printed).unwrap()));
@@ -773,6 +1002,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: vec!["out".into()],
             early: Vec::new(),
+            timeout: None,
         };
         let other = Request { identity: "other".into(), ..request.clone() };
         assert_eq!(executor.execute(&cache, &other), Err(Refused::Toolchain));
