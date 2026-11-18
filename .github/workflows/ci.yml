@@ -40,11 +40,11 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Install the toolchains
-        # the tests of custom targets use nightly as well, and those of `jig lint` use clippy
+        # the tests of custom targets use nightly as well, those of `jig lint` use clippy, and those of `jig fmt` rustfmt
         run: |
           toolchain=${{ matrix.toolchain }}
           if [ "$toolchain" = msrv ]; then toolchain=$MSRV; fi
-          rustup toolchain install "$toolchain" nightly --profile minimal --component clippy
+          rustup toolchain install "$toolchain" nightly --profile minimal --component clippy --component rustfmt
           echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
       - name: Bootstrap
         run: sh bootstrap.sh
@@ -84,9 +84,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install the toolchains
-        # the tests of custom targets use nightly as well
+        # the tests of custom targets use nightly as well, and those of `jig fmt` rustfmt
         run: |
-          rustup toolchain install stable nightly --profile minimal --component clippy
+          rustup toolchain install stable nightly --profile minimal --component clippy --component rustfmt
           echo "RUSTUP_TOOLCHAIN=stable" >> "$GITHUB_ENV"
       - name: Bootstrap
         run: sh bootstrap.sh
