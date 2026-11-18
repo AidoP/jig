@@ -8489,3 +8489,30 @@ fn doctests_run_the_examples() {
     let (passed, shown) = test(&["lib-doc", "--", "four"]);
     assert!(passed, "{shown}");
 }
+
+#[test]
+fn bench_runs_the_benchmarks() {
+    let fast = "#![cfg_attr(test, feature(test))]\n#[cfg(test)]\nextern crate test;\n\
+                #[cfg(test)]\nmod benches {\n    #[bench]\n    fn sums(b: &mut test::Bencher) { b.iter(|| (0..test::black_box(9u64)).sum::<u64>()) }\n\
+                #[bench]\n    fn other(b: &mut test::Bencher) { b.iter(|| 1) }\n    #[test]\n    fn t() {}\n}\n";
+    let project = Project::new("bench", &[("Jig", "crate fast 'fast.rs'\n    bench\ncrate plain 'plain.rs'\n"), ("fast.rs", fast), ("plain.rs", "")]);
+    let output = project.configure_with(NIGHTLY).ok();
+    // the harness is built with the options of the release profile, as the test harness is otherwise
+    let host = project.host();
+    let built = output.build(&format!("{host}/bench/fast{EXE}"));
+    assert_contains(built, " -C opt-level=3 ");
+    assert_contains(built, " --test ");
+    let bench = |args: &[&str]| {
+        let output = jig_command().arg("bench").args(args).envs(NIGHTLY.iter().copied()).current_dir(&project.dir).output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap() + &String::from_utf8(output.stderr).unwrap();
+        (output.status.success(), text)
+    };
+    // the benchmarks, but not the tests, run, filtered by the arguments
+    let (ok, shown) = bench(&["--", "sums"]);
+    assert!(ok, "{shown}");
+    assert_contains(&shown, "test benches::sums ... bench:");
+    assert!(!shown.contains("benches::other") && !shown.contains("test benches::t "), "{shown}");
+    let (ok, shown) = bench(&["plain"]);
+    assert!(!ok);
+    assert_contains(&shown, "no benchmarks named \"plain\"");
+}

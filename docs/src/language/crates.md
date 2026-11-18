@@ -73,6 +73,9 @@ A `crate` statement may be followed by indented attributes:
   the other crates. The crates for a target are documented in the same directory, so that they link to each other. It is
   documented with the options it is checked with, and again when its sources change. It is `false` by default, and
   `true` without a value
+- `bench`: build a harness of the crate's benchmarks, `<build-dir>/<target>/bench/<name>`, as its test harness is
+  built, but with the codegen options `profile/release` sets for speed, which [jig bench](../commands/bench.md) runs.
+  It is `false` by default, and only a crate for the host target has one, as `jig bench` runs it here
 - `doctest`: run the examples in the crate's documentation as a test, `<name>-doc`, with `rustdoc --test`, against the
   library, and the crates it uses, once they are built, with its edition, `cfg` and `env`, and the `tag`, `timeout` and
   `serial` of its tests. It is `false` by default, and only a library for the host target has one, as rustdoc runs

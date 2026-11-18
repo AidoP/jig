@@ -298,6 +298,8 @@ fn crate_attribute(c: &rust::Crate, attribute: &str) -> AttributeValue {
         "default" => AttributeValue::Set(Data::Bool(c.default)),
         "test" => AttributeValue::Set(Data::Bool(c.test)),
         "doc" => AttributeValue::Set(Data::Bool(c.doc)),
+        "doctest" => AttributeValue::Set(Data::Bool(c.doctest)),
+        "bench" => AttributeValue::Set(Data::Bool(c.bench)),
         "edition" => AttributeValue::Set(Data::Str(c.edition.clone())),
         "flags" => AttributeValue::Set(strings(&c.flags)),
         "use" => {
