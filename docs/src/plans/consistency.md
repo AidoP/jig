@@ -227,7 +227,7 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   which `lint` includes, so that what its sources include is built first; clang-tidy then runs on its sources each
   time, as its diagnostics are not saved, and `-D` gives it `--warnings-as-errors=*`.
 
-## Phase 7: crates
+## Phase 7: crates (done)
 
 - `edition <year>` on a crate, and an `edition` property, `'2024'` by default, in place of the `--edition=2024` in
   `src/generate.rs` and in `.rust-project.json` (done). An edition is `2015`, `2018`, `2021` or `2024`, as a number
@@ -242,7 +242,11 @@ How it was done: `Setting`, in `src/cache.rs`, is a setting's property with its 
   they use. The database marks the test as rustdoc's, so that `jig test` gives it the arguments after `--` in
   `--test-args`. A library which links C is not given its libraries yet.
 - `bench` on a crate: its harness built with the options of `profile/release`, run by `jig bench`, which is a
-  command of its own, as a benchmark is not a test which passes or fails.
+  command of its own, as a benchmark is not a test which passes or fails (done). The harness is the test harness
+  with `opt-level` 3, one codegen unit, and no debug information, debug assertions or overflow checks, but not LTO,
+  `strip` or `panic=abort`, as it links the crates built for the tests and unwinds; those crates are not built again
+  for speed. Only a crate for the host target has one. `jig bench` runs each with `--bench` and the arguments after
+  `--`, one at a time, showing what it prints as it does; `#[bench]` needs nightly, and on stable it runs nothing.
 
 ## Larger, each with a plan of its own
 

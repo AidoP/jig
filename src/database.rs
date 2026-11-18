@@ -12,7 +12,7 @@
 //!
 //! The database is the magic bytes and the format version, followed by the fields of [`Database`] in the order
 //! [`write`] writes them, and then the sections: the flychecks, the tests, the lints, the documentation,
-//! the sources clang-tidy checks, the programs and the installed files. A section is the number of its records followed by each record.
+//! the sources clang-tidy checks, the benchmarks, the programs and the installed files. A section is the number of its records followed by each record.
 
 use std::io::Write;
 
@@ -24,7 +24,7 @@ pub const PATH: &str = ".jig";
 const MAGIC: &[u8; 4] = b"JIGD";
 /// The version of the format. It must change whenever the version of rig's graph format does: a project is
 /// configured again when its database is of another version, which also generates a graph of the new version.
-const VERSION: u32 = 39;
+const VERSION: u32 = 40;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Database<'a> {
@@ -89,6 +89,7 @@ pub struct Database<'a> {
     pub lints: Vec<Lint<'a>>,
     pub docs: Vec<Doc<'a>>,
     pub tidies: Vec<Tidy<'a>>,
+    pub benches: Vec<Bench<'a>>,
     pub programs: Vec<Program<'a>>,
     pub installs: Vec<Install<'a>>,
 }
@@ -134,6 +135,17 @@ pub struct Tidy<'a> {
     pub target: &'a str,
     /// Its sources of C and C++, relative to the project root.
     pub sources: Vec<&'a str>,
+}
+
+/// The benchmarks of a crate, a harness which `jig bench` builds and runs with `--bench`.
+#[derive(Debug, PartialEq)]
+pub struct Bench<'a> {
+    /// The name of the crate, which is for the host target.
+    pub name: &'a str,
+    /// The harness, relative to the project root.
+    pub path: &'a str,
+    /// The harness as the graph has it, which is the target to build.
+    pub target: &'a str,
 }
 
 /// The documentation of a crate by rustdoc, which `jig doc` builds and shows the first page of.
@@ -266,6 +278,12 @@ pub fn write(out: &mut dyn Write, database: &Database) -> std::io::Result<()> {
         w.str(tidy.target);
         w.strs(&tidy.sources);
     }
+    w.len(database.benches.len());
+    for bench in &database.benches {
+        w.str(bench.name);
+        w.str(bench.path);
+        w.str(bench.target);
+    }
     w.len(database.programs.len());
     for program in &database.programs {
         w.str(program.name);
@@ -344,6 +362,9 @@ fn parse(bytes: &[u8]) -> Option<Database<'_>> {
     }
     for _ in 0..r.u32()? {
         database.tidies.push(Tidy { name: r.str()?, checks: r.str()?, target: r.str()?, sources: r.strs()? });
+    }
+    for _ in 0..r.u32()? {
+        database.benches.push(Bench { name: r.str()?, path: r.str()?, target: r.str()? });
     }
     for _ in 0..r.u32()? {
         let (name, path, target, runner, default) = (r.str()?, r.str()?, r.str()?, r.strs()?, flag(&mut r)?);
@@ -426,6 +447,7 @@ mod tests {
             ],
             lints: vec![Lint { name: "app@riscv64", diagnostics: "build/riscv64/lint/app.txt" }],
             docs: vec![Doc { name: "app", index: "build/x86_64/doc/app/index.html" }],
+            benches: vec![Bench { name: "app", path: "build/x86_64/bench/app", target: "x86_64/bench/app" }],
             tidies: vec![Tidy { name: "codec", checks: "-*,bugprone-*", target: "tidy/codec", sources: vec!["c/codec.c"] }],
             programs: vec![
                 Program { name: "app", path: "build/host/app", target: "host/app", runner: vec![], default: true },

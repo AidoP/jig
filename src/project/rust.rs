@@ -23,6 +23,9 @@ pub struct Crate {
     pub test: bool,
     /// Whether the crate is documented by rustdoc, in `<build-dir>/<target>/doc/<name>`.
     pub doc: bool,
+    /// Whether a harness of its tests and benchmarks is built with the options of `profile/release`, which `jig bench`
+    /// runs, as it only is for a crate for the host target.
+    pub bench: bool,
     /// Whether the examples in its documentation are run as a test, `<name>-doc`, which they only are for a library
     /// for the host target.
     pub doctest: bool,
@@ -143,6 +146,10 @@ impl Crate {
     /// unwind.
     pub fn unwind_output(&self) -> PathBuf {
         self.dir.join("unwind").join(format!("lib{}.rlib", self.name))
+    }
+    /// The harness of the crate's benchmarks, built with `--test` and the options of `profile/release`.
+    pub fn bench_harness(&self) -> PathBuf {
+        self.dir.join("bench").join(format!("{}{}", self.name, self.exe_suffix()))
     }
     /// The test harness of the crate, built with `--test`.
     pub fn test_harness(&self) -> PathBuf {

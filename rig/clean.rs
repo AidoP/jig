@@ -157,9 +157,17 @@ mod tests {
         }
         assert!(!dir.join("obj/deep").exists());
         assert!(state.get("graph").is_some());
-        // which the state remembers once it is opened again
+        // which the state remembers once it is opened again, which may wait for a process another test is starting,
+        // which holds a copy of the lock until it runs its program
         drop(state);
-        let state = State::open(&dir.join(".rig")).unwrap();
+        let reopen = || State::open(&dir.join(".rig"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut state = reopen();
+        while matches!(state, Err(Error::Locked(_))) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            state = reopen();
+        }
+        let state = state.unwrap();
         assert_eq!(state.len(), 1);
         assert!(matches!(clean(&graph, &mut { state }, &dir, &["nothing"]), Err(Error::UnknownTarget(_))));
         let _ = std::fs::remove_dir_all(&dir);

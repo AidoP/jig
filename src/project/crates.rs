@@ -74,6 +74,7 @@ impl Project {
         let mut tested = Tested::All(false);
         let mut doc = false;
         let mut doctest = false;
+        let mut bench = false;
         let mut tags = Vec::new();
         // how its test runs, from `timeout` and `serial`
         let mut test_run = self.default_test_run(parser.file);
@@ -124,6 +125,11 @@ impl Project {
                 "doc" => {
                     if let Some(value) = self.flag(&attribute.operand()) {
                         doc = value;
+                    }
+                },
+                "bench" => {
+                    if let Some(value) = self.flag(&attribute.operand()) {
+                        bench = value;
                     }
                 },
                 "doctest" => {
@@ -283,6 +289,7 @@ impl Project {
                 Entry::Vacant(entry) => {
                     let dir = build_dir.join(&target);
                     let doctest = doctest && kind == rust::Kind::Lib && target == host;
+                    let bench = bench && kind != rust::Kind::ProcMacro && target == host;
                     let c = entry.insert(rust::Crate {
                         name: name.clone(),
                         name_span: span,
@@ -298,6 +305,7 @@ impl Project {
                         test,
                         doc,
                         doctest,
+                        bench,
                         uses: uses.clone(),
                         depends: depends.clone(),
                         cfg: cfg.clone(),

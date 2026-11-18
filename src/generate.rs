@@ -195,6 +195,8 @@ pub struct Unit {
     pub dir: PathBuf,
     /// The name of the crate's documentation, `doc/<name>`, if it is documented.
     pub doc: Option<String>,
+    /// The harness of the crate's benchmarks, if it has them.
+    pub bench: Option<PathBuf>,
     /// Whether the crate is built by `jig build` without targets, which `jig run` prefers.
     pub default: bool,
     /// The name of the crate's lint, `lint/<name>`, if it is edited, so that it is linted.
@@ -390,6 +392,7 @@ fn units(project: &Project, crates: &[Crate], sysroot: &str, build_dir: &Path) -
             cached: c.cached,
             dir: c.dir.clone(),
             doc: c.doc.then(|| c.short_name(&host)),
+            bench: c.bench.then(|| c.bench_harness()),
             default: c.default,
             lint: member.then(|| c.short_name(&host)),
             lints: c.lints.clone(),
@@ -598,7 +601,7 @@ fn write_graph(
         // Only a crate which links, as a program or a test harness does, needs the libraries of the crates it uses
         // through others: a library is compiled against metadata alone. Finding them for every library would take
         // time quadratic in the length of a chain of crates.
-        let needs_libraries = c.kind != Kind::Lib || c.test;
+        let needs_libraries = c.kind != Kind::Lib || c.test || c.bench;
         let transitive = if needs_libraries { transitive_libraries(crates, units, index) } else { Vec::new() };
         let native = NativeLinks::new(&own_libraries, &transitive, index, at);
         let mut flags = flags;
@@ -727,6 +730,33 @@ fn write_graph(
                 placement: self::placement(unit, units, project, true),
                 ..Default::default()
             })?;
+        }
+        // the benchmarks are the tests' harness, built as `profile/release` builds, but unwinding, as a harness must
+        if c.bench {
+            let tmpdir = Path::new("tmp").join(&c.target).join("bench").join(&c.name);
+            let release = bench_codegen(&codegen);
+            let mut bench_flags = link(&flags_with(&harness_externs, &release, true));
+            bench_flags.extend(&native.linked);
+            bench_flags.plain(&["--test"]);
+            let bench = at.path(&c.bench_harness());
+            let mut exec = rust.exec("rustc", &rustc_emit(&tmpdir, &bench), &bench_flags, None);
+            exec.env.extend(linker_env(&release, &c.target, project));
+            graph.edge(Edge {
+                description: describe("RUSTC", &bench),
+                outputs: &[&bench],
+                inputs: &linked_inputs,
+                dependencies: &harness_link_deps,
+                after: &as_paths(&depends),
+                depfile: Some(&depfile_of(&bench)),
+                discover: Some(discovery(&exec)),
+                exec,
+                hashed,
+                pass_env: rust.pass_env,
+                cache,
+                placement: self::placement(unit, units, project, true),
+                ..Default::default()
+            })?;
+            graph.alias(&Path::new("bench").join(&c.name), &[&bench])?;
         }
         if unwind[index] {
             let tmpdir = Path::new("tmp").join(&c.target).join("unwind").join(&c.name);
@@ -1363,6 +1393,11 @@ fn write_database(
             c_sources.push(source);
         }
     }
+    // what `jig bench` runs, by name
+    let benches: Vec<(String, String, String)> = units.iter().filter_map(|unit| {
+        let harness = unit.bench.as_ref()?;
+        Some((unit.name.clone(), harness.display().to_string(), rig_graph::path_string(&at.path(harness))))
+    }).collect();
     // what `jig lint` checks with clang-tidy, by name, with its checks, what is built first, and its sources
     let mut tidies: Vec<(String, String, String, Vec<String>)> = Vec::new();
     for library in project.natives() {
@@ -1419,6 +1454,9 @@ fn write_database(
         if let Some(name) = &unit.lint {
             database.lints.push(database::Lint { name, diagnostics });
         }
+    }
+    for (name, path, target) in &benches {
+        database.benches.push(database::Bench { name, path, target });
     }
     for (name, checks, target, sources) in &tidies {
         let sources = sources.iter().map(String::as_str).collect();
@@ -1501,7 +1539,7 @@ fn unwind_copies(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
     let needs_copy = |index: &&usize| aborts[**index];
     let mut stack: Vec<usize> = Vec::new();
     for (c, unit) in crates.iter().zip(units) {
-        if c.test || c.kind == Kind::ProcMacro {
+        if c.test || c.bench || c.kind == Kind::ProcMacro {
             stack.extend(unit.deps.iter().filter(needs_copy));
         }
     }
@@ -1566,6 +1604,18 @@ fn library_aborts(crates: &[Crate], units: &[Unit]) -> Vec<bool> {
 
 /// Returns the codegen options of a crate for its test harness: the same, without `panic`. On stable rustc the
 /// harness must unwind, as it catches the panic of each test.
+/// Returns the codegen options of a crate's benchmarks: those of its test harness, with those `profile/release` sets
+/// for speed in place of its own, but for `lto` and `strip`, which the libraries it links were not built for, and
+/// `panic`, as the harness unwinds.
+fn bench_codegen(codegen: &[String]) -> Vec<String> {
+    const RELEASE: [&str; 5] =
+        ["opt-level=3", "codegen-units=1", "debuginfo=0", "debug-assertions=off", "overflow-checks=off"];
+    let replaced = |option: &&String| RELEASE.iter().any(|release| release.split('=').next() == option.split('=').next());
+    let mut options: Vec<String> = harness_codegen(codegen).iter().filter(|option| !replaced(option)).cloned().collect();
+    options.extend(RELEASE.map(String::from));
+    options
+}
+
 fn harness_codegen(codegen: &[String]) -> Vec<String> {
     codegen.iter().filter(|option| !option.starts_with("panic=")).cloned().collect()
 }
