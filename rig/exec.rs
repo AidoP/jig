@@ -2287,10 +2287,26 @@ pub(crate) struct Environment<'a> {
 ///
 /// A relative path is relative to the action's working directory, `working`. Unix resolves it from the directory the
 /// program starts in, so it is returned as it is. Windows, selected by `windows`, resolves it from rig's own
-/// directory, so there it is joined to `working`.
+/// directory, so there it is joined to `working`, without the `.` and `..` the join leaves, which Windows removes by
+/// their names alone. The program then sees the path it was started by as it would have from its own directory, as a
+/// test which finds files beside itself does.
 fn program_from(program: &str, working: &Path, windows: bool) -> std::path::PathBuf {
+    use std::path::Component;
     let path = Path::new(program);
-    if windows && path.is_relative() && path.components().count() > 1 { working.join(path) } else { path.to_path_buf() }
+    if !(windows && path.is_relative() && path.components().count() > 1) {
+        return path.to_path_buf();
+    }
+    let mut joined = std::path::PathBuf::new();
+    for component in working.join(path).components() {
+        match component {
+            Component::CurDir => (),
+            Component::ParentDir if matches!(joined.components().next_back(), Some(Component::Normal(_))) => {
+                joined.pop();
+            },
+            component => joined.push(component),
+        }
+    }
+    joined
 }
 
 /// Run an action, and return how it finished and its output, stdout and stderr together. `spawned` is called with
@@ -3051,9 +3067,16 @@ mod tests {
         // found in `PATH`
         let working = Path::new("build").join("sub");
         let tool = Path::new("..").join("tools").join("cc.exe");
-        assert_eq!(program_from(&tool.display().to_string(), &working, true), working.join(&tool));
+        let found = Path::new("build").join("tools").join("cc.exe");
+        assert_eq!(program_from(&tool.display().to_string(), &working, true), found);
         assert_eq!(program_from(&tool.display().to_string(), &working, false), tool);
         assert_eq!(program_from("cc", &working, true), Path::new("cc"));
+        // as Windows resolves it, by the names alone, as a test which runs from above the build directory is
+        let harness = Path::new(".").join("build").join("test").join("app.exe");
+        let from_root = Path::new("build").join("..").join(&harness);
+        let found = Path::new("build").join("test").join("app.exe");
+        assert_eq!(program_from(&harness.display().to_string(), &Path::new("build").join(".."), true), found);
+        assert_eq!(program_from(&from_root.display().to_string(), Path::new("."), true), found);
         let absolute = std::env::temp_dir().join("cc.exe");
         assert_eq!(program_from(&absolute.display().to_string(), &working, true), absolute);
     }

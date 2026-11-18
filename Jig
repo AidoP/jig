@@ -49,6 +49,9 @@ target {target}
 @if {target}.has-std
 crate rig 'rig/lib.rs'
     test {target}.test
+    # its tests of workers take a sleep for an order, which another test running beside them can upset, until the plan
+    # of flaky tests makes them wait for each other, so nothing else runs beside them
+    serial
 
 @for target in targets
 @if {target}.has-std
