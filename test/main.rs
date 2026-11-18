@@ -8345,7 +8345,9 @@ fn doc_documents_crates_and_shows_where() {
     let output = jig_command().arg("doc").current_dir(project.dir.join("sub")).output().unwrap();
     let shown = String::from_utf8(output.stdout).unwrap();
     assert!(output.status.success(), "{shown}");
-    assert_contains(&shown, &format!("app: {}", project.dir.join(format!("build/{host}/doc/app/index.html")).display()));
+    // with the separators of the platform, which `slashed` takes as `/`
+    let page = project.dir.join(format!("build/{host}/doc/app/index.html"));
+    assert_contains(&slashed(&shown), &slashed(&format!("app: {}", page.display())));
     // a crate without `doc` is not one to document
     let (ok, output) = jig(&["doc", "plain"]);
     assert!(!ok);
