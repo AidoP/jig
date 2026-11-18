@@ -61,6 +61,8 @@ crate jig 'src/main.rs'
     env [JIG_VERSION: jig-version]
     # where the tests of the target can run
     test {target}.test
+    # its unit tests include benchmarks of how the time of configuring scales, so nothing else runs beside them
+    serial
     install target == release-target
     default target == release-target
 
