@@ -40,7 +40,7 @@ jobs:
             echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Install the toolchains
-        # the tests of custom targets use nightly as well, those of `jig lint` use clippy, and those of `jig fmt` rustfmt
+        # the tests of custom targets use nightly as well, those of `jig lint` clippy, and those of `jig fmt` rustfmt
         run: |
           toolchain=${{ matrix.toolchain }}
           if [ "$toolchain" = msrv ]; then toolchain=$MSRV; fi
